@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Go tests and vet
+        run: |
+          go test ./...
+          go vet ./...
+      - name: React production build
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Docker image build
+        run: docker build --build-arg VERSION=ci --build-arg COMMIT="$GITHUB_SHA" --build-arg BUILT_AT=ci -t seaton:ci .
