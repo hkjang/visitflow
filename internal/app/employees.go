@@ -208,15 +208,3 @@ func (s *Server) listHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }
-
-func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	counts := map[string]int{}
-	queries := map[string]string{"unassignedEmployees": `SELECT count(*) FROM employees e WHERE e.status='active' AND NOT EXISTS(SELECT 1 FROM seat_assignments a WHERE a.employee_id=e.id AND a.ended_at IS NULL)`, "unusedSeats": `SELECT count(*) FROM seats s JOIN floor_maps m ON m.id=s.floor_map_id WHERE m.is_active AND s.status='available'`, "retiredAssignments": `SELECT count(*) FROM seat_assignments a JOIN employees e ON e.id=a.employee_id WHERE a.ended_at IS NULL AND e.status='retired'`, "organizationMismatch": `SELECT count(*) FROM seat_assignments a JOIN employees e ON e.id=a.employee_id JOIN seats s ON s.id=a.seat_id WHERE a.ended_at IS NULL AND s.organization_id IS NOT NULL AND e.organization_id IS DISTINCT FROM s.organization_id`, "lowConfidenceSeats": `SELECT count(*) FROM seats s JOIN floor_maps m ON m.id=s.floor_map_id WHERE m.is_active AND s.confidence IS NOT NULL AND s.confidence < 0.8`}
-	for key, q := range queries {
-		var count int
-		_ = s.db.QueryRow(r.Context(), q).Scan(&count)
-		counts[key] = count
-	}
-	counts["actionRequired"] = counts["unassignedEmployees"] + counts["retiredAssignments"] + counts["organizationMismatch"] + counts["lowConfidenceSeats"]
-	writeJSON(w, 200, counts)
-}

@@ -196,6 +196,50 @@ func (s *Server) updateSeat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
+func (s *Server) updateSeatsBulk(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Updates []struct {
+			ID       string  `json:"id"`
+			X        float64 `json:"x"`
+			Y        float64 `json:"y"`
+			Rotation float64 `json:"rotation"`
+		} `json:"updates"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if len(in.Updates) < 1 || len(in.Updates) > 500 {
+		writeError(w, http.StatusBadRequest, "invalid_bulk_update", "한 번에 1~500개 좌석을 이동할 수 있습니다")
+		return
+	}
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	ids := make([]string, 0, len(in.Updates))
+	for _, update := range in.Updates {
+		if update.ID == "" || update.X < 0 || update.X > 1 || update.Y < 0 || update.Y > 1 || update.Rotation < -360 || update.Rotation > 360 {
+			writeError(w, http.StatusBadRequest, "invalid_position", "좌석 위치 또는 회전값을 확인하세요")
+			return
+		}
+		tag, err := tx.Exec(r.Context(), `UPDATE seats SET x=$2,y=$3,rotation=$4,updated_at=now() WHERE id=$1 AND $2+width<=1 AND $3+height<=1`, update.ID, update.X, update.Y, update.Rotation)
+		if err != nil || tag.RowsAffected() == 0 {
+			writeError(w, http.StatusBadRequest, "position_out_of_bounds", "좌석이 도면 범위를 벗어나거나 존재하지 않습니다")
+			return
+		}
+		ids = append(ids, update.ID)
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	u, _ := userFrom(r)
+	s.audit(r.Context(), u.ID, "seat.bulk_move", "seat", "", r.RemoteAddr, map[string]any{"ids": ids, "count": len(ids)})
+	writeJSON(w, http.StatusOK, map[string]int{"updated": len(ids)})
+}
+
 func (s *Server) deleteSeat(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "seatID")
 	tag, err := s.db.Exec(r.Context(), `DELETE FROM seats WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM seat_assignments a WHERE a.seat_id=seats.id AND a.ended_at IS NULL)`, id)

@@ -1,6 +1,18 @@
-# SeatOn
+<p align="center">
+  <img src="docs/favicon.svg" alt="SeatOn Logo" width="90"><br><br>
+  <h1 align="center">SeatOn</h1>
+</p>
 
-SeatOn은 사무실 도면과 직원 정보를 한 화면에 연결하는 오프라인 우선 스마트 좌석 관리 서비스다. Go API와 React 19/MUI UI를 하나의 Docker 이미지에 담았으며, 실행에 필요한 환경변수는 정확히 세 가지다.
+<p align="center">
+  <strong>사무실 도면과 직원 정보를 연결하는 오프라인 우선 스마트 좌석 & 공간 관리 플랫폼</strong><br>
+  SVG 비율좌표 좌석맵, 도면 CV 후보 파싱, 이상 좌석 자동 감지 및 Streamable MCP 지원.
+</p>
+
+<p align="center">
+  <a href="https://hkjang.github.io/seaton/">🇰🇷 홍보 페이지</a> · <a href="https://hkjang.github.io/seaton/index_en.html">🇺🇸 English Page</a> · <a href="https://github.com/sponsors/hkjang">💖 Sponsor</a>
+</p>
+
+---
 
 ## 주요 기능
 
