@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SeatOn 엔터프라이즈 중장기 로드맵 (Roadmap Plan)</title>
+    <title>VisitFlow 엔터프라이즈 중장기 로드맵 (Roadmap Plan)</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #10b981;
-            --primary-dark: #047857;
+            --primary: #8b5cf6;
+            --primary-dark: #6d28d9;
             --text-dark: #0f172a;
             --text-muted: #475569;
             --bg-light: #f8fafc;
@@ -27,7 +27,7 @@
         p { margin-bottom: 18px; font-size: 1rem; color: #334155; }
         ul { margin-bottom: 20px; padding-left: 24px; }
         li { margin-bottom: 8px; }
-        .phase-box { background: rgba(16, 185, 129, 0.04); border: 1px solid rgba(16, 185, 129, 0.2); padding: 24px; border-radius: 14px; margin-bottom: 24px; }
+        .phase-box { background: rgba(139, 92, 246, 0.04); border: 1px solid rgba(139, 92, 246, 0.2); padding: 24px; border-radius: 14px; margin-bottom: 24px; }
         .phase-title { font-weight: 700; font-size: 1.15rem; color: var(--primary-dark); margin-bottom: 12px; }
         .print-btn { display: inline-block; background: var(--primary); color: #ffffff; padding: 12px 24px; border-radius: 10px; text-decoration: none; font-weight: 700; font-size: 0.92rem; float: right; }
         .print-btn:hover { background: var(--primary-dark); }
@@ -38,40 +38,40 @@
     <div class="doc-card">
         <a href="javascript:window.print()" class="print-btn">🖨️ PDF / 인쇄하기</a>
         <div class="header-meta">
-            <h1>SeatOn 엔터프라이즈 중장기 로드맵 (Roadmap Plan)</h1>
+            <h1>VisitFlow 엔터프라이즈 중장기 로드맵 (Roadmap Plan)</h1>
             <div class="meta-grid">
                 <div class="meta-item"><strong>문서 버전:</strong> v1.0.0 ~ v3.0-VISION</div>
-                <div class="meta-item"><strong>작성일자:</strong> 2026년 8월 9일</div>
-                <div class="meta-item"><strong>대상:</strong> 경영진, CTO, 시설 관리자</div>
+                <div class="meta-item"><strong>작성일자:</strong> 2026년 8월 10일</div>
+                <div class="meta-item"><strong>대상:</strong> 경영진, CTO, 시설보안 관리자</div>
                 <div class="meta-item"><strong>분류:</strong> 공식 기술 비전 문서</div>
             </div>
         </div>
 
         <h2>1. 비전 및 발전 마일스톤 개요</h2>
-        <p>SeatOn 플랫폼은 오프라인 CV 도면 분석 및 SVG 비율좌표 스마트 좌석 관리를 시작으로, 사내 AI 데이터 에이전트와 대화형으로 오피스 공간 및 좌석을 자동 추천·예약하는 차세대 Autonomous Smart Office Platform으로 진화합니다.</p>
+        <p>VisitFlow 플랫폼은 사내 오프라인 QR 무인 체크인 및 PII 보호 관제를 시작으로, 사내 AI 데이터 에이전트와 대화형으로 방문자 출입 및 사옥 관제를 자율 수행하는 차세대 Autonomous Visitor Security Platform으로 진화합니다.</p>
 
         <div class="phase-box">
-            <div class="phase-title">Phase 1: v1.0.0 오프라인 스마트 좌석 플랫폼 구축 (완료)</div>
+            <div class="phase-title">Phase 1: v1.0.0 오프라인 방문자 관리 플랫폼 구축 (완료)</div>
             <ul>
-                <li><strong>도면 CV & SVG 엔진:</strong> PNG/PDF 도면 오프라인 CV 후보 파싱, 비율 좌표 SVG 좌석 편집기</li>
-                <li><strong>이상 좌석 감지:</strong> 미배정, 퇴직자 점유, 조직 구역 불일치 자동 감지</li>
-                <li><strong>Keycloak OIDC & Break Glass:</strong> PKCE SSO 연동 및 3대 환경변수 부트스트랩</li>
+                <li><strong>사전 예약 & QR 체크인:</strong> 사전 예약 신청, 접견자 1클릭 승인, QR 무인 체크인</li>
+                <li><strong>이상 출입 감지:</strong> 미체크아웃 초과 잔류(Overstaying), 미반납 출입증, 블랙리스트 감지</li>
+                <li><strong>PII 암호화 & Keycloak OIDC:</strong> 성명/전화번호 AES-256-GCM 암호화 및 PKCE SSO</li>
                 <li><strong>Streamable HTTP MCP:</strong> AI 에이전트를 위한 8개 이상의 ACL-aware MCP Tools 탑재</li>
             </ul>
         </div>
 
         <div class="phase-box">
-            <div class="phase-title">Phase 2: v1.5.0 멀티 사옥 도면 동기화 & 실시간 센서 연동 (2026 Q3)</div>
+            <div class="phase-title">Phase 2: v1.5.0 멀티 사옥 로비 동기화 & 안면 인식 키오스크 (2026 Q3)</div>
             <ul>
-                <li><strong>다중 건물/사옥 통합 뷰:</strong> 본사, 지사, R&D 센터 멀티 사옥 레이아웃 통합 관리</li>
-                <li><strong>IoT 모션 센서 연동:</strong> 좌석 재실 센서 데이터 실시간 바인딩</li>
+                <li><strong>다중 사옥 로비 통합 뷰:</strong> 글로벌 사옥/지사 로비 출입 데이터 실시간 동기화</li>
+                <li><strong>안면 인식 1-Touch 체크인:</strong> 선택적 안면 인식 생체 인증 파이프라인</li>
             </ul>
         </div>
 
         <div class="phase-box">
-            <div class="phase-title">Phase 3: v2.0.0 AI 자율 좌석 코파일럿 (2026 Q4)</div>
+            <div class="phase-title">Phase 3: v2.0.0 AI 자율 출입 관제 코파일럿 (2026 Q4)</div>
             <ul>
-                <li><strong>NL-to-Space Action (MCP 2.0):</strong> AI 에이전트에 자율 빈 좌석 탐색 및 자동 배정 권한 부여</li>
+                <li><strong>NL-to-Security Action (MCP 2.0):</strong> AI 에이전트에 자율 방문자 모니터링 및 경보 발송 권한 부여</li>
             </ul>
         </div>
     </div>

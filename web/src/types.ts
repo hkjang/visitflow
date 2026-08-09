@@ -1,23 +1,31 @@
 export type Role =
-  | "employee"
-  | "department_manager"
-  | "seat_manager"
-  | "system_admin";
+  | "user"
+  | "lobby"
+  | "dept_manager"
+  | "security"
+  | "auditor"
+  | "admin"
+  | "super_admin";
+
 export interface User {
   id: string;
   username: string;
   displayName: string;
   email?: string;
   employeeId?: string;
+  departmentId?: string;
+  siteScope?: string[];
   role: Role;
   source: "local" | "oidc";
   lastLoginAt?: string;
 }
+
 export interface VersionInfo {
   version: string;
   commit: string;
   builtAt?: string;
 }
+
 export interface AuthConfig {
   serviceName: string;
   companyName: string;
@@ -25,73 +33,81 @@ export interface AuthConfig {
   oidcEnabled: boolean;
   version: VersionInfo;
 }
-export interface Building {
+
+export interface Site {
   id: string;
-  name: string;
   code: string;
+  name: string;
   address: string;
+  mapUrl?: string;
+  timezone: string;
 }
-export interface Floor {
+export interface Lobby {
   id: string;
-  buildingId: string;
-  buildingName: string;
-  name: string;
+  siteId: string;
   code: string;
-  sortOrder: number;
-}
-export interface FloorMap {
-  id: string;
-  floorId: string;
-  version: string;
-  fileName: string;
-  contentType: string;
-  width?: number;
-  height?: number;
-  status: string;
-  active: boolean;
-  createdAt: string;
-  floorName: string;
-  buildingName: string;
-  seatCount?: number;
-  reviewCount?: number;
-  contentUrl: string;
-}
-export interface Seat {
-  id: string;
-  floorMapId: string;
-  seatNo: string;
-  type: string;
-  status: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  rotation: number;
-  confidence?: number;
-  organizationId?: string;
-  organizationName?: string;
-  employeeId?: string;
-  employeeNo?: string;
-  employeeName?: string;
-}
-export interface Employee {
-  id: string;
-  employeeNo: string;
   name: string;
-  email?: string;
-  organizationId?: string;
-  organizationName?: string;
-  title?: string;
-  position?: string;
-  workplace?: string;
-  status: string;
-  seatId?: string;
-  seatNo?: string;
+  instructions?: string;
 }
-export interface Organization {
+export interface Department {
   id: string;
-  externalId?: string;
   name: string;
   parentId?: string;
   color: string;
+}
+export interface ReferenceData {
+  sites: Site[];
+  lobbies: Lobby[];
+  departments: Department[];
+  hosts?: { id: string; name: string; email?: string; departmentId?: string }[];
+}
+
+export type VisitStatus =
+  | "REQUESTED"
+  | "PENDING_APPROVAL"
+  | "APPROVED"
+  | "SCHEDULED"
+  | "ARRIVED"
+  | "CHECKED_IN"
+  | "CHECKED_OUT"
+  | "CANCELLED"
+  | "REJECTED"
+  | "NO_SHOW";
+
+export interface Visit {
+  id: string;
+  requestNo: string;
+  hostUserId: string;
+  hostName: string;
+  departmentId?: string;
+  departmentName?: string;
+  siteId: string;
+  siteName: string;
+  lobbyId?: string;
+  lobbyName?: string;
+  startAt: string;
+  endAt: string;
+  purpose: string;
+  placeDetail?: string;
+  status: VisitStatus;
+  source: string;
+  visitorCount: number;
+  primaryVisitor: string;
+  company?: string;
+  createdAt: string;
+}
+
+export interface LobbyVisitor {
+  visitorVisitId: string;
+  visitId: string;
+  visitor: string;
+  company?: string;
+  host: string;
+  department?: string;
+  site: string;
+  lobby?: string;
+  startAt: string;
+  endAt: string;
+  status: VisitStatus;
+  checkedInAt?: string;
 }

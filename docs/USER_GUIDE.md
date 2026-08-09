@@ -1,53 +1,49 @@
-# SeatOn 엔터프라이즈 사용자 가이드 (User Guide & Manual)
+# VisitFlow 엔터프라이즈 사용자 가이드 (User Guide & Manual)
 
 - **문서 버전**: v1.0.0-ENTERPRISE  
-- **작성일자**: 2026년 8월 9일  
-- **대상**: 일반 임직원, 총무/인사/시설 관리자, AI MCP 클라이언트 사용자  
-- **문서 개요**: SVG 좌석맵 검색 및 선택, Drag & Drop 좌석 배정, CV 도면 후보 파싱, Personal Key 발급 및 Streamable MCP 연동 매뉴얼  
+- **작성일자**: 2026년 8월 10일  
+- **대상**: 일반 임직원(Host), 안내데스크/키오스크 사용자, AI MCP 클라이언트 사용자  
+- **문서 개요**: 사전 방문 신청 및 접견 승인, QR 무인 체크인, 보안 서약서 동의, Personal Key 발급 및 Streamable MCP 연동 매뉴얼  
 
 ---
 
-## 1. 개요 및 좌석맵 워크플로우 (SeatMap Workflow)
+## 1. 개요 및 방문자 워크플로우 (Visitor Workflow)
 
-SeatOn은 사무실 도면과 직원 정보를 비율 좌표 SVG와 오프라인 Computer Vision(CV)으로 연결하여 스마트 오피스 환경을 구축합니다.
-
----
-
-## 2. 일반 직원용 검색 및 좌석 탐색
-
-- **직원/좌석 검색**: 상단 검색창에 이름, 부서명, 좌석 번호(예: `10F-W-42`)를 입력하여 도면 상의 위치를 실시간 강조 표시합니다.
-- **좌석 뷰어**: 해상도 및 모니터 크기에 맞춰 확대/축소(Zoom) 및 드래그 팬(Pan) 기능을 제공합니다.
+VisitFlow는 사전 예약, QR 체크인, PII 암호화 및 무인 출입 관제를 완벽하게 지원하는 스마트 오피스 플랫폼입니다.
 
 ---
 
-## 3. 관리자용 도면 등록 & Drag & Drop 좌석 배정
+## 2. 사전 방문 신청 및 접견자(Host) 승인
 
-### 3.1 CV 도면 파싱 및 좌석 후보 자동 탐지
-1. 관리자 메뉴 ➔ **[도면 관리]** ➔ 신규 건축 도면(PNG, JPG, PDF) 업로드.
-2. **[CV 좌석 후보 분석]** 클릭 ➔ 오프라인 CV 파서가 좌석 사각형 위치를 자동 검출하여 파란색 가이드 라인으로 표시.
-3. 확정 버튼 클릭 시 비율 좌표 SVG 편집기에 좌석 그리드가 자동 배치됩니다.
+1. **사전 방문 신청**: 방문자가 사외 웹 링크를 통해 방문 일시, 성명, 연락처, 방문 목적, 차종/차량번호 및 반입 자산을 등록합니다.
+2. **접견자 승인**: 담당 임직원(Host)에게 알림이 전송되며, 1클릭으로 승인/반려합니다.
+3. **QR 발급**: 승인 완료 시 방문자 단말기로 셀프 체크인용 QR 코드가 발급됩니다.
 
-### 3.2 Drag & Drop 배정 및 CSV/XLSX 일괄 가져오기
-- 직원 목록 패널에서 직원을 선택 후 목표 좌석으로 Drag & Drop하여 실시간 배정.
-- 인사 CSV/XLSX 파일을 일괄 업로드하여 조직 단위 전원 자동 배정 처리.
+---
+
+## 3. 키오스크 무인 체크인 & 보안 서약서(NDA)
+
+1. **키오스크 스캔**: 사옥 로비 무인 키오스크에 발급된 QR 코드를 스캔합니다.
+2. **보안 서약 서명**: 화면에서 사내 보안 규정 및 NDA 동의 서명을 진행합니다.
+3. **출입증 발급**: 키오스크에서 임시 출입증(Access Card)이 출력/발급되며 접견자에게 "방문자 로비 도착" 알림이 발송됩니다.
 
 ---
 
 ## 4. Personal API / MCP Key 발급 및 AI 연동
 
 1. 프로필 메뉴 ➔ **`/me/keys` (개인 API/MCP 키)** 이동.
-2. **[신규 Personal Key 발급]** 클릭 ➔ `stn_7f9c8d11a2b3c4d5_xxxxxxxx` 형식 키 생성.
-3. Claude Desktop 또는 Cursor 설정 파일에 MCP 서버를 등록하여 자연어로 빈 좌석 검색:
+2. **[신규 Personal Key 발급]** 클릭 ➔ `vst_7f9c8d11a2b3c4d5_xxxxxxxx` 형식 키 생성.
+3. Claude Desktop 또는 Cursor 설정 파일에 MCP 서버를 등록하여 자연어로 방문자 현황 조회:
 
 ```json
 {
   "mcpServers": {
-    "seaton": {
+    "visitflow": {
       "command": "curl",
       "args": [
         "-X", "POST",
-        "-H", "Authorization: Bearer stn_7f9c8d11a2b3c4d5_xxxxxxxx",
-        "https://seaton.internal/mcp"
+        "-H", "Authorization: Bearer vst_7f9c8d11a2b3c4d5_xxxxxxxx",
+        "https://visitflow.internal/mcp"
       ]
     }
   }
@@ -55,7 +51,7 @@ SeatOn은 사무실 도면과 직원 정보를 비율 좌표 SVG와 오프라인
 ```
 
 ### 제공되는 핵심 MCP Tools 목록
-1. `seaton_search_seats`: 빈 좌석 및 부서별 배치 현황 파싱
-2. `seaton_get_floor_layout`: 층별 도면 및 비율 좌표 좌석 정보 조회
-3. `seaton_assign_seat`: 사용자 권한 범위 내 좌석 배정 및 이동
-4. `seaton_list_anomalies`: 이상 점유 좌석 및 퇴직자 좌석 탐지 리포트
+1. `visitflow_search_visits`: 사전 방문 예약 및 당일 입장 현황 조회
+2. `visitflow_get_active_visitors`: 사내 현재 체류 중인 방문자 수 및 로비별 현황 파악
+3. `visitflow_approve_visit`: 권한 범위 내 방문 신청 1클릭 승인/반려
+4. `visitflow_list_overstay_alerts`: 미체크아웃 초과 잔류 및 이상 출입자 리포트

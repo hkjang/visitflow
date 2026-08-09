@@ -2,8 +2,10 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type mcpRequest struct {
@@ -36,7 +38,7 @@ func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
 	}
 	switch req.Method {
 	case "initialize":
-		writeJSON(w, 200, mcpResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{"tools": map[string]any{"listChanged": false}}, "serverInfo": map[string]string{"name": "SeatOn", "version": s.version}, "instructions": "SeatOn 사내 좌석 검색·현황·관리 도구입니다. 변경 도구는 미리보기 또는 명시적 권한을 요구합니다."}})
+		writeJSON(w, 200, mcpResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{"tools": map[string]any{"listChanged": false}}, "serverInfo": map[string]string{"name": "VisitFlow", "version": s.version}, "instructions": "방문 신청부터 로비 현황·감사 통계까지 제공하는 VisitFlow MCP입니다. 개인정보는 기본 마스킹되고 REST와 동일한 사용자/부서/사업장 권한 범위가 적용됩니다."}})
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
 	case "ping":
@@ -51,12 +53,19 @@ func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
 }
 
 func mcpTools() []map[string]any {
+	stringProperty := func(description string) map[string]any {
+		return map[string]any{"type": "string", "description": description}
+	}
 	return []map[string]any{
-		{"name": "search_employees", "description": "이름, 사번, 이메일 또는 조직명으로 직원을 검색하고 현재 좌석을 반환합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]string{"type": "string", "description": "검색어"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}, "required": []string{"query"}}},
-		{"name": "list_available_seats", "description": "건물/층의 사용 가능한 좌석을 조회합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"floor_id": map[string]string{"type": "string"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 30}}}},
-		{"name": "get_floor_map", "description": "층 도면과 좌석 배치 메타데이터를 조회합니다. 이미지 원문 대신 안전한 내부 URL과 비율 좌표를 반환합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"floor_id": map[string]string{"type": "string"}}, "required": []string{"floor_id"}}},
-		{"name": "get_action_items", "description": "미배정, 퇴직자 점유, 조직 불일치 등 관리자 처리 필요 건수를 조회합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
-		{"name": "assign_seat", "description": "좌석 관리자 권한과 write 범위로 직원을 좌석에 배정합니다. 모든 변경은 감사 및 좌석 이력에 기록됩니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"employee_id": map[string]string{"type": "string"}, "seat_id": map[string]string{"type": "string"}, "reason": map[string]string{"type": "string"}}, "required": []string{"employee_id", "seat_id", "reason"}}},
+		{"name": "search_visits", "description": "권한 범위 안에서 방문번호, 회사, 담당자와 상태로 방문 일정을 검색합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": stringProperty("검색어"), "status": stringProperty("방문 상태 코드"), "period": map[string]any{"type": "string", "enum": []string{"today", "upcoming", "past"}}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}},
+		{"name": "get_today_visitors", "description": "오늘 방문 예정자를 개인정보 마스킹 상태로 조회합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}},
+		{"name": "get_current_visitors", "description": "현재 체크인 후 퇴실하지 않은 방문자를 조회합니다. 로비 또는 관리자 권한이 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "get_visit", "description": "방문 ID 또는 방문번호로 상세 내용을 조회합니다. 전화번호는 마스킹됩니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"visit_id": stringProperty("방문 ID 또는 방문번호")}, "required": []string{"visit_id"}}},
+		{"name": "create_visit", "description": "개인 방문 신청을 등록합니다. write 범위가 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"site_id": stringProperty("사업장 ID"), "lobby_id": stringProperty("로비 ID"), "start_at": stringProperty("RFC3339 시작시간"), "end_at": stringProperty("RFC3339 종료시간"), "purpose": stringProperty("방문 목적"), "visitor_name": stringProperty("방문자 이름"), "visitor_phone": stringProperty("방문자 휴대전화"), "company": stringProperty("회사명"), "consent": map[string]any{"type": "boolean"}}, "required": []string{"site_id", "start_at", "end_at", "purpose", "visitor_name", "visitor_phone", "consent"}}},
+		{"name": "cancel_visit", "description": "본인이 신청한 취소 가능한 방문을 취소하고 QR을 즉시 폐기합니다. write 범위가 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"visit_id": stringProperty("방문 ID")}, "required": []string{"visit_id"}}},
+		{"name": "search_visitor_history", "description": "회사 기준 방문 이력을 조회합니다. 이름과 전화번호는 마스킹됩니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"company": stringProperty("회사명"), "months": map[string]any{"type": "integer", "minimum": 1, "maximum": 60}}, "required": []string{"company"}}},
+		{"name": "get_lobby_status", "description": "오늘 예정·현재 방문중·퇴실·미방문 집계를 조회합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
+		{"name": "get_visit_statistics", "description": "기간 방문 통계를 조회합니다. 관리자 권한이 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"days": map[string]any{"type": "integer", "minimum": 1, "maximum": 366}}}},
 	}
 }
 
@@ -79,79 +88,119 @@ func (s *Server) mcpToolCall(w http.ResponseWriter, r *http.Request, req mcpRequ
 }
 
 func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]any) (any, error) {
+	u, _ := userFrom(r)
 	limit := intArg(args, "limit", 20, 1, 100)
+	writeAllowed := func() bool {
+		scopes, _ := r.Context().Value(apiScopesContextKey).([]string)
+		return len(scopes) == 0 || containsString(scopes, "write")
+	}
 	switch name {
-	case "search_employees":
-		q := strings.TrimSpace(stringArg(args, "query"))
-		rows, err := s.db.Query(r.Context(), `SELECT e.id,e.employee_no,e.name,COALESCE(o.name,''),COALESCE(se.seat_no,''),COALESCE(b.name,''),COALESCE(f.name,'') FROM employees e LEFT JOIN organizations o ON o.id=e.organization_id LEFT JOIN seat_assignments a ON a.employee_id=e.id AND a.ended_at IS NULL LEFT JOIN seats se ON se.id=a.seat_id LEFT JOIN floor_maps m ON m.id=se.floor_map_id LEFT JOIN floors f ON f.id=m.floor_id LEFT JOIN buildings b ON b.id=f.building_id WHERE e.status='active' AND (e.name ILIKE '%%'||$1||'%%' OR e.employee_no ILIKE '%%'||$1||'%%' OR e.email ILIKE '%%'||$1||'%%' OR o.name ILIKE '%%'||$1||'%%') ORDER BY e.name LIMIT $2`, q, limit)
+	case "search_visits":
+		items, err := s.queryVisits(r.Context(), u, stringArg(args, "status"), stringArg(args, "period"), stringArg(args, "query"), limit)
+		return map[string]any{"items": items}, err
+	case "get_today_visitors":
+		items, err := s.queryVisits(r.Context(), u, "", "today", "", limit)
+		return map[string]any{"items": items}, err
+	case "get_current_visitors":
+		if !u.CanManageLobby() && !u.CanAudit() {
+			return nil, errMCP("로비 또는 감사 권한이 필요합니다")
+		}
+		rows, err := s.db.Query(r.Context(), `SELECT vv.id,p.name_encrypted,COALESCE(p.company,''),h.display_name,si.name,vv.checked_in_at FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id JOIN sites si ON si.id=v.site_id WHERE vv.status='CHECKED_IN' ORDER BY vv.checked_in_at DESC LIMIT 200`)
 		if err != nil {
 			return nil, err
 		}
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, no, nm, org, seat, building, floor string
-			_ = rows.Scan(&id, &no, &nm, &org, &seat, &building, &floor)
-			items = append(items, map[string]any{"id": id, "employeeNo": no, "name": nm, "organization": org, "seatNo": seat, "building": building, "floor": floor})
+			var id, nameEnc, company, host, site string
+			var checked *time.Time
+			_ = rows.Scan(&id, &nameEnc, &company, &host, &site, &checked)
+			items = append(items, map[string]any{"visitorVisitId": id, "visitor": maskName(s.decryptOptional(nameEnc)), "company": company, "host": host, "site": site, "checkedInAt": checked})
 		}
-		return map[string]any{"items": items}, nil
-	case "list_available_seats":
-		floorID := stringArg(args, "floor_id")
-		rows, err := s.db.Query(r.Context(), `SELECT s.id,s.seat_no,b.name,f.name FROM seats s JOIN floor_maps m ON m.id=s.floor_map_id JOIN floors f ON f.id=m.floor_id JOIN buildings b ON b.id=f.building_id WHERE s.status='available' AND m.is_active AND ($1='' OR f.id=$1) ORDER BY b.name,f.sort_order,s.seat_no LIMIT $2`, floorID, limit)
+		return map[string]any{"items": items, "count": len(items)}, nil
+	case "get_visit":
+		id := stringArg(args, "visit_id")
+		if id == "" {
+			return nil, errMCP("visit_id는 필수입니다")
+		}
+		items, err := s.queryVisits(r.Context(), u, "", "", id, 5)
+		if err != nil || len(items) == 0 {
+			return nil, errMCP("방문을 찾을 수 없습니다")
+		}
+		participants, err := s.visitParticipants(r.Context(), items[0].ID, false)
 		if err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		items := []map[string]any{}
-		for rows.Next() {
-			var id, no, b, f string
-			_ = rows.Scan(&id, &no, &b, &f)
-			items = append(items, map[string]any{"id": id, "seatNo": no, "building": b, "floor": f})
+		for _, p := range participants {
+			p["name"] = maskName(fmt.Sprint(p["name"]))
+			delete(p, "email")
+			delete(p, "vehicle")
 		}
-		return map[string]any{"items": items}, nil
-	case "get_floor_map":
-		floorID := stringArg(args, "floor_id")
-		var mapID, version, building, floor string
-		err := s.db.QueryRow(r.Context(), `SELECT m.id,m.version,b.name,f.name FROM floor_maps m JOIN floors f ON f.id=m.floor_id JOIN buildings b ON b.id=f.building_id WHERE m.floor_id=$1 AND m.is_active`, floorID).Scan(&mapID, &version, &building, &floor)
-		if err != nil {
-			return nil, err
-		}
-		rows, err := s.db.Query(r.Context(), `SELECT s.id,s.seat_no,s.type,s.status,s.x,s.y,s.width,s.height,COALESCE(e.name,'') FROM seats s LEFT JOIN seat_assignments a ON a.seat_id=s.id AND a.ended_at IS NULL LEFT JOIN employees e ON e.id=a.employee_id WHERE s.floor_map_id=$1 ORDER BY s.seat_no`, mapID)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		items := []map[string]any{}
-		for rows.Next() {
-			var id, no, typ, status, employee string
-			var x, y, ww, hh float64
-			_ = rows.Scan(&id, &no, &typ, &status, &x, &y, &ww, &hh, &employee)
-			items = append(items, map[string]any{"id": id, "seatNo": no, "type": typ, "status": status, "x": x, "y": y, "width": ww, "height": hh, "employee": employee})
-		}
-		return map[string]any{"id": mapID, "version": version, "building": building, "floor": floor, "contentUrl": "/api/v1/floor-maps/" + mapID + "/content", "seats": items}, nil
-	case "get_action_items":
-		u, _ := userFrom(r)
-		if !u.CanManageSeats() {
-			return nil, errMCP("좌석 관리자 권한이 필요합니다")
-		}
-		return s.actionCounts(r)
-	case "assign_seat":
-		u, _ := userFrom(r)
-		if !u.CanManageSeats() {
-			return nil, errMCP("좌석 관리자 권한이 필요합니다")
-		}
-		if scopes, _ := r.Context().Value(apiScopesContextKey).([]string); len(scopes) > 0 && !containsString(scopes, "write") {
+		return map[string]any{"visit": items[0], "visitors": participants}, nil
+	case "create_visit":
+		if !writeAllowed() {
 			return nil, errMCP("write 범위가 필요합니다")
 		}
-		emp, seat, reason := stringArg(args, "employee_id"), stringArg(args, "seat_id"), stringArg(args, "reason")
-		if emp == "" || seat == "" || reason == "" {
-			return nil, errMCP("employee_id, seat_id, reason은 필수입니다")
+		start, err1 := time.Parse(time.RFC3339, stringArg(args, "start_at"))
+		end, err2 := time.Parse(time.RFC3339, stringArg(args, "end_at"))
+		consent, _ := args["consent"].(bool)
+		if err1 != nil || err2 != nil {
+			return nil, errMCP("start_at과 end_at은 RFC3339 형식이어야 합니다")
 		}
-		if err := s.performAssignment(r.Context(), u, emp, seat, reason, "mcp"); err != nil {
+		input := VisitInput{SiteID: stringArg(args, "site_id"), LobbyID: stringArg(args, "lobby_id"), StartAt: start, EndAt: end, Purpose: stringArg(args, "purpose"), Visitors: []VisitorInput{{Name: stringArg(args, "visitor_name"), Phone: stringArg(args, "visitor_phone"), Company: stringArg(args, "company"), Consent: consent}}}
+		return s.createVisitRecord(r.Context(), r, u, input, "mcp", false)
+	case "cancel_visit":
+		if !writeAllowed() {
+			return nil, errMCP("write 범위가 필요합니다")
+		}
+		id := stringArg(args, "visit_id")
+		tx, err := s.db.Begin(r.Context())
+		if err != nil {
 			return nil, err
 		}
-		s.audit(r.Context(), u.ID, "assignment.create", "seat", seat, r.RemoteAddr, map[string]string{"source": "mcp", "employeeId": emp})
-		return map[string]any{"applied": true, "employeeId": emp, "seatId": seat}, nil
+		defer tx.Rollback(r.Context())
+		tag, err := tx.Exec(r.Context(), `UPDATE visits SET status='CANCELLED',cancelled_at=now(),updated_at=now() WHERE id=$1 AND (host_user_id=$2 OR $3) AND status IN ('PENDING_APPROVAL','APPROVED','SCHEDULED')`, id, u.ID, u.IsAdmin())
+		if err != nil || tag.RowsAffected() == 0 {
+			return nil, errMCP("취소 가능한 방문이 아니거나 권한이 없습니다")
+		}
+		_, _ = tx.Exec(r.Context(), `UPDATE visitor_visits SET status='CANCELLED' WHERE visit_id=$1; UPDATE qr_tokens SET revoked_at=now() WHERE visitor_visit_id IN (SELECT id FROM visitor_visits WHERE visit_id=$1) AND revoked_at IS NULL`, id)
+		if err = tx.Commit(r.Context()); err != nil {
+			return nil, err
+		}
+		s.audit(r.Context(), u.ID, "visit.cancel", "visit", id, r.RemoteAddr, map[string]string{"source": "mcp"})
+		s.publishLobbyEvent("visit.cancelled")
+		return map[string]any{"cancelled": true, "visitId": id}, nil
+	case "search_visitor_history":
+		company := strings.TrimSpace(stringArg(args, "company"))
+		months := intArg(args, "months", 6, 1, 60)
+		if company == "" {
+			return nil, errMCP("company는 필수입니다")
+		}
+		rows, err := s.db.Query(r.Context(), `SELECT p.name_encrypted,p.company,v.request_no,v.start_at,v.status,h.display_name FROM visitors p JOIN visitor_visits vv ON vv.visitor_id=p.id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id WHERE lower(p.company)=lower($1) AND v.start_at>=now()-($2::int*interval '1 month') ORDER BY v.start_at DESC LIMIT 200`, company, months)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		items := []map[string]any{}
+		for rows.Next() {
+			var nameEnc, companyName, requestNo, status, host string
+			var start time.Time
+			_ = rows.Scan(&nameEnc, &companyName, &requestNo, &start, &status, &host)
+			items = append(items, map[string]any{"visitor": maskName(s.decryptOptional(nameEnc)), "company": companyName, "requestNo": requestNo, "startAt": start, "status": status, "host": host})
+		}
+		return map[string]any{"items": items, "count": len(items), "months": months}, nil
+	case "get_lobby_status":
+		var scheduled, current, completed, noShow int
+		err := s.db.QueryRow(r.Context(), `SELECT count(*) FILTER(WHERE vv.status='SCHEDULED'),count(*) FILTER(WHERE vv.status='CHECKED_IN'),count(*) FILTER(WHERE vv.status='CHECKED_OUT'),count(*) FILTER(WHERE vv.status='NO_SHOW') FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE v.start_at::date=CURRENT_DATE`).Scan(&scheduled, &current, &completed, &noShow)
+		return map[string]any{"scheduled": scheduled, "current": current, "completed": completed, "noShow": noShow}, err
+	case "get_visit_statistics":
+		if !u.IsAdmin() {
+			return nil, errMCP("관리자 권한이 필요합니다")
+		}
+		days := intArg(args, "days", 30, 1, 366)
+		var scheduled, checked int
+		err := s.db.QueryRow(r.Context(), `SELECT count(vv.id),count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')) FROM visits v JOIN visitor_visits vv ON vv.visit_id=v.id WHERE v.start_at>=CURRENT_DATE-$1::int`, days).Scan(&scheduled, &checked)
+		return map[string]any{"days": days, "scheduled": scheduled, "checkedIn": checked}, err
 	default:
 		return nil, errMCP("알 수 없는 도구입니다: " + name)
 	}
@@ -174,16 +223,4 @@ func intArg(m map[string]any, key string, fallback, min, max int) int {
 		return max
 	}
 	return n
-}
-func (s *Server) actionCounts(r *http.Request) (map[string]int, error) {
-	counts := map[string]int{}
-	queries := map[string]string{"unassignedEmployees": `SELECT count(*) FROM employees e WHERE e.status='active' AND NOT EXISTS(SELECT 1 FROM seat_assignments a WHERE a.employee_id=e.id AND a.ended_at IS NULL)`, "retiredAssignments": `SELECT count(*) FROM seat_assignments a JOIN employees e ON e.id=a.employee_id WHERE a.ended_at IS NULL AND e.status='retired'`, "organizationMismatch": `SELECT count(*) FROM seat_assignments a JOIN employees e ON e.id=a.employee_id JOIN seats s ON s.id=a.seat_id WHERE a.ended_at IS NULL AND s.organization_id IS NOT NULL AND e.organization_id IS DISTINCT FROM s.organization_id`}
-	for key, q := range queries {
-		var count int
-		if err := s.db.QueryRow(r.Context(), q).Scan(&count); err != nil {
-			return nil, err
-		}
-		counts[key] = count
-	}
-	return counts, nil
 }

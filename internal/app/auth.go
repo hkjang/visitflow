@@ -17,7 +17,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const sessionCookie = "seaton_session"
+const sessionCookie = "visitflow_session"
 
 func (s *Server) EnsureBootstrapAdmin(ctx context.Context, username, password string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
@@ -29,7 +29,7 @@ func (s *Server) EnsureBootstrapAdmin(ctx context.Context, username, password st
 		email = username
 	}
 	_, err = s.db.Exec(ctx, `INSERT INTO users(id, username, password_hash, display_name, email, role, source)
-		VALUES($1,$2,$3,$2,NULLIF($4,''),'system_admin','local') ON CONFLICT (username) DO NOTHING`, newID(), username, string(hash), email)
+		VALUES($1,$2,$3,$2,NULLIF($4,''),'super_admin','local') ON CONFLICT (username) DO NOTHING`, newID(), username, string(hash), email)
 	return err
 }
 
@@ -41,7 +41,7 @@ func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"serviceName": serviceName, "companyName": companyName,
 		"localEnabled": local == "true", "oidcEnabled": oidcEnabled == "true",
-		"version": map[string]string{"version": s.version, "commit": s.commit},
+		"version": map[string]string{"version": s.version, "commit": s.commit, "builtAt": s.builtAt},
 	})
 }
 
@@ -112,7 +112,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		apiKeyAuth := false
 		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-			if strings.HasPrefix(raw, "seat_") {
+			if strings.HasPrefix(raw, "vf_") || strings.HasPrefix(raw, "seat_") {
 				var keyID string
 				var err error
 				u, err = scanUser(s.db.QueryRow(r.Context(), `SELECT u.id,u.username,u.display_name,COALESCE(u.email,''),u.employee_id,u.role,u.source,u.last_login_at
@@ -155,6 +155,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 				}
 			}
 		}
+		s.loadUserScope(r.Context(), &u)
 		ctx := context.WithValue(r.Context(), userContextKey, u)
 		ctx = context.WithValue(ctx, csrfContextKey, csrf)
 		ctx = context.WithValue(ctx, apiScopesContextKey, apiScopes)
@@ -191,6 +192,35 @@ func (s *Server) requireSeatManager(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) requireLobby(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, _ := userFrom(r)
+		if !u.CanManageLobby() {
+			writeError(w, http.StatusForbidden, "lobby_required", "로비 담당자 권한이 필요합니다")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireAudit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, _ := userFrom(r)
+		if !u.CanAudit() {
+			writeError(w, http.StatusForbidden, "auditor_required", "감사 조회 권한이 필요합니다")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) loadUserScope(ctx context.Context, u *User) {
+	if u == nil || u.ID == "" {
+		return
+	}
+	_ = s.db.QueryRow(ctx, `SELECT department_id,site_scope FROM users WHERE id=$1`, u.ID).Scan(&u.DepartmentID, &u.SiteScope)
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
@@ -351,7 +381,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	id := newID()
 	err = s.db.QueryRow(r.Context(), `INSERT INTO users(id,username,display_name,email,role,source,last_login_at) VALUES($1,$2,$3,$4,$5,'oidc',now())
 		ON CONFLICT(username) DO UPDATE SET display_name=EXCLUDED.display_name,email=EXCLUDED.email,source='oidc',last_login_at=now(),
-		role=CASE WHEN users.role='system_admin' THEN users.role ELSE EXCLUDED.role END RETURNING id`, id, username, name, claims.Email, role).Scan(&id)
+		role=CASE WHEN users.role IN ('admin','super_admin') THEN users.role ELSE EXCLUDED.role END RETURNING id`, id, username, name, claims.Email, role).Scan(&id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_provision_failed", "SSO 사용자를 등록하지 못했습니다")
 		return
@@ -388,18 +418,30 @@ func (s *Server) oidcScopes(ctx context.Context) []string {
 
 func (s *Server) roleForGroups(ctx context.Context, groups []string) string {
 	admin, _ := s.getSetting(ctx, "oidc.admin_group")
-	manager, _ := s.getSetting(ctx, "oidc.seat_manager_group")
+	lobby, _ := s.getSetting(ctx, "oidc.lobby_group")
+	security, _ := s.getSetting(ctx, "oidc.security_group")
+	auditor, _ := s.getSetting(ctx, "oidc.auditor_group")
+	manager, _ := s.getSetting(ctx, "oidc.department_manager_group")
 	for _, g := range groups {
 		if admin != "" && g == admin {
-			return "system_admin"
+			return RoleAdmin
+		}
+		if security != "" && g == security {
+			return RoleSecurity
+		}
+		if auditor != "" && g == auditor {
+			return RoleAuditor
+		}
+		if lobby != "" && g == lobby {
+			return RoleLobby
 		}
 	}
 	for _, g := range groups {
 		if manager != "" && g == manager {
-			return "seat_manager"
+			return RoleDeptManager
 		}
 	}
-	return "employee"
+	return RoleUser
 }
 
 func (s *Server) testOIDC(w http.ResponseWriter, r *http.Request) {
@@ -443,7 +485,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	allowed := map[string]bool{"employee": true, "department_manager": true, "seat_manager": true, "system_admin": true}
+	allowed := map[string]bool{RoleUser: true, RoleLobby: true, RoleDeptManager: true, RoleSecurity: true, RoleAuditor: true, RoleAdmin: true, RoleSuperAdmin: true}
 	if in.Role != "" && !allowed[in.Role] {
 		writeError(w, 400, "invalid_role", "권한 값이 올바르지 않습니다")
 		return

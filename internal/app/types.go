@@ -2,21 +2,42 @@ package app
 
 import "time"
 
+const (
+	RoleUser        = "user"
+	RoleLobby       = "lobby"
+	RoleDeptManager = "dept_manager"
+	RoleSecurity    = "security"
+	RoleAuditor     = "auditor"
+	RoleAdmin       = "admin"
+	RoleSuperAdmin  = "super_admin"
+)
+
 type User struct {
-	ID          string     `json:"id"`
-	Username    string     `json:"username"`
-	DisplayName string     `json:"displayName"`
-	Email       string     `json:"email,omitempty"`
-	EmployeeID  *string    `json:"employeeId,omitempty"`
-	Role        string     `json:"role"`
-	Source      string     `json:"source"`
-	LastLoginAt *time.Time `json:"lastLoginAt,omitempty"`
+	ID           string     `json:"id"`
+	Username     string     `json:"username"`
+	DisplayName  string     `json:"displayName"`
+	Email        string     `json:"email,omitempty"`
+	EmployeeID   *string    `json:"employeeId,omitempty"`
+	Role         string     `json:"role"`
+	Source       string     `json:"source"`
+	LastLoginAt  *time.Time `json:"lastLoginAt,omitempty"`
+	DepartmentID *string    `json:"departmentId,omitempty"`
+	SiteScope    []string   `json:"siteScope,omitempty"`
 }
 
-func (u User) IsAdmin() bool { return u.Role == "system_admin" }
-func (u User) CanManageSeats() bool {
-	return u.Role == "system_admin" || u.Role == "seat_manager"
+func (u User) IsAdmin() bool { return u.Role == RoleAdmin || u.Role == RoleSuperAdmin }
+func (u User) CanManageLobby() bool {
+	return u.Role == RoleLobby || u.Role == RoleSecurity || u.IsAdmin()
 }
+func (u User) CanApprove() bool {
+	return u.Role == RoleDeptManager || u.Role == RoleSecurity || u.IsAdmin()
+}
+func (u User) CanAudit() bool {
+	return u.Role == RoleAuditor || u.Role == RoleSecurity || u.IsAdmin()
+}
+
+// Kept for source compatibility with legacy, no-longer-routed SeatOn handlers.
+func (u User) CanManageSeats() bool { return u.CanManageLobby() }
 
 type Setting struct {
 	Key        string `json:"key"`
@@ -25,38 +46,52 @@ type Setting struct {
 	Configured bool   `json:"configured"`
 }
 
-type Employee struct {
-	ID               string  `json:"id"`
-	EmployeeNo       string  `json:"employeeNo"`
-	Name             string  `json:"name"`
-	Email            string  `json:"email,omitempty"`
-	OrganizationID   *string `json:"organizationId,omitempty"`
-	OrganizationName string  `json:"organizationName,omitempty"`
-	Title            string  `json:"title,omitempty"`
-	Position         string  `json:"position,omitempty"`
-	Workplace        string  `json:"workplace,omitempty"`
-	Status           string  `json:"status"`
-	SeatID           *string `json:"seatId,omitempty"`
-	SeatNo           string  `json:"seatNo,omitempty"`
+type VisitorInput struct {
+	Name      string   `json:"name"`
+	Phone     string   `json:"phone"`
+	Email     string   `json:"email,omitempty"`
+	Company   string   `json:"company,omitempty"`
+	Title     string   `json:"title,omitempty"`
+	Vehicle   string   `json:"vehicle,omitempty"`
+	Equipment []string `json:"equipment,omitempty"`
+	Consent   bool     `json:"consent"`
 }
 
-type Seat struct {
-	ID               string   `json:"id"`
-	FloorMapID       string   `json:"floorMapId"`
-	SeatNo           string   `json:"seatNo"`
-	Type             string   `json:"type"`
-	Status           string   `json:"status"`
-	X                float64  `json:"x"`
-	Y                float64  `json:"y"`
-	Width            float64  `json:"width"`
-	Height           float64  `json:"height"`
-	Rotation         float64  `json:"rotation"`
-	Confidence       *float64 `json:"confidence,omitempty"`
-	OrganizationID   *string  `json:"organizationId,omitempty"`
-	OrganizationName string   `json:"organizationName,omitempty"`
-	EmployeeID       *string  `json:"employeeId,omitempty"`
-	EmployeeNo       string   `json:"employeeNo,omitempty"`
-	EmployeeName     string   `json:"employeeName,omitempty"`
+type VisitInput struct {
+	SiteID       string         `json:"siteId"`
+	LobbyID      string         `json:"lobbyId,omitempty"`
+	DepartmentID string         `json:"departmentId,omitempty"`
+	HostUserID   string         `json:"hostUserId,omitempty"`
+	StartAt      time.Time      `json:"startAt"`
+	EndAt        time.Time      `json:"endAt"`
+	Purpose      string         `json:"purpose"`
+	PlaceDetail  string         `json:"placeDetail,omitempty"`
+	Notes        string         `json:"notes,omitempty"`
+	Visitors     []VisitorInput `json:"visitors"`
+	Recurrence   map[string]any `json:"recurrence,omitempty"`
+}
+
+type VisitSummary struct {
+	ID             string    `json:"id"`
+	RequestNo      string    `json:"requestNo"`
+	HostUserID     string    `json:"hostUserId"`
+	HostName       string    `json:"hostName"`
+	DepartmentID   *string   `json:"departmentId,omitempty"`
+	DepartmentName string    `json:"departmentName,omitempty"`
+	SiteID         string    `json:"siteId"`
+	SiteName       string    `json:"siteName"`
+	LobbyID        *string   `json:"lobbyId,omitempty"`
+	LobbyName      string    `json:"lobbyName,omitempty"`
+	StartAt        time.Time `json:"startAt"`
+	EndAt          time.Time `json:"endAt"`
+	Purpose        string    `json:"purpose"`
+	PlaceDetail    string    `json:"placeDetail,omitempty"`
+	Status         string    `json:"status"`
+	Source         string    `json:"source"`
+	VisitorCount   int       `json:"visitorCount"`
+	PrimaryVisitor string    `json:"primaryVisitor"`
+	Company        string    `json:"company,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
 
 type ctxKey string

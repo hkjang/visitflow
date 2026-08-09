@@ -3,35 +3,52 @@ package app
 import "net/http"
 
 func (s *Server) openAPI(w http.ResponseWriter, _ *http.Request) {
+	paths := map[string]any{
+		"/version":                  map[string]any{"get": operation("서비스 버전 조회", false)},
+		"/auth/config":              map[string]any{"get": operation("로그인 및 SSO 구성 조회", false)},
+		"/visits":                   map[string]any{"get": operation("권한 범위 방문 검색", true), "post": operation("단일·단체 방문 신청", true)},
+		"/visits/{visitID}":         map[string]any{"get": operation("방문 상세 조회", true), "put": operation("방문 일정 수정", true)},
+		"/visits/{visitID}/approve": map[string]any{"post": operation("방문 승인 및 QR 발급", true)},
+		"/visits/{visitID}/reject":  map[string]any{"post": operation("방문 반려", true)},
+		"/visits/{visitID}/cancel":  map[string]any{"post": operation("방문 취소 및 QR 폐기", true)},
+		"/visitor-visits/{visitorVisitID}/qr/reissue": map[string]any{"post": operation("개별 QR 회전·재발급", true)},
+		"/qr/verify":               map[string]any{"post": operation("서버 검증형 QR 확인", true)},
+		"/checkins":                map[string]any{"post": operation("체크인 트랜잭션 및 담당자 알림", true)},
+		"/checkouts":               map[string]any{"post": operation("방문자 퇴실", true)},
+		"/lobby/today":             map[string]any{"get": operation("오늘 로비 방문자", true)},
+		"/lobby/current":           map[string]any{"get": operation("현재 사내 체류 방문자", true)},
+		"/lobby/stream":            map[string]any{"get": operation("로비 실시간 SSE", true)},
+		"/lobby/walk-ins":          map[string]any{"post": operation("현장 방문 등록", true)},
+		"/visit-templates":         map[string]any{"get": operation("내 방문 템플릿 조회", true), "post": operation("방문 템플릿 생성", true)},
+		"/api-keys":                map[string]any{"get": operation("개인 API 키 조회", true), "post": operation("개인 API 키 생성", true)},
+		"/api-keys/{keyID}/rotate": map[string]any{"post": operation("개인 키 회전", true)},
+		"/admin/dashboard":         map[string]any{"get": operation("관리자 운영 현황", true)},
+		"/admin/statistics":        map[string]any{"get": operation("일별·부서별 방문 통계", true)},
+		"/admin/audit-logs":        map[string]any{"get": operation("감사 로그 조회", true)},
+		"/admin/watchlist":         map[string]any{"get": operation("방문 제한 목록", true), "post": operation("방문 제한 등록", true)},
+		"/settings":                map[string]any{"get": operation("전체 운영 설정 조회", true), "put": operation("운영 설정 변경", true)},
+	}
 	writeJSON(w, 200, map[string]any{
-		"openapi":    "3.1.0",
-		"info":       map[string]any{"title": "SeatOn API", "version": s.version, "description": "오프라인 사내 좌석 관리 REST API. 브라우저 세션 또는 개인 Bearer API 키를 사용합니다."},
-		"servers":    []map[string]string{{"url": "/api/v1"}},
-		"components": map[string]any{"securitySchemes": map[string]any{"bearerApiKey": map[string]string{"type": "http", "scheme": "bearer", "bearerFormat": "SeatOn personal API key"}, "cookieSession": map[string]string{"type": "apiKey", "in": "cookie", "name": sessionCookie}}},
-		"security":   []map[string]any{{"bearerApiKey": []string{}}, {"cookieSession": []string{}}},
-		"paths": map[string]any{
-			"/version":          map[string]any{"get": operation("서비스 버전 조회", false)},
-			"/dashboard":        map[string]any{"get": operation("관리자 운영 요약", true)},
-			"/dashboard/issues": map[string]any{"get": operation("처리 필요 상세 목록", true)},
-			"/dashboard/issues/{kind}/{issueID}/resolve": map[string]any{"post": operation("처리 필요 항목 즉시 조치", true)},
-			"/employees":                  map[string]any{"get": operation("직원 검색", true), "post": operation("직원 등록/갱신", true)},
-			"/organizations":              map[string]any{"get": operation("조직 조회", true), "post": operation("조직 등록/갱신", true)},
-			"/buildings":                  map[string]any{"get": operation("사업장 조회", true), "post": operation("사업장 등록", true)},
-			"/floors":                     map[string]any{"get": operation("층 조회", true), "post": operation("층 등록", true)},
-			"/floor-maps":                 map[string]any{"get": operation("도면 버전 조회", true), "post": operation("도면 업로드", true)},
-			"/floor-maps/{mapID}/analyze": map[string]any{"post": operation("오프라인 AI/CV 좌석 후보 분석", true)},
-			"/seats":                      map[string]any{"get": operation("좌석 조회", true), "post": operation("좌석 생성", true)},
-			"/seats/bulk":                 map[string]any{"patch": operation("좌석 위치 일괄 이동", true)},
-			"/seat-assignments":           map[string]any{"post": operation("직원 좌석 배정", true)},
-			"/seat-assignments/bulk":      map[string]any{"post": operation("CSV/XLSX 좌석 일괄 배정", true)},
-			"/seat-history":               map[string]any{"get": operation("좌석 변경 이력", true)},
-			"/api-keys":                   map[string]any{"get": operation("내 API 키 조회", true), "post": operation("개인 API 키 생성", true)},
+		"openapi": "3.1.0",
+		"info":    map[string]any{"title": "VisitFlow API", "version": s.version, "description": "오프라인 사내 방문자 관리 REST API. 방문 신청·승인·QR·로비·퇴실·감사 흐름과 역할/범위 기반 접근 제어를 제공합니다."},
+		"servers": []map[string]string{{"url": "/api/v1"}},
+		"components": map[string]any{
+			"securitySchemes": map[string]any{
+				"personalKey":   map[string]string{"type": "http", "scheme": "bearer", "bearerFormat": "VisitFlow vf_ personal API key"},
+				"cookieSession": map[string]string{"type": "apiKey", "in": "cookie", "name": sessionCookie},
+			},
+			"schemas": map[string]any{
+				"VisitorInput": map[string]any{"type": "object", "required": []string{"name", "phone", "consent"}, "properties": map[string]any{"name": map[string]string{"type": "string"}, "phone": map[string]string{"type": "string"}, "company": map[string]string{"type": "string"}, "consent": map[string]string{"type": "boolean"}}},
+				"VisitInput":   map[string]any{"type": "object", "required": []string{"siteId", "startAt", "endAt", "purpose", "visitors"}, "properties": map[string]any{"siteId": map[string]string{"type": "string"}, "startAt": map[string]string{"type": "string", "format": "date-time"}, "endAt": map[string]string{"type": "string", "format": "date-time"}, "purpose": map[string]string{"type": "string"}, "visitors": map[string]any{"type": "array", "items": map[string]string{"$ref": "#/components/schemas/VisitorInput"}}}},
+			},
 		},
+		"security": []map[string]any{{"personalKey": []string{}}, {"cookieSession": []string{}}},
+		"paths":    paths,
 	})
 }
 
 func operation(summary string, auth bool) map[string]any {
-	m := map[string]any{"summary": summary, "responses": map[string]any{"200": map[string]string{"description": "성공"}, "400": map[string]string{"description": "잘못된 요청"}, "403": map[string]string{"description": "권한 없음"}}}
+	m := map[string]any{"summary": summary, "responses": map[string]any{"200": map[string]string{"description": "성공"}, "400": map[string]string{"description": "잘못된 요청"}, "401": map[string]string{"description": "인증 필요"}, "403": map[string]string{"description": "권한 없음"}, "409": map[string]string{"description": "상태 충돌"}}}
 	if !auth {
 		m["security"] = []any{}
 	}

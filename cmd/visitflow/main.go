@@ -50,7 +50,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	keyring, err := platform.NewKeyring("/var/lib/seaton/master.key")
+	keyring, err := platform.NewKeyring("/var/lib/visitflow/master.key")
 	if err != nil {
 		logger.Error("keyring startup failed", "error", err)
 		os.Exit(1)
@@ -66,9 +66,9 @@ func main() {
 		os.Exit(1)
 	}
 	go service.RunBackground(ctx)
-	httpServer := &http.Server{Addr: ":8080", Handler: service.Routes(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
+	httpServer := &http.Server{Addr: ":8080", Handler: service.Routes(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
 	go func() {
-		logger.Info("SeatOn started", "address", httpServer.Addr, "version", version, "commit", commit)
+		logger.Info("VisitFlow started", "address", httpServer.Addr, "version", version, "commit", commit)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server stopped", "error", err)
 			cancel()

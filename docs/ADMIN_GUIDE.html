@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SeatOn 엔터프라이즈 관리자 가이드 (Admin Guide)</title>
+    <title>VisitFlow 엔터프라이즈 관리자 가이드 (Admin Guide)</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #10b981;
-            --primary-dark: #047857;
+            --primary: #8b5cf6;
+            --primary-dark: #6d28d9;
             --text-dark: #0f172a;
             --text-muted: #475569;
             --bg-light: #f8fafc;
@@ -39,25 +39,25 @@
     <div class="doc-card">
         <a href="javascript:window.print()" class="print-btn">🖨️ PDF / 인쇄하기</a>
         <div class="header-meta">
-            <h1>SeatOn 엔터프라이즈 관리자 가이드 (Admin Guide)</h1>
+            <h1>VisitFlow 엔터프라이즈 관리자 가이드 (Admin Guide)</h1>
             <div class="meta-grid">
                 <div class="meta-item"><strong>문서 버전:</strong> v1.0.0-ENTERPRISE</div>
-                <div class="meta-item"><strong>작성일자:</strong> 2026년 8월 9일</div>
+                <div class="meta-item"><strong>작성일자:</strong> 2026년 8월 10일</div>
                 <div class="meta-item"><strong>대상:</strong> 시스템 관리자, Security/DevOps</div>
                 <div class="meta-item"><strong>분류:</strong> 공식 관리자 & 운영 매뉴얼</div>
             </div>
         </div>
 
         <h2>1. 시스템 부트스트랩</h2>
-        <pre><code>POSTGRES_DSN=postgres://seaton:Secr3tPass@10.10.60.5:5432/seaton?sslmode=disable
+        <pre><code>POSTGRES_DSN=postgres://visitflow:Secr3tPass@10.10.60.5:5432/visitflow?sslmode=disable
 BOOTSTRAP_ADMIN=admin
 BOOTSTRAP_ADMIN_PASSWORD=SuperSecretAdminPassword123!</code></pre>
 
         <h2>2. Keycloak OIDC SSO 및 Break Glass 계정</h2>
         <p>Break Glass 비상 계정을 통한 복구권 확보 및 Keycloak OIDC PKCE 인증을 연동합니다.</p>
 
-        <h2>3. Master Key 보존 & 감사 로그</h2>
-        <p><code>/var/lib/seaton/master.key</code> 정기 백업, HMAC Digest 보안 및 감사 로그(Audit Trail)를 관리합니다.</p>
+        <h2>3. Master Key 보존 & PII 감사 로그</h2>
+        <p><code>/var/lib/visitflow/master.key</code> 정기 백업, PII AES-256 암호화 및 감사 로그(Audit Trail)를 관리합니다.</p>
     </div>
 </body>
 </html>

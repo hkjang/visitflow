@@ -70,7 +70,7 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	raw := "seat_" + rawPart
+	raw := "vf_" + rawPart
 	prefix := raw[:13]
 	id := newID()
 	u, _ := userFrom(r)
@@ -103,7 +103,7 @@ func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rawPart, _ := platform.RandomToken(32)
-	raw := "seat_" + rawPart
+	raw := "vf_" + rawPart
 	prefix := raw[:13]
 	newIDValue := newID()
 	tx, err := s.db.Begin(r.Context())

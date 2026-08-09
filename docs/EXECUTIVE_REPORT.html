@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SeatOn 온프레미스 스마트 좌석 플랫폼 구축 종합 보고서 (Executive Summary Report)</title>
+    <title>VisitFlow 온프레미스 방문자 관리 플랫폼 구축 종합 보고서 (Executive Summary Report)</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #10b981;
-            --primary-dark: #047857;
+            --primary: #8b5cf6;
+            --primary-dark: #6d28d9;
             --text-dark: #0f172a;
             --text-muted: #475569;
             --bg-light: #f8fafc;
@@ -29,7 +29,7 @@
         th, td { border: 1px solid var(--border-color); padding: 14px 18px; text-align: left; }
         th { background: #f8fafc; font-weight: 700; color: #0f172a; }
         tr:nth-child(even) { background: #f8fafc; }
-        .value-box { background: linear-gradient(135deg, rgba(16, 185, 129, 0.06) 0%, rgba(6, 182, 212, 0.06) 100%); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 12px; padding: 24px; margin: 28px 0; }
+        .value-box { background: linear-gradient(135deg, rgba(139, 92, 246, 0.06) 0%, rgba(236, 72, 153, 0.06) 100%); border: 1px solid rgba(139, 92, 246, 0.2); border-radius: 12px; padding: 24px; margin: 28px 0; }
         .value-title { font-weight: 700; color: var(--primary-dark); font-size: 1.1rem; margin-bottom: 10px; }
         .roi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 24px 0; }
         .roi-card { background: #ffffff; border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; text-align: center; }
@@ -45,35 +45,35 @@
     <div class="doc-card">
         <a href="javascript:window.print()" class="print-btn">🖨️ PDF / 인쇄하기</a>
         <div class="header-meta">
-            <h1>SeatOn 온프레미스 스마트 좌석 플랫폼 구축 종합 보고서</h1>
+            <h1>VisitFlow 온프레미스 방문자 관리 플랫폼 구축 종합 보고서</h1>
             <div class="meta-grid">
-                <div class="meta-item"><strong>문서 번호:</strong> SEATON-EXEC-2026-V1</div>
-                <div class="meta-item"><strong>작성일자:</strong> 2026년 8월 9일</div>
-                <div class="meta-item"><strong>수신:</strong> 경영진 (CEO, CFO, CTO) / 시설관리 책임자</div>
-                <div class="meta-item"><strong>발신:</strong> SeatOn 스마트 오피스 팀</div>
+                <div class="meta-item"><strong>문서 번호:</strong> VISITFLOW-EXEC-2026-V1</div>
+                <div class="meta-item"><strong>작성일자:</strong> 2026년 8월 10일</div>
+                <div class="meta-item"><strong>수신:</strong> 경영진 (CEO, CFO, CISO) / 시설보안 책임자</div>
+                <div class="meta-item"><strong>발신:</strong> VisitFlow 플랫폼 팀</div>
             </div>
         </div>
 
         <h2>1. 경영 요약 (Executive Summary)</h2>
-        <p>본 보고서는 사내 오프라인망(Air-Gapped) 및 온프레미스 인프라 환경에서 도면 CV 좌석 자동 분석, SVG 비율 좌표 좌석맵, 이상 좌석 자동 감지, Keycloak OIDC SSO 및 사내 AI 에이전트를 위한 MCP 서버를 단일 패키지로 통합하여 사내 오피스 공간 점유 효율성을 극대화하기 위해 구축된 <strong>SeatOn 스마트 좌석 관리 플랫폼</strong>의 도입 성과 및 ROI 절감 효과를 보고하기 위해 작성되었습니다.</p>
+        <p>본 보고서는 사내 오프라인망(Air-Gapped) 및 온프레미스 인프라 환경에서 사전 방문 신청, 접견자 승인, QR 코드 셀프 체크인, 보안 서약서(NDA) 서명, PII 암호화, 미체크아웃 초과 잔류 감지, Keycloak OIDC SSO 및 사내 AI 에이전트를 위한 MCP 서버를 단일 패키지로 통합하여 방문자 관제 효율성을 극대화하기 위해 구축된 <strong>VisitFlow 방문자 예약 & 출입 통제 통합 플랫폼</strong>의 도입 성과 및 ROI 절감 효과를 보고하기 위해 작성되었습니다.</p>
 
         <div class="value-box">
-            <div class="value-title">SeatOn 온프레미스 핵심 구축 가치</div>
-            <p style="margin: 0; color: #475569;">오프라인 CV 도면 파서, SVG 비율좌표 편집기, 이상 좌석 자동 탐지, Keycloak OIDC SSO 및 Streamable MCP AI 연동 생태계를 완비했습니다.</p>
+            <div class="value-title">VisitFlow 온프레미스 핵심 구축 가치</div>
+            <p style="margin: 0; color: #475569;">QR 코드 셀프 체크인, PII AES-256 암호화, 초과 잔류 감지, Keycloak OIDC SSO 및 Streamable MCP AI 연동 생태계를 완비했습니다.</p>
         </div>
 
         <div class="roi-grid">
             <div class="roi-card">
-                <div class="roi-val">60% ↓</div>
-                <div class="roi-label">공간 관리 TCO 절감</div>
+                <div class="roi-val">65% ↓</div>
+                <div class="roi-label">방문 관리 TCO 절감</div>
             </div>
             <div class="roi-card">
-                <div class="roi-val">45% ↑</div>
-                <div class="roi-label">좌석 점유 효율 향상</div>
+                <div class="roi-val">95% ↓</div>
+                <div class="roi-label">체크인 대기 시간 감축</div>
             </div>
             <div class="roi-card">
-                <div class="roi-val">90% ↓</div>
-                <div class="roi-label">도면 파싱 공수 절감</div>
+                <div class="roi-val">100%</div>
+                <div class="roi-label">PII AES-256 암호화</div>
             </div>
             <div class="roi-card">
                 <div class="roi-val">100%</div>
@@ -87,8 +87,8 @@
                 <tr>
                     <th>평가 항목</th>
                     <th>기존 수동/외부 SaaS</th>
-                    <th>타 오픈소스 좌석 솔루션</th>
-                    <th>SeatOn 솔루션</th>
+                    <th>타 오픈소스 방문자 솔루션</th>
+                    <th>VisitFlow 솔루션</th>
                 </tr>
             </thead>
             <tbody>
@@ -105,16 +105,16 @@
                     <td><strong>100% 완전 지원 (단일 Docker)</strong></td>
                 </tr>
                 <tr>
-                    <td><strong>도면 CV 자동 파싱</strong></td>
-                    <td>불가능 (수동 좌표)</td>
-                    <td>수동 SVG 등록 필요</td>
-                    <td><strong>오프라인 CV 좌석 후보 자동 감지</strong></td>
+                    <td><strong>PII 데이터 암호화</strong></td>
+                    <td>미지원 / 평문 저장</td>
+                    <td>기본 마스킹만 제공</td>
+                    <td><strong>AES-256-GCM 암호화 + 마스킹</strong></td>
                 </tr>
                 <tr>
-                    <td><strong>이상 좌석 자동 검출</strong></td>
+                    <td><strong>초과 잔류 실시간 감지</strong></td>
+                    <td>수동 확인 필요</td>
                     <td>부재</td>
-                    <td>부재</td>
-                    <td><strong>퇴직자/구역불일치 자동 탐지</strong></td>
+                    <td><strong>Overstaying 자동 경보 엔진</strong></td>
                 </tr>
                 <tr>
                     <td><strong>AI 에이전트 연동 (MCP)</strong></td>
@@ -126,10 +126,10 @@
         </table>
 
         <h2>3. 향후 추진 전략 및 결론</h2>
-        <p>SeatOn 온프레미스 스마트 좌석 플랫폼은 사내 오피스 자원의 점유 효율성을 극대화하고 보안 컴플라이언스를 완벽히 준수하는 검증된 공간 인프라 솔루션입니다. 전사 오피스 전면 배포를 권고드립니다.</p>
+        <p>VisitFlow 온프레미스 방문자 관리 플랫폼은 사내 방문자 출입 관제를 완벽히 자동화하고 보안 컴플라이언스를 보장하는 검증된 솔루션입니다. 전사 사옥 전면 배포를 권고드립니다.</p>
 
         <div class="footer-note">
-            © 2026 SeatOn Enterprise Platform Architecture Team. Confidential for Executive Review.
+            © 2026 VisitFlow Enterprise Platform Architecture Team. Confidential for Executive Review.
         </div>
     </div>
 </body>

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   SeatOn - Enterprise Air-Gapped Office Layout & Smart Seat Platform
+   VisitFlow - Enterprise Air-Gapped Visitor Reservation & Access Control Platform
    Design System & Master Stylesheet
    ========================================================================== */
 
@@ -12,18 +12,18 @@
   --bg-glass: rgba(255, 255, 255, 0.03);
   
   --border-color: rgba(255, 255, 255, 0.08);
-  --border-color-hover: rgba(16, 185, 129, 0.4);
+  --border-color-hover: rgba(139, 92, 246, 0.4);
 
   --text-main: #f8fafc;
   --text-muted: #94a3b8;
   --text-dim: #64748b;
 
-  --accent-primary: #10b981;   /* Emerald */
+  --accent-primary: #8b5cf6;   /* Violet */
+  --accent-rose: #ec4899;      /* Rose */
   --accent-cyan: #06b6d4;      /* Cyan */
-  --accent-indigo: #6366f1;    /* Indigo */
 
-  --gradient-primary: linear-gradient(135deg, #10b981 0%, #06b6d4 50%, #6366f1 100%);
-  --gradient-glow: linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(6, 182, 212, 0.15) 50%, rgba(99, 102, 241, 0.15) 100%);
+  --gradient-primary: linear-gradient(135deg, #8b5cf6 0%, #ec4899 50%, #06b6d4 100%);
+  --gradient-glow: linear-gradient(135deg, rgba(139, 92, 246, 0.15) 0%, rgba(236, 72, 153, 0.15) 50%, rgba(6, 182, 212, 0.15) 100%);
   
   /* Typography */
   --font-main: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -39,7 +39,7 @@
 
   /* Shadows */
   --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.3);
-  --shadow-glow: 0 0 40px rgba(16, 185, 129, 0.22);
+  --shadow-glow: 0 0 40px rgba(139, 92, 246, 0.22);
 }
 
 /* Reset & Base */
@@ -72,9 +72,9 @@ body::before {
   width: 100vw;
   height: 100vh;
   background: 
-    radial-gradient(circle at 15% 15%, rgba(16, 185, 129, 0.08) 0%, transparent 45%),
-    radial-gradient(circle at 85% 65%, rgba(6, 182, 212, 0.06) 0%, transparent 45%),
-    radial-gradient(circle at 50% 85%, rgba(99, 102, 241, 0.05) 0%, transparent 50%);
+    radial-gradient(circle at 15% 15%, rgba(139, 92, 246, 0.08) 0%, transparent 45%),
+    radial-gradient(circle at 85% 65%, rgba(236, 72, 153, 0.06) 0%, transparent 45%),
+    radial-gradient(circle at 50% 85%, rgba(6, 182, 212, 0.05) 0%, transparent 50%);
   pointer-events: none;
   z-index: -1;
 }
@@ -180,12 +180,12 @@ h1, h2, h3, h4, h5, h6 {
 .btn-primary {
   background: var(--gradient-primary);
   color: #ffffff;
-  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.35);
+  box-shadow: 0 4px 16px rgba(139, 92, 246, 0.35);
 }
 
 .btn-primary:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 24px rgba(16, 185, 129, 0.5);
+  box-shadow: 0 6px 24px rgba(139, 92, 246, 0.5);
 }
 
 .btn-secondary {
@@ -304,10 +304,10 @@ h1, h2, h3, h4, h5, h6 {
   align-items: center;
   gap: 8px;
   padding: 6px 16px;
-  background: rgba(16, 185, 129, 0.1);
-  border: 1px solid rgba(16, 185, 129, 0.25);
+  background: rgba(139, 92, 246, 0.1);
+  border: 1px solid rgba(139, 92, 246, 0.25);
   border-radius: 50px;
-  color: #a7f3d0;
+  color: #c4b5fd;
   font-size: 0.88rem;
   font-weight: 600;
   margin-bottom: 24px;
@@ -323,7 +323,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .hero-subtitle {
   font-size: clamp(1.2rem, 2vw, 1.5rem);
-  color: #a7f3d0;
+  color: #c4b5fd;
   font-weight: 600;
   margin-bottom: 16px;
 }
@@ -424,7 +424,7 @@ h1, h2, h3, h4, h5, h6 {
   height: 52px;
   border-radius: 14px;
   background: var(--gradient-glow);
-  border: 1px solid rgba(16, 185, 129, 0.2);
+  border: 1px solid rgba(139, 92, 246, 0.2);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -522,8 +522,8 @@ code {
   font-weight: 700;
 }
 
-.badge-emerald { background: rgba(16, 185, 129, 0.2); color: #a7f3d0; border: 1px solid rgba(16, 185, 129, 0.4); }
-.badge-indigo { background: rgba(99, 102, 241, 0.2); color: #c7d2fe; border: 1px solid rgba(99, 102, 241, 0.4); }
+.badge-violet { background: rgba(139, 92, 246, 0.2); color: #c4b5fd; border: 1px solid rgba(139, 92, 246, 0.4); }
+.badge-rose { background: rgba(236, 72, 153, 0.2); color: #fbcfe8; border: 1px solid rgba(236, 72, 153, 0.4); }
 
 .code-editor {
   background: #04060a;

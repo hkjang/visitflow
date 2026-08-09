@@ -192,7 +192,7 @@ export function KeysPage() {
       </TableContainer>
       <Typography variant="body2" color="text.secondary" mt={2}>
         MCP Endpoint: <code>{window.location.origin}/mcp</code> · Authorization:{" "}
-        <code>Bearer seat_…</code>
+        <code>Bearer vf_…</code>
       </Typography>
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)}>
         <DialogTitle>개인 API 키 만들기</DialogTitle>

@@ -13,6 +13,7 @@ import (
 	"path"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,17 +24,19 @@ import (
 )
 
 type Server struct {
-	db      *pgxpool.Pool
-	keys    *platform.Keyring
-	logger  *slog.Logger
-	webFS   fs.FS
-	version string
-	commit  string
-	builtAt string
+	db       *pgxpool.Pool
+	keys     *platform.Keyring
+	logger   *slog.Logger
+	webFS    fs.FS
+	version  string
+	commit   string
+	builtAt  string
+	eventsMu sync.RWMutex
+	events   map[chan string]struct{}
 }
 
 func NewServer(db *pgxpool.Pool, keys *platform.Keyring, logger *slog.Logger, webFS fs.FS, version, commit, builtAt string) *Server {
-	return &Server{db: db, keys: keys, logger: logger, webFS: webFS, version: version, commit: commit, builtAt: builtAt}
+	return &Server{db: db, keys: keys, logger: logger, webFS: webFS, version: version, commit: commit, builtAt: builtAt, events: make(map[chan string]struct{})}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -50,54 +53,63 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/auth/oidc/start", s.oidcStart)
 		r.Get("/auth/oidc/callback", s.oidcCallback)
 		r.Get("/openapi.json", s.openAPI)
+		r.Get("/public/passes/{token}", s.publicPass)
+		r.Get("/public/passes/{token}/qr.png", s.publicPassQR)
 		r.Group(func(r chi.Router) {
 			r.Use(s.authenticate)
 			r.Get("/auth/me", s.me)
 			r.Post("/auth/logout", s.logout)
 			r.Post("/auth/password", s.changePassword)
-			r.Get("/buildings", s.listBuildings)
-			r.Get("/floors", s.listFloors)
-			r.Get("/floor-maps", s.listFloorMaps)
-			r.Get("/floor-maps/{mapID}/content", s.mapContent)
-			r.Get("/seats", s.listSeats)
-			r.Get("/employees", s.listEmployees)
-			r.Get("/organizations", s.listOrganizations)
-			r.Get("/seat-history", s.listHistory)
+			r.Patch("/profile", s.updateProfile)
+			r.Get("/reference-data", s.referenceData)
+			r.Get("/dashboard", s.personalDashboard)
+			r.Get("/visits", s.listVisits)
+			r.Post("/visits", s.createVisit)
+			r.Get("/visits/{visitID}", s.getVisit)
+			r.Put("/visits/{visitID}", s.updateVisit)
+			r.Post("/visits/{visitID}/cancel", s.cancelVisit)
+			r.Post("/visits/{visitID}/approve", s.approveVisit)
+			r.Post("/visits/{visitID}/reject", s.rejectVisit)
+			r.Post("/visits/{visitID}/notifications/resend", s.resendVisitNotification)
+			r.Post("/visitor-visits/{visitorVisitID}/qr/reissue", s.reissueQR)
+			r.Get("/visit-templates", s.listVisitTemplates)
+			r.Post("/visit-templates", s.createVisitTemplate)
+			r.Delete("/visit-templates/{templateID}", s.deleteVisitTemplate)
 			r.Get("/api-keys", s.listAPIKeys)
 			r.Post("/api-keys", s.createAPIKey)
 			r.Post("/api-keys/{keyID}/rotate", s.rotateAPIKey)
 			r.Delete("/api-keys/{keyID}", s.revokeAPIKey)
 			r.Group(func(r chi.Router) {
-				r.Use(s.requireSeatManager)
-				r.Get("/dashboard", s.dashboard)
-				r.Get("/dashboard/issues", s.dashboardIssues)
-				r.Post("/dashboard/issues/{kind}/{issueID}/resolve", s.resolveDashboardIssue)
-				r.Post("/dashboard/issues/retired-assignment/resolve-all", s.resolveAllRetiredAssignments)
-				r.Post("/buildings", s.createBuilding)
-				r.Post("/floors", s.createFloor)
-				r.Post("/floor-maps", s.uploadFloorMap)
-				r.Post("/floor-maps/{mapID}/analyze", s.analyzeFloorMap)
-				r.Post("/floor-maps/{mapID}/publish", s.publishFloorMap)
-				r.Post("/seats", s.createSeat)
-				r.Post("/seats/grid", s.createSeatGrid)
-				r.Patch("/seats/bulk", s.updateSeatsBulk)
-				r.Patch("/seats/{seatID}", s.updateSeat)
-				r.Delete("/seats/{seatID}", s.deleteSeat)
-				r.Post("/seat-assignments", s.assignSeat)
-				r.Delete("/seat-assignments/{seatID}", s.unassignSeat)
-				r.Post("/seat-assignments/bulk", s.bulkAssignments)
-				r.Post("/employees", s.upsertEmployee)
-				r.Post("/employees/import", s.importEmployees)
-				r.Post("/organizations", s.upsertOrganization)
+				r.Use(s.requireLobby)
+				r.Get("/lobby/today", s.lobbyToday)
+				r.Get("/lobby/current", s.lobbyCurrent)
+				r.Get("/lobby/stream", s.lobbyStream)
+				r.Post("/lobby/walk-ins", s.createWalkIn)
+				r.Post("/qr/verify", s.verifyQR)
+				r.Post("/checkins", s.checkIn)
+				r.Post("/checkouts", s.checkOut)
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(s.requireAudit)
+				r.Get("/admin/audit-logs", s.auditLogs)
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(s.requireAdmin)
+				r.Get("/admin/dashboard", s.adminDashboard)
+				r.Get("/admin/statistics", s.statistics)
+				r.Get("/admin/notifications", s.listNotifications)
+				r.Get("/admin/visitors", s.listVisitors)
+				r.Get("/admin/users", s.listUsers)
+				r.Patch("/admin/users/{userID}", s.updateUser)
+				r.Post("/admin/sites", s.upsertSite)
+				r.Post("/admin/lobbies", s.upsertLobby)
+				r.Post("/admin/organizations", s.upsertDepartment)
+				r.Get("/admin/watchlist", s.listWatchlist)
+				r.Post("/admin/watchlist", s.createWatchlist)
+				r.Delete("/admin/watchlist/{entryID}", s.deleteWatchlist)
 				r.Get("/settings", s.listSettings)
 				r.Put("/settings", s.updateSettings)
 				r.Post("/settings/oidc/test", s.testOIDC)
-				r.Post("/settings/hr/sync", s.syncEmployeesNow)
-				r.Get("/users", s.listUsers)
-				r.Patch("/users/{userID}", s.updateUser)
 			})
 		})
 	})
@@ -111,7 +123,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 		next.ServeHTTP(w, r)
 	})
@@ -148,7 +160,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) versionInfo(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"name": "SeatOn", "version": s.version, "commit": s.commit, "builtAt": s.builtAt})
+	writeJSON(w, http.StatusOK, map[string]string{"name": "VisitFlow", "version": s.version, "commit": s.commit, "builtAt": s.builtAt})
 }
 
 func (s *Server) spaHandler() http.Handler {
