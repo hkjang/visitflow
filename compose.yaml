@@ -1,6 +1,6 @@
 services:
-  seaton:
-    image: seaton:${SEATON_IMAGE_TAG:-latest}
+  visitflow:
+    image: visitflow:${VISITFLOW_IMAGE_TAG:-latest}
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -9,20 +9,20 @@ services:
       BOOTSTRAP_ADMIN: ${BOOTSTRAP_ADMIN:?BOOTSTRAP_ADMIN is required}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?BOOTSTRAP_ADMIN_PASSWORD is required}
     volumes:
-      - seaton-data:/var/lib/seaton
+      - visitflow-data:/var/lib/visitflow
     read_only: true
     tmpfs:
-      - /tmp:size=256m,mode=1777
+      - /tmp:size=128m,mode=1777
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     healthcheck:
-      test: ["CMD", "/usr/local/bin/seaton", "healthcheck"]
+      test: ["CMD", "/usr/local/bin/visitflow", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 20s
 
 volumes:
-  seaton-data:
+  visitflow-data:

@@ -14,14 +14,14 @@ fi
 
 release_commit="$(git rev-parse --short=12 HEAD)"
 release_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-artifact="SeatOn-v${release_version}-linux-amd64-image.tar.gz"
+artifact="VisitFlow-v${release_version}-linux-amd64-image.tar.gz"
 
 docker build \
   --platform linux/amd64 \
   --build-arg "VERSION=${release_version}" \
   --build-arg "COMMIT=${release_commit}" \
   --build-arg "BUILT_AT=${release_built_at}" \
-  -t "seaton:${release_version}" \
-  -t "seaton:latest" .
-docker save "seaton:${release_version}" | gzip -9 > "$artifact"
+  -t "visitflow:${release_version}" \
+  -t "visitflow:latest" .
+docker save "visitflow:${release_version}" | gzip -9 > "$artifact"
 echo "$artifact"

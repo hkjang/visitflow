@@ -13,10 +13,10 @@ import (
 func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 	counts := map[string]int{}
 	queries := map[string]string{
-		"today":           `SELECT count(*) FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE v.start_at::date=CURRENT_DATE AND vv.status NOT IN ('CANCELLED','REJECTED')`,
+		"today":           `SELECT count(*) FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites s ON s.id=v.site_id WHERE (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date AND vv.status NOT IN ('CANCELLED','REJECTED')`,
 		"current":         `SELECT count(*) FROM visitor_visits WHERE status='CHECKED_IN'`,
 		"pendingApproval": `SELECT count(*) FROM visits WHERE status='PENDING_APPROVAL'`,
-		"noShow":          `SELECT count(*) FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE v.start_at::date=CURRENT_DATE AND vv.status='NO_SHOW'`,
+		"noShow":          `SELECT count(*) FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites s ON s.id=v.site_id WHERE (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date AND vv.status='NO_SHOW'`,
 		"failedMessages":  `SELECT count(*) FROM notifications WHERE status='failed'`,
 		"watchlist":       `SELECT count(*) FROM watchlist_entries WHERE active AND (ends_at IS NULL OR ends_at>now())`,
 	}

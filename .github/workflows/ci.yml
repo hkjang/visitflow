@@ -32,4 +32,4 @@ jobs:
           npm ci
           npm run build
       - name: Docker image build
-        run: docker build --build-arg VERSION=ci --build-arg COMMIT="$GITHUB_SHA" --build-arg BUILT_AT=ci -t seaton:ci .
+        run: docker build --build-arg VERSION=ci --build-arg COMMIT="$GITHUB_SHA" --build-arg BUILT_AT=ci -t visitflow:ci .

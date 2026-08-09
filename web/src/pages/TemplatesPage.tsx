@@ -10,7 +10,7 @@ import { PageHeader } from "../components/AdminUI";
 type Template = { id: string; name: string; payload: Record<string, unknown>; updatedAt: string };
 export function TemplatesPage() {
   const navigate = useNavigate(); const [items, setItems] = useState<Template[]>([]); const [open, setOpen] = useState(false); const [name, setName] = useState(""); const [purpose, setPurpose] = useState(""); const [placeDetail, setPlaceDetail] = useState(""); const [company, setCompany] = useState(""); const [error, setError] = useState("");
-  const load = () => api<{ items: Template[] }>("/api/v1/visit-templates").then((x) => setItems(x.items)).catch((e) => setError(e.message)); useEffect(load, []);
+  const load = () => api<{ items: Template[] }>("/api/v1/visit-templates").then((x) => setItems(x.items)).catch((e) => setError(e.message)); useEffect(() => { void load(); }, []);
   const create = async () => { await postJSON("/api/v1/visit-templates", { name, payload: { purpose, placeDetail, company } }); setOpen(false); setName(""); setPurpose(""); setPlaceDetail(""); setCompany(""); load(); };
   const remove = async (id: string) => { if (!confirm("템플릿을 삭제할까요?")) return; await api(`/api/v1/visit-templates/${id}`, { method: "DELETE" }); load(); };
   const use = (item: Template) => { localStorage.setItem("visitflow_template", JSON.stringify(item.payload)); navigate("/visits/new"); };

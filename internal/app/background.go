@@ -104,7 +104,10 @@ func (s *Server) runVisitMaintenance(ctx context.Context) {
 	if hour >= 0 && hour <= 23 && time.Now().Hour() >= hour {
 		_, err = s.db.Exec(ctx, `WITH ended AS (UPDATE visitor_visits SET status='CHECKED_OUT',checked_out_at=now() WHERE status='CHECKED_IN' AND checked_in_at::date<CURRENT_DATE+1 RETURNING visit_id,id) INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,method,details) SELECT visit_id,id,'CHECKED_OUT','automatic','{"reason":"policy cutoff"}'::jsonb FROM ended`)
 		if err == nil {
-			_, _ = s.db.Exec(ctx, `UPDATE visits SET status='CHECKED_OUT',updated_at=now() WHERE status='CHECKED_IN' AND NOT EXISTS(SELECT 1 FROM visitor_visits vv WHERE vv.visit_id=visits.id AND vv.status='CHECKED_IN')`)
+			_, _ = s.db.Exec(ctx, `UPDATE visits SET status=CASE
+				WHEN EXISTS(SELECT 1 FROM visitor_visits vv WHERE vv.visit_id=visits.id AND vv.status='CHECKED_IN') THEN 'CHECKED_IN'
+				WHEN EXISTS(SELECT 1 FROM visitor_visits vv WHERE vv.visit_id=visits.id AND vv.status IN ('SCHEDULED','ARRIVED')) THEN 'SCHEDULED'
+				ELSE 'CHECKED_OUT' END,updated_at=now() WHERE status IN ('CHECKED_IN','SCHEDULED')`)
 		}
 	}
 	_, _ = s.db.Exec(ctx, `DELETE FROM sessions WHERE expires_at<now(); DELETE FROM oidc_states WHERE expires_at<now();`)
@@ -131,7 +134,7 @@ func (s *Server) runPrivacyMaintenance(ctx context.Context) {
 	erased, err := s.keys.Encrypt("파기됨")
 	if err == nil {
 		for _, id := range ids {
-			_, _ = s.db.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,phone_encrypted=$2,phone_hash=NULL,email_encrypted=NULL,vehicle_encrypted=NULL,company=NULL,title=NULL,erased_at=now(),updated_at=now() WHERE id=$1`, id, erased)
+			_, _ = s.db.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,name_hash=NULL,phone_encrypted=$2,phone_hash=NULL,email_encrypted=NULL,vehicle_encrypted=NULL,company=NULL,title=NULL,erased_at=now(),updated_at=now() WHERE id=$1`, id, erased)
 		}
 	}
 	auditDays, _ := strconv.Atoi(settingOr(s, ctx, "privacy.audit_retention_days", "730"))

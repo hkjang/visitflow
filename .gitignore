@@ -1,5 +1,5 @@
 # Go
-/seaton
+/visitflow
 coverage.out
 
 # React / Node
@@ -10,7 +10,7 @@ web/vite.config.js
 web/vite.config.d.ts
 
 # Embedded UI is produced inside Docker; keep only the fallback index.
-cmd/seaton/webdist/assets/
+cmd/visitflow/webdist/assets/
 
 # Local operations
 .env

@@ -48,6 +48,13 @@ func maskName(v string) string {
 	return string(r[0]) + strings.Repeat("○", len(r)-2) + string(r[len(r)-1])
 }
 
+func siteAllowed(u User, siteID string) bool {
+	if u.Role != RoleLobby || len(u.SiteScope) == 0 {
+		return true
+	}
+	return containsString(u.SiteScope, siteID)
+}
+
 func (s *Server) encryptOptional(v string) (string, error) {
 	if strings.TrimSpace(v) == "" {
 		return "", nil
@@ -149,10 +156,10 @@ func (s *Server) personalDashboard(w http.ResponseWriter, r *http.Request) {
 	u, _ := userFrom(r)
 	counts := map[string]int{}
 	queries := map[string]string{
-		"today":    `SELECT count(*) FROM visits WHERE host_user_id=$1 AND start_at::date=CURRENT_DATE AND status NOT IN ('CANCELLED','REJECTED')`,
-		"upcoming": `SELECT count(*) FROM visits WHERE host_user_id=$1 AND start_at>now() AND status IN ('PENDING_APPROVAL','APPROVED','SCHEDULED')`,
-		"arrived":  `SELECT count(*) FROM visits WHERE host_user_id=$1 AND start_at::date=CURRENT_DATE AND status IN ('ARRIVED','CHECKED_IN')`,
-		"pending":  `SELECT count(*) FROM visits WHERE host_user_id=$1 AND status='PENDING_APPROVAL'`,
+		"today":    `SELECT count(*) FROM visits v JOIN sites s ON s.id=v.site_id WHERE v.host_user_id=$1 AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date AND v.status NOT IN ('CANCELLED','REJECTED')`,
+		"upcoming": `SELECT count(*) FROM visits v WHERE v.host_user_id=$1 AND v.start_at>now() AND v.status IN ('PENDING_APPROVAL','APPROVED','SCHEDULED')`,
+		"arrived":  `SELECT count(*) FROM visits v JOIN sites s ON s.id=v.site_id WHERE v.host_user_id=$1 AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date AND v.status IN ('ARRIVED','CHECKED_IN')`,
+		"pending":  `SELECT count(*) FROM visits v WHERE v.host_user_id=$1 AND v.status='PENDING_APPROVAL'`,
 	}
 	for k, q := range queries {
 		var count int
@@ -197,12 +204,12 @@ func (s *Server) queryVisits(ctx context.Context, u User, status, period, search
 		LEFT JOIN organizations o ON o.id=v.department_id LEFT JOIN lobbies l ON l.id=v.lobby_id
 		LEFT JOIN visitor_visits vv ON vv.visit_id=v.id LEFT JOIN visitors p ON p.id=vv.visitor_id
 		WHERE ($1='' OR v.status=$1)
-		AND ($2='' OR ($2='today' AND v.start_at::date=CURRENT_DATE) OR ($2='upcoming' AND v.start_at>=CURRENT_DATE) OR ($2='past' AND v.end_at<now()))
-		AND ($3='' OR v.id=$3 OR v.request_no ILIKE '%%'||$3||'%%' OR p.company ILIKE '%%'||$3||'%%' OR h.display_name ILIKE '%%'||$3||'%%')
+		AND ($2='' OR ($2='today' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date) OR ($2='upcoming' AND v.start_at>=now()) OR ($2='past' AND v.end_at<now()))
+		AND ($3='' OR v.id=$3 OR v.request_no ILIKE '%%'||$3||'%%' OR p.company ILIKE '%%'||$3||'%%' OR h.display_name ILIKE '%%'||$3||'%%' OR p.name_hash=$9 OR p.phone_hash=$10)
 		AND ($5 IN ('admin','super_admin','security','auditor')
 		 OR ($5='lobby' AND (cardinality($7::text[])=0 OR v.site_id=ANY($7::text[])))
 		 OR ($5='dept_manager' AND v.department_id=NULLIF($6,'')) OR v.host_user_id=$4)
-		GROUP BY v.id,h.display_name,o.name,s.name,l.name ORDER BY v.start_at DESC LIMIT $8`, status, period, strings.TrimSpace(search), u.ID, u.Role, dept, u.SiteScope, limit)
+		GROUP BY v.id,h.display_name,o.name,s.name,l.name ORDER BY v.start_at DESC LIMIT $8`, status, period, strings.TrimSpace(search), u.ID, u.Role, dept, u.SiteScope, limit, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(search))), s.keys.Digest("phone:"+normalizePhone(search)))
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +268,9 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 	}
 	if in.EndAt.Sub(in.StartAt) > 31*24*time.Hour {
 		return nil, visitError{400, "schedule_too_long", "한 방문 일정은 31일을 초과할 수 없습니다"}
+	}
+	if !siteAllowed(actor, in.SiteID) {
+		return nil, visitError{403, "site_scope_forbidden", "담당 사업장 범위를 벗어난 요청입니다"}
 	}
 	companyRequired, _ := s.getSetting(ctx, "visit.company_required")
 	for _, visitor := range in.Visitors {
@@ -388,9 +398,9 @@ func (s *Server) upsertVisitor(ctx context.Context, tx pgx.Tx, in VisitorInput) 
 	}
 	if id == "" {
 		id = newID()
-		_, err = tx.Exec(ctx, `INSERT INTO visitors(id,name_encrypted,phone_encrypted,phone_hash,email_encrypted,company,title,vehicle_encrypted,consented_at) VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),now())`, id, nameEnc, phoneEnc, hash, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
+		_, err = tx.Exec(ctx, `INSERT INTO visitors(id,name_encrypted,name_hash,phone_encrypted,phone_hash,email_encrypted,company,title,vehicle_encrypted,consented_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),NULLIF($9,''),now())`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, hash, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,phone_encrypted=$3,email_encrypted=NULLIF($4,''),company=NULLIF($5,''),title=NULLIF($6,''),vehicle_encrypted=NULLIF($7,''),consented_at=now(),updated_at=now() WHERE id=$1`, id, nameEnc, phoneEnc, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
+		_, err = tx.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,name_hash=$3,phone_encrypted=$4,email_encrypted=NULLIF($5,''),company=NULLIF($6,''),title=NULLIF($7,''),vehicle_encrypted=NULLIF($8,''),consented_at=now(),updated_at=now() WHERE id=$1`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
 	}
 	return id, err
 }
@@ -418,8 +428,16 @@ func (s *Server) issueQRTx(ctx context.Context, tx pgx.Tx, participantID string,
 	if rotatedFrom != "" {
 		_ = tx.QueryRow(ctx, `SELECT version+1 FROM qr_tokens WHERE id=$1`, rotatedFrom).Scan(&version)
 	}
-	validFrom := startAt.Add(-24 * time.Hour)
-	validUntil := endAt.Add(12 * time.Hour)
+	earlyMinutes, _ := strconv.Atoi(settingOr(s, ctx, "visit.early_checkin_minutes", "60"))
+	lateMinutes, _ := strconv.Atoi(settingOr(s, ctx, "visit.late_grace_minutes", "120"))
+	if earlyMinutes < 0 || earlyMinutes > 1440 {
+		earlyMinutes = 60
+	}
+	if lateMinutes < 0 || lateMinutes > 1440 {
+		lateMinutes = 120
+	}
+	validFrom := startAt.Add(-time.Duration(earlyMinutes) * time.Minute)
+	validUntil := endAt.Add(time.Duration(lateMinutes) * time.Minute)
 	_, err = tx.Exec(ctx, `INSERT INTO qr_tokens(id,visitor_visit_id,token_hash,token_encrypted,prefix,version,valid_from,valid_until,rotated_from) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''))`, newID(), participantID, s.keys.Digest("qr:"+raw), encrypted, raw[:12], version, validFrom, validUntil, rotatedFrom)
 	return raw, err
 }
@@ -605,8 +623,12 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 	if approve {
 		status, participantStatus = "SCHEDULED", "SCHEDULED"
 	}
+	departmentID := ""
+	if u.DepartmentID != nil {
+		departmentID = *u.DepartmentID
+	}
 	var startAt, endAt time.Time
-	tag, err := tx.Exec(r.Context(), `UPDATE visits SET status=$2,approval_reason=NULLIF($3,''),approved_by=$4,approved_at=now(),updated_at=now() WHERE id=$1 AND status='PENDING_APPROVAL'`, id, status, in.Reason, u.ID)
+	tag, err := tx.Exec(r.Context(), `UPDATE visits SET status=$2,approval_reason=NULLIF($3,''),approved_by=$4,approved_at=now(),updated_at=now() WHERE id=$1 AND status='PENDING_APPROVAL' AND ($5<>'dept_manager' OR department_id=NULLIF($6,''))`, id, status, in.Reason, u.ID, u.Role, departmentID)
 	if err == nil && tag.RowsAffected() > 0 {
 		err = tx.QueryRow(r.Context(), `SELECT start_at,end_at FROM visits WHERE id=$1`, id).Scan(&startAt, &endAt)
 	}
@@ -614,23 +636,33 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 		_, err = tx.Exec(r.Context(), `UPDATE visitor_visits SET status=$2 WHERE visit_id=$1`, id, participantStatus)
 	}
 	if err == nil && approve {
+		var siteID, place string
+		err = tx.QueryRow(r.Context(), `SELECT site_id,COALESCE(place_detail,'') FROM visits WHERE id=$1`, id).Scan(&siteID, &place)
+		type approvalParticipant struct{ id, phoneEnc, nameEnc, company string }
+		participants := []approvalParticipant{}
 		rows, queryErr := tx.Query(r.Context(), `SELECT vv.id,p.phone_encrypted,p.name_encrypted,COALESCE(p.company,'') FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id WHERE vv.visit_id=$1`, id)
 		if queryErr != nil {
 			err = queryErr
-		} else {
+		} else if err == nil {
 			for rows.Next() {
-				var participantID, phoneEnc, nameEnc, company string
-				if rows.Scan(&participantID, &phoneEnc, &nameEnc, &company) != nil {
-					continue
+				var participant approvalParticipant
+				if scanErr := rows.Scan(&participant.id, &participant.phoneEnc, &participant.nameEnc, &participant.company); scanErr != nil {
+					err = scanErr
+					break
 				}
-				raw, issueErr := s.issueQRTx(r.Context(), tx, participantID, startAt, endAt, "")
+				participants = append(participants, participant)
+			}
+			if rows.Err() != nil {
+				err = rows.Err()
+			}
+			rows.Close()
+			for _, participant := range participants {
+				raw, issueErr := s.issueQRTx(r.Context(), tx, participant.id, startAt, endAt, "")
 				if issueErr != nil {
 					err = issueErr
 					break
 				}
-				var siteID, place string
-				_ = tx.QueryRow(r.Context(), `SELECT site_id,COALESCE(place_detail,'') FROM visits WHERE id=$1`, id).Scan(&siteID, &place)
-				visitor := VisitorInput{Name: s.decryptOptional(nameEnc), Phone: s.decryptOptional(phoneEnc), Company: company}
+				visitor := VisitorInput{Name: s.decryptOptional(participant.nameEnc), Phone: s.decryptOptional(participant.phoneEnc), Company: participant.company}
 				input := VisitInput{SiteID: siteID, StartAt: startAt, EndAt: endAt, PlaceDetail: place}
 				passURL := s.publicBaseURL(r.Context(), r) + "/q/" + raw
 				if queueErr := s.queueVisitorNotificationTx(r.Context(), tx, id, visitor.Phone, visitor, input, passURL); queueErr != nil {
@@ -638,7 +670,6 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 					break
 				}
 			}
-			rows.Close()
 		}
 	}
 	if err == nil && tag.RowsAffected() > 0 {
@@ -727,15 +758,15 @@ func (s *Server) createWalkIn(w http.ResponseWriter, r *http.Request) {
 }
 
 type qrRecord struct {
-	TokenID, ParticipantID, VisitID, Status, ParticipantStatus, NameEnc, Company, HostName, Department, SiteName, LobbyName, Purpose string
-	StartAt, EndAt, ValidFrom, ValidUntil                                                                                            time.Time
-	UsedAt, RevokedAt                                                                                                                *time.Time
-	Version                                                                                                                          int
+	TokenID, ParticipantID, VisitID, Status, ParticipantStatus, NameEnc, Company, HostName, Department, SiteID, SiteName, LobbyName, Purpose string
+	StartAt, EndAt, ValidFrom, ValidUntil                                                                                                    time.Time
+	UsedAt, RevokedAt                                                                                                                        *time.Time
+	Version                                                                                                                                  int
 }
 
 func (s *Server) lookupQR(ctx context.Context, raw string) (qrRecord, error) {
 	var q qrRecord
-	err := s.db.QueryRow(ctx, `SELECT qt.id,vv.id,v.id,v.status,vv.status,p.name_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),si.name,COALESCE(l.name,''),v.purpose,v.start_at,v.end_at,qt.valid_from,qt.valid_until,qt.used_at,qt.revoked_at,qt.version FROM qr_tokens qt JOIN visitor_visits vv ON vv.id=qt.visitor_visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id JOIN sites si ON si.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE qt.token_hash=$1`, s.keys.Digest("qr:"+raw)).Scan(&q.TokenID, &q.ParticipantID, &q.VisitID, &q.Status, &q.ParticipantStatus, &q.NameEnc, &q.Company, &q.HostName, &q.Department, &q.SiteName, &q.LobbyName, &q.Purpose, &q.StartAt, &q.EndAt, &q.ValidFrom, &q.ValidUntil, &q.UsedAt, &q.RevokedAt, &q.Version)
+	err := s.db.QueryRow(ctx, `SELECT qt.id,vv.id,v.id,v.status,vv.status,p.name_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),si.id,si.name,COALESCE(l.name,''),v.purpose,v.start_at,v.end_at,qt.valid_from,qt.valid_until,qt.used_at,qt.revoked_at,qt.version FROM qr_tokens qt JOIN visitor_visits vv ON vv.id=qt.visitor_visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id JOIN sites si ON si.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE qt.token_hash=$1`, s.keys.Digest("qr:"+raw)).Scan(&q.TokenID, &q.ParticipantID, &q.VisitID, &q.Status, &q.ParticipantStatus, &q.NameEnc, &q.Company, &q.HostName, &q.Department, &q.SiteID, &q.SiteName, &q.LobbyName, &q.Purpose, &q.StartAt, &q.EndAt, &q.ValidFrom, &q.ValidUntil, &q.UsedAt, &q.RevokedAt, &q.Version)
 	return q, err
 }
 
@@ -833,6 +864,8 @@ func (s *Server) verifyQR(w http.ResponseWriter, r *http.Request) {
 	message := "체크인할 수 있습니다"
 	if err != nil {
 		result, status, message = "not_found", 404, "존재하지 않는 QR입니다"
+	} else if !siteAllowed(u, q.SiteID) {
+		result, status, message = "wrong_site", 403, "담당 사업장이 아닌 방문증입니다"
 	} else if q.RevokedAt != nil || q.Status == "CANCELLED" || q.Status == "REJECTED" {
 		result, status, message = "revoked", 409, "취소 또는 폐기된 방문증입니다"
 	} else if !s.validateDynamicQR(r.Context(), raw, ts, sig) {
@@ -878,12 +911,12 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var tokenID, participantID, visitID, visitStatus, participantStatus, hostID, visitorNameEnc, lobbyName string
+	var tokenID, participantID, visitID, visitStatus, participantStatus, hostID, visitorNameEnc, lobbyName, siteID string
 	var validFrom, validUntil time.Time
 	var usedAt, revokedAt *time.Time
-	err = tx.QueryRow(r.Context(), `SELECT qt.id,vv.id,v.id,v.status,vv.status,v.host_user_id,p.name_encrypted,COALESCE(l.name,''),qt.valid_from,qt.valid_until,qt.used_at,qt.revoked_at FROM qr_tokens qt JOIN visitor_visits vv ON vv.id=qt.visitor_visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id LEFT JOIN lobbies l ON l.id=COALESCE(NULLIF($2,''),v.lobby_id) WHERE qt.token_hash=$1 FOR UPDATE`, s.keys.Digest("qr:"+raw), in.LobbyID).Scan(&tokenID, &participantID, &visitID, &visitStatus, &participantStatus, &hostID, &visitorNameEnc, &lobbyName, &validFrom, &validUntil, &usedAt, &revokedAt)
+	err = tx.QueryRow(r.Context(), `SELECT qt.id,vv.id,v.id,v.status,vv.status,v.host_user_id,p.name_encrypted,COALESCE(l.name,''),v.site_id,qt.valid_from,qt.valid_until,qt.used_at,qt.revoked_at FROM qr_tokens qt JOIN visitor_visits vv ON vv.id=qt.visitor_visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id LEFT JOIN lobbies l ON l.id=COALESCE(NULLIF($2,''),v.lobby_id) WHERE qt.token_hash=$1 FOR UPDATE OF qt,vv,v,p`, s.keys.Digest("qr:"+raw), in.LobbyID).Scan(&tokenID, &participantID, &visitID, &visitStatus, &participantStatus, &hostID, &visitorNameEnc, &lobbyName, &siteID, &validFrom, &validUntil, &usedAt, &revokedAt)
 	now := time.Now()
-	if err != nil || revokedAt != nil || now.Before(validFrom) || now.After(validUntil) || visitStatus == "CANCELLED" || visitStatus == "REJECTED" || participantStatus == "CHECKED_OUT" {
+	if err != nil || !siteAllowed(u, siteID) || revokedAt != nil || now.Before(validFrom) || now.After(validUntil) || visitStatus == "CANCELLED" || visitStatus == "REJECTED" || participantStatus == "CHECKED_OUT" {
 		writeError(w, 409, "invalid_qr", "체크인할 수 없는 방문증입니다")
 		return
 	}
@@ -945,12 +978,15 @@ func (s *Server) checkOut(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var visitID string
-	err = tx.QueryRow(r.Context(), `UPDATE visitor_visits SET status='CHECKED_OUT',checked_out_at=now() WHERE id=$1 AND status='CHECKED_IN' RETURNING visit_id`, in.VisitorVisitID).Scan(&visitID)
+	err = tx.QueryRow(r.Context(), `UPDATE visitor_visits vv SET status='CHECKED_OUT',checked_out_at=now() FROM visits v WHERE vv.id=$1 AND vv.status='CHECKED_IN' AND v.id=vv.visit_id AND ($2<>'lobby' OR cardinality($3::text[])=0 OR v.site_id=ANY($3::text[])) RETURNING vv.visit_id`, in.VisitorVisitID, u.Role, u.SiteScope).Scan(&visitID)
 	if err == nil {
 		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_OUT',$3,NULLIF($4,''),$5)`, visitID, in.VisitorVisitID, u.ID, in.LobbyID, in.Method)
 	}
 	if err == nil {
-		_, err = tx.Exec(r.Context(), `UPDATE visits SET status='CHECKED_OUT',updated_at=now() WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM visitor_visits WHERE visit_id=$1 AND status='CHECKED_IN')`, visitID)
+		_, err = tx.Exec(r.Context(), `UPDATE visits SET status=CASE
+			WHEN EXISTS(SELECT 1 FROM visitor_visits WHERE visit_id=$1 AND status='CHECKED_IN') THEN 'CHECKED_IN'
+			WHEN EXISTS(SELECT 1 FROM visitor_visits WHERE visit_id=$1 AND status IN ('SCHEDULED','ARRIVED')) THEN 'SCHEDULED'
+			ELSE 'CHECKED_OUT' END,updated_at=now() WHERE id=$1`, visitID)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -973,27 +1009,42 @@ func (s *Server) lobbyCurrent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) lobbyList(w http.ResponseWriter, r *http.Request, current bool) {
-	where := `v.start_at::date=CURRENT_DATE AND vv.status NOT IN ('CANCELLED','REJECTED')`
+	u, _ := userFrom(r)
+	where := `(v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date AND vv.status NOT IN ('CANCELLED','REJECTED')`
 	if current {
 		where = `vv.status='CHECKED_IN'`
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT vv.id,v.id,p.name_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),s.name,COALESCE(l.name,''),v.start_at,v.end_at,vv.status,vv.checked_in_at FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE `+where+` ORDER BY COALESCE(vv.checked_in_at,v.start_at) DESC LIMIT 300`)
+	rows, err := s.db.Query(r.Context(), `SELECT vv.id,v.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),s.name,COALESCE(l.name,''),v.start_at,v.end_at,vv.status,vv.checked_in_at FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE `+where+` AND ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[])) ORDER BY COALESCE(vv.checked_in_at,v.start_at) DESC LIMIT 300`, u.Role, u.SiteScope)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
 	defer rows.Close()
 	items := []map[string]any{}
+	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	phoneSearch := normalizePhone(search)
 	for rows.Next() {
-		var participantID, visitID, nameEnc, company, host, department, site, lobby, status string
+		var participantID, visitID, nameEnc, phoneEnc, company, host, department, site, lobby, status string
 		var start, end time.Time
 		var checkedIn *time.Time
-		if rows.Scan(&participantID, &visitID, &nameEnc, &company, &host, &department, &site, &lobby, &start, &end, &status, &checkedIn) == nil {
-			items = append(items, map[string]any{"visitorVisitId": participantID, "visitId": visitID, "visitor": s.decryptOptional(nameEnc), "company": company, "host": host, "department": department, "site": site, "lobby": lobby, "startAt": start, "endAt": end, "status": status, "checkedInAt": checkedIn})
+		if rows.Scan(&participantID, &visitID, &nameEnc, &phoneEnc, &company, &host, &department, &site, &lobby, &start, &end, &status, &checkedIn) == nil {
+			name, phone := s.decryptOptional(nameEnc), s.decryptOptional(phoneEnc)
+			matchesText := strings.Contains(strings.ToLower(name+" "+company+" "+host+" "+department), search)
+			matchesPhone := phoneSearch != "" && strings.Contains(normalizePhone(phone), phoneSearch)
+			if search != "" && !matchesText && !matchesPhone {
+				continue
+			}
+			items = append(items, map[string]any{"visitorVisitId": participantID, "visitId": visitID, "visitor": name, "company": company, "host": host, "department": department, "site": site, "lobby": lobby, "startAt": start, "endAt": end, "status": status, "checkedInAt": checkedIn})
 		}
 	}
 	var scheduled, currentCount, completed, noShow int
-	_ = s.db.QueryRow(r.Context(), `SELECT count(*) FILTER(WHERE vv.status='SCHEDULED'),count(*) FILTER(WHERE vv.status='CHECKED_IN'),count(*) FILTER(WHERE vv.status='CHECKED_OUT'),count(*) FILTER(WHERE vv.status='NO_SHOW') FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE v.start_at::date=CURRENT_DATE`).Scan(&scheduled, &currentCount, &completed, &noShow)
+	_ = s.db.QueryRow(r.Context(), `SELECT
+		count(*) FILTER(WHERE vv.status='SCHEDULED' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date),
+		count(*) FILTER(WHERE vv.status='CHECKED_IN'),
+		count(*) FILTER(WHERE vv.status='CHECKED_OUT' AND (vv.checked_out_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date),
+		count(*) FILTER(WHERE vv.status='NO_SHOW' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date)
+		FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites s ON s.id=v.site_id
+		WHERE ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[]))`, u.Role, u.SiteScope).Scan(&scheduled, &currentCount, &completed, &noShow)
 	counts := map[string]int{"scheduled": scheduled, "current": currentCount, "completed": completed, "noShow": noShow}
 	writeJSON(w, 200, map[string]any{"counts": counts, "items": items})
 }

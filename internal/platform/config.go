@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Config intentionally exposes only the three deployment-time settings SeatOn
+// Config intentionally exposes only the three deployment-time settings VisitFlow
 // needs. Every other operational setting lives in the administrator UI/DB.
 type Config struct {
 	PostgresDSN            string

@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS lobbies (
 CREATE TABLE IF NOT EXISTS visitors (
   id text PRIMARY KEY,
   name_encrypted text NOT NULL,
+  name_hash bytea,
   phone_encrypted text NOT NULL,
   phone_hash bytea,
   email_encrypted text,
@@ -145,7 +146,9 @@ CREATE TABLE IF NOT EXISTS visitors (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE visitors ADD COLUMN IF NOT EXISTS name_hash bytea;
 CREATE INDEX IF NOT EXISTS visitors_phone_hash_idx ON visitors(phone_hash);
+CREATE INDEX IF NOT EXISTS visitors_name_hash_idx ON visitors(name_hash);
 CREATE INDEX IF NOT EXISTS visitors_company_idx ON visitors(lower(company));
 
 CREATE TABLE IF NOT EXISTS visits (

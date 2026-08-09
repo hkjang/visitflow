@@ -1,24 +1,45 @@
-# SeatOn 아키텍처
+# VisitFlow 아키텍처
 
 ```text
-Browser / MCP client
-        │ same-origin HTTPS, OIDC PKCE, personal key
-        ▼
-┌────────────────────────────────────────────┐
-│ SeatOn single container                    │
-│ Go HTTP API + embedded React/MUI UI        │
-│ RBAC · audit · rules · offline CV · MCP    │
-│ PDF rasterizer (first page)                │
-└───────────────┬────────────────────────────┘
-                │ POSTGRES_DSN
-                ▼
-          PostgreSQL 14+
-
-Persistent pair: PostgreSQL backup + /var/lib/seaton/master.key
+임직원 Web  관리자 Web  로비/키오스크  모바일 방문증  MCP Client
+       └────────────── same-origin HTTPS ───────────────┘
+                              │
+               ┌──────────────▼──────────────┐
+               │ VisitFlow single container │
+               │ Go REST/MCP/SSE API         │
+               │ React + Material UI         │
+               │ OIDC · RBAC · Audit         │
+               │ QR · Notification Worker    │
+               └──────────────┬──────────────┘
+                              │ POSTGRES_DSN
+                         PostgreSQL 14+
 ```
 
-도면 파일도 PostgreSQL에 보관하여 별도 오브젝트 스토리지가 필요 없다. Keycloak과 인사 API는 관리자 설정으로 사내 엔드포인트를 지정한다. 설치별 마스터 키는 Keycloak Client Secret, 인사 API Token 등 비밀 설정을 AES-256-GCM으로 암호화한다.
+## 보안 경계
 
-도면 좌표는 `0..1` 비율 값으로 저장한다. React UI는 외부 지도나 CDN 없이 SVG 오버레이로 좌석을 표시하므로 화면 크기와 오프라인 환경에 독립적이다.
+- 브라우저: HttpOnly/SameSite Session Cookie, 변경 요청 CSRF Token, CSP, Secure Cookie 자동 적용
+- Keycloak: Discovery, Authorization Code + PKCE S256, state/nonce, ID Token 서명·Audience 검증
+- API 키: `vf_` 원문은 1회만 표시하고 설치별 HMAC-SHA-256 Digest만 저장
+- 설정/개인정보: 설치별 Master Key로 AES-256-GCM 암호화
+- 방문자 검색: 전화번호 원문 대신 정규화 값의 namespaced HMAC 색인 사용
+- QR: `vfq_` 256-bit Random Token, HMAC 조회, 개인정보 미포함, 유효기간·1회 사용·폐기·회전
+- Dynamic QR: 관리자가 30~60초 주기를 설정하면 시간 Window HMAC 서명을 추가하고 현재/직전 Window만 허용
+- 감사: 로그인, 방문 변경, QR 검증, 입·퇴실, 개인정보/Watch List 조회, 설정과 키 변경 기록
 
-기본 도면 분석기 `offline-cv-v1`은 이미지 보정 후 명암 연결 요소와 직사각형 특성을 계산하여 좌석 후보와 신뢰도를 생성한다. PDF는 첫 페이지를 로컬에서 래스터화한다. 고신뢰도 후보를 자동 생성하고 기준 이하 항목만 검토 대상으로 남긴다. 정교한 사내 Vision 모델은 이후 동일한 분석 작업 인터페이스에 교체할 수 있다.
+## 상태와 트랜잭션
+
+```text
+REQUESTED → PENDING_APPROVAL → SCHEDULED → CHECKED_IN → CHECKED_OUT
+                    └→ REJECTED     ├→ CANCELLED
+                                    └→ NO_SHOW
+```
+
+방문 승인 시 방문자별 QR 생성과 방문증 알림 큐 등록을 같은 DB 트랜잭션에서 처리한다. 체크인 시 QR Row Lock, 상태/기간/Replay 검증, Token 사용 처리, 방문자/방문 상태 전이, 이벤트 기록, 담당자 도착 알림 큐 등록을 한 트랜잭션에서 처리한다.
+
+## 운영 구성
+
+- PostgreSQL 외 Redis, Message Broker, Object Storage 불필요
+- 알림 Worker는 `log`와 사내 `webhook` Adapter를 제공하며 최대 5회 재시도
+- SSE는 프로세스 내 Fan-out으로 로비 변경을 전달하고 DB가 Source of Truth 역할을 수행
+- Scheduler는 미방문, 자동 퇴실, Session 정리, 개인정보 파기와 감사 로그 보존을 수행
+- 영속 백업 단위는 PostgreSQL + `/var/lib/visitflow/master.key`

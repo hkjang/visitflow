@@ -1,60 +1,37 @@
-# VisitFlow 엔터프라이즈 관리자 가이드 (Admin & Operational Guide)
+# VisitFlow 관리자 가이드
 
-- **문서 버전**: v1.0.0-ENTERPRISE  
-- **작성일자**: 2026년 8월 10일  
-- **대상**: 시스템 관리자, Security/DevOps 엔지니어, 시설보안 책임자  
-- **문서 개요**: VisitFlow 3대 환경변수 부트스트랩, Keycloak OIDC SSO, PII 암호화 키 보존, 미체크아웃 초과 잔류 감지 규칙 및 감사 로그 운영  
+## 최초 실행
 
----
+컨테이너에는 `POSTGRES_DSN`, `BOOTSTRAP_ADMIN`, `BOOTSTRAP_ADMIN_PASSWORD` 세 환경변수만 전달한다. 최초 관리자만 환경변수로 생성하며 이후 비밀번호·SSO·정책·연동은 관리자 UI에서 바꾼다.
 
-## 1. 시스템 부트스트랩 및 필수 환경변수 (Bootstrap Specification)
+## 필수 운영 설정
 
-VisitFlow 컨테이너 프로세스는 오직 **3개의 애플리케이션 환경변수**만으로 최소 인프라 구축 및 부트스트랩을 완수합니다.
+1. 일반: 회사명과 외부 기준 URL
+2. 사업장: 주소, 로비, 방문 안내
+3. Keycloak: Issuer, Client ID, Client Secret, 그룹 매핑
+4. 방문 정책: 승인 사용, 조기 체크인, 미방문 유예, 자동 퇴실
+5. QR: 1회 사용, Dynamic 주기
+6. 알림: `log` 검증 또는 사내 SMS Webhook과 템플릿
+7. 개인정보: 마스킹·파기·감사 보존기간
+8. 보안: Session, 개인 키 만료와 회전 유예
 
-```bash
-# VisitFlow 실행 환경변수 명세
-POSTGRES_DSN=postgres://visitflow:Secr3tPass@10.10.60.5:5432/visitflow?sslmode=disable
-BOOTSTRAP_ADMIN=admin
-BOOTSTRAP_ADMIN_PASSWORD=SuperSecretAdminPassword123!
+## SMS Webhook 계약
+
+```json
+{
+  "recipient": "01012345678",
+  "message": "방문 안내 본문",
+  "channel": "sms",
+  "idempotencyKey": "notification-uuid"
+}
 ```
 
-> **비상 관리자(Break Glass) 원칙**:  
-> `BOOTSTRAP_ADMIN` 계정은 시스템 최초 실행 시 DB 계정이 존재하지 않을 때만 자동 생성되며 삭제가 불가능한 비상 복구용 계정입니다.
+2xx를 성공으로 처리한다. 실패는 5분 단위 Backoff로 최대 5회 재시도하며 관리자 통계·알림 화면에 사유를 표시한다.
 
----
+## 백업
 
-## 2. 볼륨 마운트 및 마스터 키 백업 (`/var/lib/visitflow`)
+PostgreSQL과 `/var/lib/visitflow/master.key`를 같은 복구 시점으로 백업한다. Master Key는 Client Secret과 개인정보 복호화에 필요하므로 별도 보안 백업을 유지한다.
 
-컨테이너 기동 시 반드시 마운트해야 하는 3대 데이터 볼륨:
+## 오프라인 업그레이드
 
-```bash
-docker run -d \
-  --name visitflow \
-  -p 8080:8080 \
-  -e POSTGRES_DSN="postgres://visitflow:password@postgres:5432/visitflow" \
-  -e BOOTSTRAP_ADMIN="admin" \
-  -e BOOTSTRAP_ADMIN_PASSWORD="change-this-strong-password" \
-  -v visitflow-data:/var/lib/visitflow \
-  visitflow:v1.0.0
-```
-
-### 2.1 마스터 키 보존 중요성 (`/var/lib/visitflow/master.key`)
-`/var/lib/visitflow/master.key` 파일은 DB에 저장된 Client Secret, API Token 및 방문자 PII 개인정보(성명/전화번호)를 암호화(AES-256-GCM)하는 마스터 키입니다. 이 키를 분실할 경우 암호화 데이터 복호화가 불가능하므로 반드시 정기 백업 대상에 포함시켜야 합니다.
-
----
-
-## 3. Keycloak OIDC SSO 및 RBAC 그룹 매핑
-
-- **OIDC Discovery**: Keycloak Discovery 엔드포인트를 등록하고 Authorization Code + PKCE (S256) 인증을 켭니다.
-- **Valid Redirect URI**: `https://visitflow.internal/api/v1/auth/oidc/callback`
-- **그룹 매핑**: Keycloak `/visitflow-admins`, `/visitflow-receptionists` 그룹을 사내 권한 그룹으로 맵핑하여 자동 RBAC 부여.
-
----
-
-## 4. 이상 출입 자동 감지 규칙 및 감사 로그 (Audit Trail)
-
-- **이상 상태 검출 규칙**:
-  - `OVERSTAYING_ALERT`: 약정 예약 시간 경과 후에도 체크아웃되지 않은 방문자.
-  - `UNRETURNED_CARD`: 퇴실 처리되었으나 출입증 매핑이 해제되지 않은 상태.
-  - `BLACKLIST_ATTEMPT`: 블랙리스트 지정 인원의 방문 사전 신청 시도.
-- **감사 로그 (Audit Trail)**: 사옥/로비 추가, 방문 승인/반려, PII 조회, OIDC 변경 등 모든 액션이 사용자 ID 및 IP 주소와 함께 무결성 감사 레코드로 영구 기록됩니다.
+새 Release의 `VisitFlow-vX.Y.Z-linux-amd64-image.tar.gz`를 반입해 `docker load`하고 Compose 이미지 태그만 변경한다. 시작 시 멱등 Migration이 자동 적용된다. 업그레이드 전 PostgreSQL과 Master Key를 백업한다.

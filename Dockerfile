@@ -12,26 +12,26 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
-RUN rm -rf cmd/seaton/webdist && mkdir -p cmd/seaton/webdist
-COPY --from=web /src/web/dist/ cmd/seaton/webdist/
+RUN rm -rf cmd/visitflow/webdist && mkdir -p cmd/visitflow/webdist
+COPY --from=web /src/web/dist/ cmd/visitflow/webdist/
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILT_AT=unknown
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.builtAt=${BUILT_AT}" \
-    -o /out/seaton ./cmd/seaton
+    -o /out/visitflow ./cmd/visitflow
 
 FROM debian:bookworm-slim
-LABEL org.opencontainers.image.title="SeatOn" \
-      org.opencontainers.image.description="Offline-ready smart office seat management" \
+LABEL org.opencontainers.image.title="VisitFlow" \
+      org.opencontainers.image.description="Offline-ready enterprise visitor management" \
       org.opencontainers.image.source="https://github.com/hkjang/seaton"
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata poppler-utils \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 10001 seaton \
-    && useradd --system --uid 10001 --gid seaton --home-dir /var/lib/seaton seaton \
-    && install -d -o seaton -g seaton -m 0700 /var/lib/seaton
-COPY --from=backend --chown=seaton:seaton /out/seaton /usr/local/bin/seaton
+    && groupadd --system --gid 10001 visitflow \
+    && useradd --system --uid 10001 --gid visitflow --home-dir /var/lib/visitflow visitflow \
+    && install -d -o visitflow -g visitflow -m 0700 /var/lib/visitflow
+COPY --from=backend --chown=visitflow:visitflow /out/visitflow /usr/local/bin/visitflow
 USER 10001:10001
 EXPOSE 8080
-VOLUME ["/var/lib/seaton"]
-ENTRYPOINT ["/usr/local/bin/seaton"]
+VOLUME ["/var/lib/visitflow"]
+ENTRYPOINT ["/usr/local/bin/visitflow"]

@@ -36,9 +36,6 @@ func (u User) CanAudit() bool {
 	return u.Role == RoleAuditor || u.Role == RoleSecurity || u.IsAdmin()
 }
 
-// Kept for source compatibility with legacy, no-longer-routed SeatOn handlers.
-func (u User) CanManageSeats() bool { return u.CanManageLobby() }
-
 type Setting struct {
 	Key        string `json:"key"`
 	Value      string `json:"value"`

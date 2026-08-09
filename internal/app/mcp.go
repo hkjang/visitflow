@@ -191,7 +191,12 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		return map[string]any{"items": items, "count": len(items), "months": months}, nil
 	case "get_lobby_status":
 		var scheduled, current, completed, noShow int
-		err := s.db.QueryRow(r.Context(), `SELECT count(*) FILTER(WHERE vv.status='SCHEDULED'),count(*) FILTER(WHERE vv.status='CHECKED_IN'),count(*) FILTER(WHERE vv.status='CHECKED_OUT'),count(*) FILTER(WHERE vv.status='NO_SHOW') FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE v.start_at::date=CURRENT_DATE`).Scan(&scheduled, &current, &completed, &noShow)
+		err := s.db.QueryRow(r.Context(), `SELECT
+			count(*) FILTER(WHERE vv.status='SCHEDULED' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date),
+			count(*) FILTER(WHERE vv.status='CHECKED_IN'),
+			count(*) FILTER(WHERE vv.status='CHECKED_OUT' AND (vv.checked_out_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date),
+			count(*) FILTER(WHERE vv.status='NO_SHOW' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date)
+			FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites s ON s.id=v.site_id`).Scan(&scheduled, &current, &completed, &noShow)
 		return map[string]any{"scheduled": scheduled, "current": current, "completed": completed, "noShow": noShow}, err
 	case "get_visit_statistics":
 		if !u.IsAdmin() {

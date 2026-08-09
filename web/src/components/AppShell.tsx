@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AppBar, Avatar, Box, Chip, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
+import { AppBar, Avatar, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, TextField, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
 import MenuRounded from "@mui/icons-material/MenuRounded";
 import HomeRounded from "@mui/icons-material/HomeRounded";
 import AddCircleOutlineRounded from "@mui/icons-material/AddCircleOutlineRounded";
@@ -18,21 +18,29 @@ import SettingsRounded from "@mui/icons-material/SettingsRounded";
 import KeyRounded from "@mui/icons-material/KeyRounded";
 import LogoutRounded from "@mui/icons-material/LogoutRounded";
 import InfoOutlined from "@mui/icons-material/InfoOutlined";
+import EditOutlined from "@mui/icons-material/EditOutlined";
 import { Logo } from "./Logo";
 import { useAuth } from "../auth";
+import { api, patchJSON } from "../api";
+import type { ReferenceData } from "../types";
 
 const drawerWidth = 264;
 const roleNames: Record<string, string> = { user: "방문 요청자", lobby: "로비 담당자", dept_manager: "부서 관리자", security: "보안 담당자", auditor: "감사 담당자", admin: "서비스 관리자", super_admin: "최고 관리자" };
 type Nav = { label: string; path: string; icon: React.ReactNode };
 
 export function AppShell() {
-  const { user, version, config, logout } = useAuth();
+  const { user, version, config, logout, reload } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const theme = useTheme();
   const mobile = useMediaQuery(theme.breakpoints.down("md"));
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [profileAnchor, setProfileAnchor] = useState<HTMLElement | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileName, setProfileName] = useState(user?.displayName ?? "");
+  const [profilePhone, setProfilePhone] = useState("");
+  const [profileDepartment, setProfileDepartment] = useState(user?.departmentId ?? "");
+  const [reference, setReference] = useState<ReferenceData | null>(null);
   const lobby = user && ["lobby", "security", "admin", "super_admin"].includes(user.role);
   const admin = user && ["admin", "super_admin"].includes(user.role);
   const auditor = user && ["auditor", "security", "admin", "super_admin"].includes(user.role);
@@ -59,6 +67,14 @@ export function AppShell() {
     return [{ title: "개인 서비스", items: personal }, { title: "로비 서비스", items: lobbyItems }, { title: "관리자", items: adminItems }].filter((g) => g.items.length);
   }, [admin, auditor, lobby]);
   const activeLabel = groups.flatMap((g) => g.items).find((x) => x.path === location.pathname)?.label ?? (location.pathname.startsWith("/admin/") ? "관리자" : "VisitFlow");
+  const openProfile = async () => {
+    setProfileAnchor(null); setProfileName(user?.displayName ?? ""); setProfileDepartment(user?.departmentId ?? ""); setProfilePhone(""); setProfileOpen(true);
+    if (!reference) setReference(await api<ReferenceData>("/api/v1/reference-data"));
+  };
+  const saveProfile = async () => {
+    await patchJSON("/api/v1/profile", { displayName: profileName, phone: profilePhone, departmentId: profileDepartment });
+    setProfileOpen(false); await reload();
+  };
   const drawer = (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <Box sx={{ p: 2.5 }}><Logo /></Box>
@@ -78,10 +94,12 @@ export function AppShell() {
       <Box component="main" sx={{ flex: 1, minWidth: 0, pt: "64px" }}><Outlet /></Box>
       <Menu anchorEl={profileAnchor} open={Boolean(profileAnchor)} onClose={() => setProfileAnchor(null)} slotProps={{ paper: { sx: { minWidth: 260, mt: 1 } } }}>
         <Box sx={{ px: 2, py: 1.5 }}><Typography fontWeight={800}>{user?.displayName}</Typography><Typography variant="body2" color="text.secondary">{user?.email || user?.username}</Typography></Box><Divider />
+        <MenuItem onClick={() => void openProfile()}><EditOutlined fontSize="small" sx={{ mr: 1.5 }} />프로필 · 연락처</MenuItem>
         <MenuItem onClick={() => { navigate("/profile/keys"); setProfileAnchor(null); }}><KeyRounded fontSize="small" sx={{ mr: 1.5 }} />내 API 키</MenuItem>
         <MenuItem disabled><InfoOutlined fontSize="small" sx={{ mr: 1.5 }} /><Box><Typography variant="body2">{config?.serviceName ?? "VisitFlow"} v{version?.version ?? "dev"}</Typography><Typography variant="caption" color="text.secondary">commit {version?.commit?.slice(0, 12) ?? "unknown"}</Typography></Box></MenuItem>
         <Divider /><MenuItem onClick={() => void logout()}><LogoutRounded fontSize="small" sx={{ mr: 1.5 }} />로그아웃</MenuItem>
       </Menu>
+      <Dialog open={profileOpen} onClose={() => setProfileOpen(false)} fullWidth maxWidth="sm"><DialogTitle>프로필 · 도착 알림 연락처</DialogTitle><DialogContent><Stack spacing={2} mt={1}><TextField label="표시 이름" value={profileName} onChange={(e) => setProfileName(e.target.value)} /><TextField label="휴대전화" value={profilePhone} onChange={(e) => setProfilePhone(e.target.value)} placeholder="010-0000-0000" helperText="방문자 체크인 시 담당자 SMS 알림에 사용하며 암호화 저장됩니다. 비워 두면 기존 연락처가 삭제됩니다." /><TextField select label="소속 부서" value={profileDepartment} onChange={(e) => setProfileDepartment(e.target.value)}><MenuItem value="">미지정</MenuItem>{reference?.departments.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField></Stack></DialogContent><DialogActions><Button onClick={() => setProfileOpen(false)}>취소</Button><Button variant="contained" disabled={!profileName} onClick={() => void saveProfile()}>저장</Button></DialogActions></Dialog>
     </Box>
   );
 }

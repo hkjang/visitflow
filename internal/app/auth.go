@@ -183,17 +183,6 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) requireSeatManager(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, _ := userFrom(r)
-		if !u.CanManageSeats() {
-			writeError(w, http.StatusForbidden, "seat_manager_required", "좌석 관리자 권한이 필요합니다")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func (s *Server) requireLobby(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, _ := userFrom(r)
@@ -360,6 +349,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		PreferredUsername string   `json:"preferred_username"`
 		Name              string   `json:"name"`
 		Email             string   `json:"email"`
+		PhoneNumber       string   `json:"phone_number"`
 		Groups            []string `json:"groups"`
 	}
 	if err := idToken.Claims(&claims); err != nil || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(nonce)) != 1 {
@@ -378,6 +368,14 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		name = username
 	}
 	role := s.roleForGroups(r.Context(), claims.Groups)
+	autoProvision, _ := s.getSetting(r.Context(), "oidc.auto_provision")
+	if autoProvision != "true" {
+		var exists bool
+		if err := s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE lower(username)=lower($1) AND active)`, username).Scan(&exists); err != nil || !exists {
+			writeError(w, http.StatusForbidden, "oidc_provision_disabled", "등록된 사용자만 SSO로 로그인할 수 있습니다")
+			return
+		}
+	}
 	id := newID()
 	err = s.db.QueryRow(r.Context(), `INSERT INTO users(id,username,display_name,email,role,source,last_login_at) VALUES($1,$2,$3,$4,$5,'oidc',now())
 		ON CONFLICT(username) DO UPDATE SET display_name=EXCLUDED.display_name,email=EXCLUDED.email,source='oidc',last_login_at=now(),
@@ -385,6 +383,11 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_provision_failed", "SSO 사용자를 등록하지 못했습니다")
 		return
+	}
+	if strings.TrimSpace(claims.PhoneNumber) != "" {
+		if encryptedPhone, encryptErr := s.keys.Encrypt(normalizePhone(claims.PhoneNumber)); encryptErr == nil {
+			_, _ = s.db.Exec(r.Context(), `UPDATE users SET phone_encrypted=$2 WHERE id=$1`, id, encryptedPhone)
+		}
 	}
 	u, err := scanUser(s.db.QueryRow(r.Context(), `SELECT id,username,display_name,COALESCE(email,''),employee_id,role,source,last_login_at FROM users WHERE id=$1`, id))
 	if err != nil || s.issueSession(w, r, u) != nil {

@@ -62,10 +62,13 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	updated := []string{}
+	changes := map[string]any{}
 	for _, key := range keys {
 		value := strings.TrimSpace(in.Settings[key])
 		var secret bool
-		if err := tx.QueryRow(r.Context(), `SELECT secret FROM settings WHERE key=$1`, key).Scan(&secret); err != nil {
+		var current string
+		if err := tx.QueryRow(r.Context(), `SELECT secret,value FROM settings WHERE key=$1`, key).Scan(&secret, &current); err != nil {
 			if err == pgx.ErrNoRows {
 				writeError(w, http.StatusBadRequest, "unknown_setting", "지원하지 않는 설정입니다: "+key)
 				return
@@ -73,27 +76,40 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			notFoundOrServer(w, err)
 			return
 		}
-		if secret && (value == "********" || value == "") {
+		if secret && value == "********" {
 			continue
 		}
-		if secret {
+		if secret && current == "" && value == "" {
+			continue
+		}
+		if !secret && value == current {
+			continue
+		}
+		before, after := current, value
+		if secret && value != "" {
 			value, err = s.keys.Encrypt(value)
 			if err != nil {
 				notFoundOrServer(w, err)
 				return
 			}
 		}
+		if secret {
+			before = map[bool]string{true: "configured", false: "empty"}[current != ""]
+			after = map[bool]string{true: "configured", false: "empty"}[value != ""]
+		}
 		u, _ := userFrom(r)
 		if _, err = tx.Exec(r.Context(), `UPDATE settings SET value=$2,updated_at=now(),updated_by=$3 WHERE key=$1`, key, value, u.ID); err != nil {
 			notFoundOrServer(w, err)
 			return
 		}
+		updated = append(updated, key)
+		changes[key] = map[string]string{"before": before, "after": after}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "settings.update", "settings", "", r.RemoteAddr, map[string]any{"keys": keys})
-	writeJSON(w, http.StatusOK, map[string]any{"updated": keys})
+	s.audit(r.Context(), u.ID, "settings.update", "settings", "", r.RemoteAddr, map[string]any{"changes": changes})
+	writeJSON(w, http.StatusOK, map[string]any{"updated": updated})
 }
