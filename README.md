@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://hkjang.github.io/visitflow/">🇰🇷 홍보 페이지</a> · <a href="https://hkjang.github.io/visitflow/index_en.html">🇺🇸 English Page</a> · <a href="https://hkjang.github.io/">🌐 전체 서비스 모아보기</a> · <a href="https://github.com/sponsors/hkjang">💖 Sponsor</a>
+  <a href="https://hkjang.github.io/visitflow/">🇰🇷 홍보 페이지</a> · <a href="https://hkjang.github.io/visitflow/index_en.html">🇺🇸 English Page</a> · <a href="https://hkjang.github.io/">🌐 전체 서비스</a> · <a href="https://github.com/sponsors/hkjang">💖 Sponsor</a>
 </p>
 
 VisitFlow는 Go API와 React/Material UI를 하나의 Docker 이미지에 포함한다. 실행 중 CDN이나 이미지 레지스트리 접근이 없고 PostgreSQL 외 Redis·Object Storage 같은 추가 미들웨어가 필요하지 않다.
