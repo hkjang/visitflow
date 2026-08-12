@@ -1,1 +1,40 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="20" fill="#176b5b"/><path d="M15 19h9l8 25 8-25h9L37 50H27z" fill="#fff"/><circle cx="47" cy="16" r="7" fill="#e76f51"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <defs>
+    <linearGradient id="visitflow-intense-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="50%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+    <filter id="vf-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Completely Transparent Background (No Rectangle Frame) -->
+  <g filter="url(#vf-glow)">
+    <!-- Sharp Diamond Flow Arc -->
+    <path d="M 60 10 L 110 60 L 60 110 L 10 60 Z" 
+          fill="none" 
+          stroke="url(#visitflow-intense-grad)" 
+          stroke-width="4" 
+          stroke-dasharray="14 6" 
+          stroke-linecap="round" />
+    
+    <!-- Bold Sharp V Flow Wave -->
+    <path d="M 28 32 L 60 92 L 92 32" 
+          fill="none" 
+          stroke="url(#visitflow-intense-grad)" 
+          stroke-width="12" 
+          stroke-linecap="round" 
+          stroke-linejoin="miter" />
+
+    <circle cx="60" cy="52" r="7" fill="#ffffff" filter="url(#vf-glow)" />
+    <circle cx="60" cy="92" r="6" fill="#f59e0b" />
+    <circle cx="28" cy="32" r="5" fill="#10b981" />
+    <circle cx="92" cy="32" r="5" fill="#06b6d4" />
+  </g>
+</svg>
