@@ -18,7 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/hkjang/seaton/internal/platform"
+	"github.com/hkjang/visitflow/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -65,6 +65,7 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/dashboard", s.personalDashboard)
 			r.Get("/visits", s.listVisits)
 			r.Post("/visits", s.createVisit)
+			r.Post("/visits/import/preview", s.previewVisitorImport)
 			r.Get("/visits/{visitID}", s.getVisit)
 			r.Put("/visits/{visitID}", s.updateVisit)
 			r.Post("/visits/{visitID}/cancel", s.cancelVisit)
@@ -76,7 +77,9 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/visit-templates", s.createVisitTemplate)
 			r.Delete("/visit-templates/{templateID}", s.deleteVisitTemplate)
 			r.Get("/api-keys", s.listAPIKeys)
+			r.Get("/api-key-policy", s.apiKeyPolicy)
 			r.Post("/api-keys", s.createAPIKey)
+			r.Patch("/api-keys/{keyID}", s.updateAPIKey)
 			r.Post("/api-keys/{keyID}/rotate", s.rotateAPIKey)
 			r.Delete("/api-keys/{keyID}", s.revokeAPIKey)
 			r.Group(func(r chi.Router) {
@@ -94,19 +97,22 @@ func (s *Server) Routes() http.Handler {
 				r.Get("/admin/audit-logs", s.auditLogs)
 			})
 			r.Group(func(r chi.Router) {
+				r.Use(s.requireSecurity)
+				r.Get("/admin/visitors", s.listVisitors)
+				r.Get("/admin/watchlist", s.listWatchlist)
+				r.Post("/admin/watchlist", s.createWatchlist)
+				r.Delete("/admin/watchlist/{entryID}", s.deleteWatchlist)
+			})
+			r.Group(func(r chi.Router) {
 				r.Use(s.requireAdmin)
 				r.Get("/admin/dashboard", s.adminDashboard)
 				r.Get("/admin/statistics", s.statistics)
 				r.Get("/admin/notifications", s.listNotifications)
-				r.Get("/admin/visitors", s.listVisitors)
 				r.Get("/admin/users", s.listUsers)
 				r.Patch("/admin/users/{userID}", s.updateUser)
 				r.Post("/admin/sites", s.upsertSite)
 				r.Post("/admin/lobbies", s.upsertLobby)
 				r.Post("/admin/organizations", s.upsertDepartment)
-				r.Get("/admin/watchlist", s.listWatchlist)
-				r.Post("/admin/watchlist", s.createWatchlist)
-				r.Delete("/admin/watchlist/{entryID}", s.deleteWatchlist)
 				r.Get("/settings", s.listSettings)
 				r.Put("/settings", s.updateSettings)
 				r.Post("/settings/oidc/test", s.testOIDC)

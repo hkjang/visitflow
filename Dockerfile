@@ -24,14 +24,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.title="VisitFlow" \
       org.opencontainers.image.description="Offline-ready enterprise visitor management" \
-      org.opencontainers.image.source="https://github.com/hkjang/seaton"
+      org.opencontainers.image.source="https://github.com/hkjang/visitflow"
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 visitflow \
-    && useradd --system --uid 10001 --gid visitflow --home-dir /var/lib/visitflow visitflow \
-    && install -d -o visitflow -g visitflow -m 0700 /var/lib/visitflow
+    && useradd --system --uid 10001 --gid visitflow --home-dir /nonexistent visitflow
 COPY --from=backend --chown=visitflow:visitflow /out/visitflow /usr/local/bin/visitflow
 USER 10001:10001
 EXPOSE 8080
-VOLUME ["/var/lib/visitflow"]
 ENTRYPOINT ["/usr/local/bin/visitflow"]

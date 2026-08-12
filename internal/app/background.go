@@ -18,6 +18,8 @@ func (s *Server) RunBackground(ctx context.Context) {
 	defer maintenance.Stop()
 	defer privacy.Stop()
 	s.processNotifications(ctx)
+	s.runVisitMaintenance(ctx)
+	s.runPrivacyMaintenance(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -96,9 +98,16 @@ func (s *Server) runVisitMaintenance(ctx context.Context) {
 	if lateMinutes < 0 || lateMinutes > 1440 {
 		lateMinutes = 120
 	}
-	_, err := s.db.Exec(ctx, `UPDATE visitor_visits vv SET status='NO_SHOW' FROM visits v WHERE vv.visit_id=v.id AND vv.status='SCHEDULED' AND v.end_at+($1::int*interval '1 minute')<now()`, lateMinutes)
+	_, err := s.db.Exec(ctx, `WITH missed AS (
+		UPDATE visitor_visits vv SET status='NO_SHOW' FROM visits v
+		WHERE vv.visit_id=v.id AND vv.status='SCHEDULED' AND v.end_at+($1::int*interval '1 minute')<now()
+		RETURNING vv.visit_id,vv.id
+	) INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,method,details)
+	SELECT visit_id,id,'NO_SHOW','automatic','{"reason":"late grace expired"}'::jsonb FROM missed`, lateMinutes)
 	if err != nil {
 		s.logger.Error("no-show maintenance failed", "error", err)
+	} else {
+		_, _ = s.db.Exec(ctx, `UPDATE visits SET status='NO_SHOW',updated_at=now() WHERE status='SCHEDULED' AND NOT EXISTS(SELECT 1 FROM visitor_visits vv WHERE vv.visit_id=visits.id AND vv.status<>'NO_SHOW')`)
 	}
 	hour, _ := strconv.Atoi(settingOr(s, ctx, "visit.auto_checkout_hour", "23"))
 	if hour >= 0 && hour <= 23 && time.Now().Hour() >= hour {
@@ -114,6 +123,15 @@ func (s *Server) runVisitMaintenance(ctx context.Context) {
 }
 
 func (s *Server) runPrivacyMaintenance(ctx context.Context) {
+	maskDays, _ := strconv.Atoi(settingOr(s, ctx, "privacy.mask_after_days", "90"))
+	if maskDays > 0 {
+		tag, err := s.db.Exec(ctx, `UPDATE visitors p SET masked_at=now(),updated_at=now() WHERE p.erased_at IS NULL AND p.masked_at IS NULL AND NOT EXISTS(SELECT 1 FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE vv.visitor_id=p.id AND v.end_at>=now()-($1::int*interval '1 day'))`, maskDays)
+		if err != nil {
+			s.logger.Error("privacy masking failed", "error", err)
+		} else if tag.RowsAffected() > 0 {
+			s.audit(ctx, "", "privacy.mask", "visitor", "", "background", map[string]any{"count": tag.RowsAffected(), "afterDays": maskDays})
+		}
+	}
 	destroyDays, _ := strconv.Atoi(settingOr(s, ctx, "privacy.destroy_after_days", "365"))
 	if destroyDays < 1 {
 		return
@@ -134,7 +152,10 @@ func (s *Server) runPrivacyMaintenance(ctx context.Context) {
 	erased, err := s.keys.Encrypt("파기됨")
 	if err == nil {
 		for _, id := range ids {
-			_, _ = s.db.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,name_hash=NULL,phone_encrypted=$2,phone_hash=NULL,email_encrypted=NULL,vehicle_encrypted=NULL,company=NULL,title=NULL,erased_at=now(),updated_at=now() WHERE id=$1`, id, erased)
+			_, _ = s.db.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,name_hash=NULL,phone_encrypted=$2,phone_hash=NULL,email_encrypted=NULL,vehicle_encrypted=NULL,company=NULL,title=NULL,masked_at=COALESCE(masked_at,now()),erased_at=now(),updated_at=now() WHERE id=$1`, id, erased)
+		}
+		if len(ids) > 0 {
+			s.audit(ctx, "", "privacy.destroy", "visitor", "", "background", map[string]any{"count": len(ids), "afterDays": destroyDays})
 		}
 	}
 	auditDays, _ := strconv.Atoi(settingOr(s, ctx, "privacy.audit_retention_days", "730"))

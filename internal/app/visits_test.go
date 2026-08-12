@@ -43,3 +43,45 @@ func TestRenderTemplate(t *testing.T) {
 		t.Fatalf("renderTemplate() = %q", got)
 	}
 }
+
+func TestVisitorImportRows(t *testing.T) {
+	rows := [][]string{
+		{"\ufeff이름", "휴대전화", "회사명", "반입장비", "개인정보동의"},
+		{"홍길동", "010-1234-5678", "ABC테크", "노트북; 카메라", "동의"},
+		{"김철수", "010-9876-5432", "XYZ", "", ""},
+	}
+	visitors, warnings, err := visitorInputsFromRows(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visitors) != 2 || visitors[0].Name != "홍길동" || len(visitors[0].Equipment) != 2 || !visitors[0].Consent {
+		t.Fatalf("unexpected import: %#v", visitors)
+	}
+	if len(warnings) != 1 || visitors[1].Consent {
+		t.Fatalf("expected consent warning: %#v", warnings)
+	}
+}
+
+func TestSettingValidation(t *testing.T) {
+	valid := map[string]string{
+		"visit.dynamic_qr_seconds":        "30",
+		"security.api_key_allowed_scopes": "read write mcp",
+		"notification.provider":           "webhook",
+		"notification.webhook_url":        "https://sms.intra/api/send",
+	}
+	for key, value := range valid {
+		if message := validateSettingValue(key, value); message != "" {
+			t.Fatalf("%s=%s rejected: %s", key, value, message)
+		}
+	}
+	invalid := map[string]string{
+		"visit.dynamic_qr_seconds":        "10",
+		"security.api_key_allowed_scopes": "read owner",
+		"notification.provider":           "unknown",
+	}
+	for key, value := range invalid {
+		if message := validateSettingValue(key, value); message == "" {
+			t.Fatalf("%s=%s should be rejected", key, value)
+		}
+	}
+}

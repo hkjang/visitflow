@@ -96,3 +96,4 @@ type ctxKey string
 const userContextKey ctxKey = "user"
 const csrfContextKey ctxKey = "csrf"
 const apiScopesContextKey ctxKey = "api_scopes"
+const apiKeyAuthContextKey ctxKey = "api_key_auth"

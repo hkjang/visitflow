@@ -14,14 +14,14 @@ fi
 
 release_commit="$(git rev-parse --short=12 HEAD)"
 release_built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-artifact="VisitFlow-v${release_version}-linux-amd64-image.tar.gz"
+artifact="visitflow-v${release_version}.tar.gz"
 
 docker build \
   --platform linux/amd64 \
   --build-arg "VERSION=${release_version}" \
   --build-arg "COMMIT=${release_commit}" \
   --build-arg "BUILT_AT=${release_built_at}" \
-  -t "visitflow:${release_version}" \
+  -t "visitflow:v${release_version}" \
   -t "visitflow:latest" .
-docker save "visitflow:${release_version}" | gzip -9 > "$artifact"
+docker save "visitflow:v${release_version}" "visitflow:latest" | gzip -9 > "$artifact"
 echo "$artifact"

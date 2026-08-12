@@ -2,13 +2,13 @@ package platform
 
 import (
 	"bytes"
-	"path/filepath"
+	"encoding/base64"
 	"testing"
 )
 
 func TestKeyringEncryptAndDigest(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "keys", "master.key")
-	keys, err := NewKeyring(path)
+	secret := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 32))
+	keys, err := NewKeyringFromSecret(secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,11 +30,17 @@ func TestKeyringEncryptAndDigest(t *testing.T) {
 		t.Fatal("different values must not share a digest")
 	}
 
-	reloaded, err := NewKeyring(path)
+	reloaded, err := NewKeyringFromSecret(secret)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plain, err = reloaded.Decrypt(ciphertext); err != nil || plain != "client-secret" {
 		t.Fatal("persisted key cannot decrypt")
+	}
+}
+
+func TestKeyringRejectsInvalidEnvironmentKey(t *testing.T) {
+	if _, err := NewKeyringFromSecret("short-and-not-random"); err == nil {
+		t.Fatal("expected invalid ENCRYPTION_KEY error")
 	}
 }

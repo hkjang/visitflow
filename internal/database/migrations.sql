@@ -68,6 +68,10 @@ END $$;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_encrypted text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS department_id text REFERENCES organizations(id) ON DELETE SET NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS site_scope text[] NOT NULL DEFAULT ARRAY[]::text[];
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role_override boolean NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_issuer text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS oidc_subject text;
+CREATE UNIQUE INDEX IF NOT EXISTS users_oidc_identity_idx ON users(oidc_issuer, oidc_subject) WHERE oidc_subject IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash bytea PRIMARY KEY,
@@ -147,6 +151,7 @@ CREATE TABLE IF NOT EXISTS visitors (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE visitors ADD COLUMN IF NOT EXISTS name_hash bytea;
+ALTER TABLE visitors ADD COLUMN IF NOT EXISTS masked_at timestamptz;
 CREATE INDEX IF NOT EXISTS visitors_phone_hash_idx ON visitors(phone_hash);
 CREATE INDEX IF NOT EXISTS visitors_name_hash_idx ON visitors(name_hash);
 CREATE INDEX IF NOT EXISTS visitors_company_idx ON visitors(lower(company));
@@ -303,6 +308,8 @@ INSERT INTO settings(key, value, secret) VALUES
  ('security.session_hours', '8', false),
  ('security.api_key_days', '90', false),
  ('security.rotation_grace_hours', '24', false),
+ ('security.api_key_allowed_scopes', 'read write mcp', false),
+ ('security.api_key_max_active', '10', false),
  ('visit.approval_enabled', 'false', false),
  ('visit.early_checkin_minutes', '60', false),
  ('visit.late_grace_minutes', '120', false),
@@ -320,4 +327,4 @@ INSERT INTO settings(key, value, secret) VALUES
  ('privacy.audit_retention_days', '730', false)
 ON CONFLICT (key) DO UPDATE SET value=CASE WHEN settings.value='SeatOn' AND EXCLUDED.key='general.service_name' THEN EXCLUDED.value ELSE settings.value END;
 
-INSERT INTO schema_migrations(version) VALUES (2) ON CONFLICT DO NOTHING;
+INSERT INTO schema_migrations(version) VALUES (3) ON CONFLICT DO NOTHING;

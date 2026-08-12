@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hkjang/seaton/internal/app"
-	"github.com/hkjang/seaton/internal/database"
-	"github.com/hkjang/seaton/internal/platform"
+	"github.com/hkjang/visitflow/internal/app"
+	"github.com/hkjang/visitflow/internal/database"
+	"github.com/hkjang/visitflow/internal/platform"
 )
 
 var (
@@ -50,7 +50,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	keyring, err := platform.NewKeyring("/var/lib/visitflow/master.key")
+	keyring, err := platform.NewKeyringFromSecret(cfg.EncryptionKey)
 	if err != nil {
 		logger.Error("keyring startup failed", "error", err)
 		os.Exit(1)

@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -49,6 +51,36 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		Settings map[string]string `json:"settings"`
 	}
 	if !decodeJSON(w, r, &in) {
+		return
+	}
+	for key, value := range in.Settings {
+		if value == "********" {
+			continue
+		}
+		if message := validateSettingValue(key, strings.TrimSpace(value)); message != "" {
+			writeError(w, http.StatusBadRequest, "invalid_setting", message)
+			return
+		}
+	}
+	effective := func(key string) string {
+		if value, ok := in.Settings[key]; ok && value != "********" {
+			return strings.TrimSpace(value)
+		}
+		value, _ := s.getSetting(r.Context(), key)
+		return strings.TrimSpace(value)
+	}
+	if effective("auth.local_enabled") != "true" && effective("oidc.enabled") != "true" {
+		writeError(w, http.StatusBadRequest, "authentication_lockout", "로컬 로그인 또는 Keycloak SSO 중 하나는 활성화해야 합니다")
+		return
+	}
+	if effective("oidc.enabled") == "true" && (effective("oidc.issuer_url") == "" || effective("oidc.client_id") == "" || effective("oidc.client_secret") == "") {
+		writeError(w, http.StatusBadRequest, "oidc_incomplete", "SSO 활성화에는 Issuer URL, Client ID, Client Secret이 필요합니다")
+		return
+	}
+	maskDays, _ := strconv.Atoi(effective("privacy.mask_after_days"))
+	destroyDays, _ := strconv.Atoi(effective("privacy.destroy_after_days"))
+	if maskDays >= destroyDays {
+		writeError(w, http.StatusBadRequest, "invalid_privacy_period", "개인정보 마스킹 시점은 파기 시점보다 빨라야 합니다")
 		return
 	}
 	keys := make([]string, 0, len(in.Settings))
@@ -112,4 +144,59 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	u, _ := userFrom(r)
 	s.audit(r.Context(), u.ID, "settings.update", "settings", "", r.RemoteAddr, map[string]any{"changes": changes})
 	writeJSON(w, http.StatusOK, map[string]any{"updated": updated})
+}
+
+func validateSettingValue(key, value string) string {
+	booleans := map[string]bool{
+		"auth.local_enabled": true, "oidc.enabled": true, "oidc.auto_provision": true,
+		"visit.approval_enabled": true, "visit.single_use_qr": true, "visit.company_required": true,
+	}
+	if booleans[key] && value != "true" && value != "false" {
+		return key + " 값은 true 또는 false여야 합니다"
+	}
+	ranges := map[string][2]int{
+		"security.session_hours": {1, 720}, "security.api_key_days": {1, 3650},
+		"security.rotation_grace_hours": {0, 168}, "security.api_key_max_active": {1, 100},
+		"visit.early_checkin_minutes": {0, 1440}, "visit.late_grace_minutes": {0, 1440},
+		"visit.auto_checkout_hour": {0, 23}, "privacy.mask_after_days": {1, 3650},
+		"privacy.destroy_after_days": {2, 7300}, "privacy.audit_retention_days": {1, 7300},
+	}
+	if bounds, ok := ranges[key]; ok {
+		n, err := strconv.Atoi(value)
+		if err != nil || n < bounds[0] || n > bounds[1] {
+			return key + " 값의 허용 범위를 확인하세요"
+		}
+	}
+	if key == "visit.dynamic_qr_seconds" {
+		n, err := strconv.Atoi(value)
+		if err != nil || (n != 0 && (n < 30 || n > 60)) {
+			return "Dynamic QR 주기는 0(비활성) 또는 30~60초여야 합니다"
+		}
+	}
+	if key == "notification.provider" && value != "log" && value != "webhook" {
+		return "알림 Provider는 log 또는 webhook이어야 합니다"
+	}
+	if key == "security.api_key_allowed_scopes" {
+		parts := strings.Fields(value)
+		seen := map[string]bool{}
+		if len(parts) == 0 || len(parts) > 3 {
+			return "허용 키 범위는 read, write, mcp 중 하나 이상이어야 합니다"
+		}
+		for _, scope := range parts {
+			if seen[scope] || (scope != "read" && scope != "write" && scope != "mcp") {
+				return "허용 키 범위는 read, write, mcp를 공백으로 구분해 입력하세요"
+			}
+			seen[scope] = true
+		}
+	}
+	if key == "general.base_url" || key == "oidc.issuer_url" || key == "notification.webhook_url" {
+		if value == "" {
+			return ""
+		}
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return key + " 값은 http(s) URL이어야 합니다"
+		}
+	}
+	return ""
 }

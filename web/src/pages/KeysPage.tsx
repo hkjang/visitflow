@@ -28,7 +28,8 @@ import AddRounded from "@mui/icons-material/AddRounded";
 import AutorenewRounded from "@mui/icons-material/AutorenewRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
-import { api, postJSON } from "../api";
+import EditOutlined from "@mui/icons-material/EditOutlined";
+import { api, patchJSON, postJSON } from "../api";
 type KeyItem = {
   id: string;
   name: string;
@@ -44,21 +45,27 @@ type KeyItem = {
 export function KeysPage() {
   const [items, setItems] = useState<KeyItem[]>([]),
     [createOpen, setCreateOpen] = useState(false),
+    [editing, setEditing] = useState<string | null>(null),
     [name, setName] = useState("내 연동 키"),
     [scopes, setScopes] = useState(["read", "mcp"]),
+    [policy, setPolicy] = useState<{ allowedScopes: string[]; defaultExpiryDays: number; maxActiveKeys: number }>({ allowedScopes: ["read", "write", "mcp"], defaultExpiryDays: 90, maxActiveKeys: 10 }),
     [revealed, setRevealed] = useState<{ key: string; message: string } | null>(
       null,
     ),
     [error, setError] = useState("");
   const load = () =>
-    api<{ items: KeyItem[] }>("/api/v1/api-keys")
-      .then((x) => setItems(x.items))
+    Promise.all([api<{ items: KeyItem[] }>("/api/v1/api-keys"), api<typeof policy>("/api/v1/api-key-policy")])
+      .then(([keys, keyPolicy]) => { setItems(keys.items); setPolicy(keyPolicy); })
       .catch((e) => setError(e.message));
   useEffect(() => {
     void load();
   }, []);
-  const create = async () => {
+  const save = async () => {
     try {
+      if (editing) {
+        await patchJSON(`/api/v1/api-keys/${editing}`, { name, scopes });
+        setCreateOpen(false); setEditing(null); await load(); return;
+      }
       const x = await postJSON<{ key: string; message: string }>(
         "/api/v1/api-keys",
         { name, scopes },
@@ -70,6 +77,8 @@ export function KeysPage() {
       setError(e instanceof Error ? e.message : "키를 만들지 못했습니다");
     }
   };
+  const openCreate = () => { setEditing(null); setName("내 연동 키"); setScopes(policy.allowedScopes.filter((scope) => scope === "read" || scope === "mcp")); setCreateOpen(true); };
+  const openEdit = (key: KeyItem) => { setEditing(key.id); setName(key.name); setScopes(key.scopes.filter((scope) => policy.allowedScopes.includes(scope))); setCreateOpen(true); };
   const rotate = async (id: string) => {
     try {
       const x = await postJSON<{ key: string; message: string }>(
@@ -100,7 +109,7 @@ export function KeysPage() {
         <Button
           variant="contained"
           startIcon={<AddRounded />}
-          onClick={() => setCreateOpen(true)}
+          onClick={openCreate}
         >
           키 만들기
         </Button>
@@ -112,7 +121,7 @@ export function KeysPage() {
       )}
       <Alert severity="info" sx={{ mb: 2 }}>
         키 원문은 생성·회전 직후 한 번만 표시됩니다. 서버에는 복원할 수 없는
-        HMAC 해시만 저장됩니다.
+        HMAC 해시만 저장됩니다. 현재 허용 Scope는 {policy.allowedScopes.join(", ")}이며 기본 만료는 {policy.defaultExpiryDays}일, 활성 키 한도는 {policy.maxActiveKeys}개입니다.
       </Alert>
       <TableContainer component={Paper}>
         <Table>
@@ -167,6 +176,9 @@ export function KeysPage() {
                     : "제한 없음"}
                 </TableCell>
                 <TableCell align="right">
+                  <Tooltip title="이름 · Scope 변경">
+                    <IconButton onClick={() => openEdit(k)} disabled={Boolean(k.revokedAt)}><EditOutlined /></IconButton>
+                  </Tooltip>
                   <Tooltip title="회전">
                     <IconButton
                       onClick={() => void rotate(k.id)}
@@ -195,7 +207,7 @@ export function KeysPage() {
         <code>Bearer vf_…</code>
       </Typography>
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)}>
-        <DialogTitle>개인 API 키 만들기</DialogTitle>
+        <DialogTitle>{editing ? "개인 API 키 권한 변경" : "개인 API 키 만들기"}</DialogTitle>
         <DialogContent>
           <TextField
             label="키 이름"
@@ -208,7 +220,7 @@ export function KeysPage() {
             허용 범위
           </Typography>
           <FormGroup row>
-            {["read", "write", "mcp"].map((scope) => (
+            {policy.allowedScopes.map((scope) => (
               <FormControlLabel
                 key={scope}
                 control={
@@ -233,9 +245,9 @@ export function KeysPage() {
           <Button
             variant="contained"
             disabled={!name || !scopes.length}
-            onClick={() => void create()}
+            onClick={() => void save()}
           >
-            생성
+            {editing ? "변경 저장" : "생성"}
           </Button>
         </DialogActions>
       </Dialog>

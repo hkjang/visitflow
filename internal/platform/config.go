@@ -6,12 +6,13 @@ import (
 	"strings"
 )
 
-// Config intentionally exposes only the three deployment-time settings VisitFlow
+// Config intentionally exposes only the four deployment-time settings VisitFlow
 // needs. Every other operational setting lives in the administrator UI/DB.
 type Config struct {
 	PostgresDSN            string
 	BootstrapAdmin         string
 	BootstrapAdminPassword string
+	EncryptionKey          string
 }
 
 func LoadConfig() (Config, error) {
@@ -19,6 +20,7 @@ func LoadConfig() (Config, error) {
 		PostgresDSN:            strings.TrimSpace(os.Getenv("POSTGRES_DSN")),
 		BootstrapAdmin:         strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN")),
 		BootstrapAdminPassword: os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
+		EncryptionKey:          strings.TrimSpace(os.Getenv("ENCRYPTION_KEY")),
 	}
 	var missing []string
 	if c.PostgresDSN == "" {
@@ -29,6 +31,9 @@ func LoadConfig() (Config, error) {
 	}
 	if c.BootstrapAdminPassword == "" {
 		missing = append(missing, "BOOTSTRAP_ADMIN_PASSWORD")
+	}
+	if c.EncryptionKey == "" {
+		missing = append(missing, "ENCRYPTION_KEY")
 	}
 	if len(missing) > 0 {
 		return Config{}, errors.New("missing required environment variables: " + strings.Join(missing, ", "))

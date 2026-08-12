@@ -11,7 +11,7 @@ VisitFlow는 Go API와 React/Material UI를 하나의 Docker 이미지에 포함
 
 ## 주요 기능
 
-- 개인 서비스: 단일·단체 방문 신청, 방문 템플릿, 일정/상태 조회, 취소, SMS 재발송
+- 개인 서비스: 단일·단체·매주 반복 방문 신청, CSV/XLSX 가져오기, 방문 템플릿, 일정/상태 조회, 취소, SMS 재발송
 - 승인 Workflow: 관리자 설정으로 전체 비활성화 또는 부서/보안 담당 승인 운영
 - 방문자별 서버 검증 QR: 개인정보 미포함, HMAC 조회, 1회 사용, Replay 감지, 폐기·회전·재발급
 - 모바일 방문증: 앱 설치 없이 QR, 장소, 시간, 마스킹된 담당자와 상태 표시
@@ -19,7 +19,7 @@ VisitFlow는 Go API와 React/Material UI를 하나의 Docker 이미지에 포함
 - 운영 관리: 멀티 사업장·로비, 조직, RBAC, Watch List, 통계, 알림 재시도, 감사 로그
 - 개인정보: AES-256-GCM 필드 암호화, 목록 마스킹, 전화번호 HMAC 색인, 정책 기반 자동 파기
 - Keycloak OIDC: Issuer URL, Client ID, Client Secret 설정만으로 Discovery + Authorization Code/PKCE 연동
-- 개인 API 키: `read`/`write`/`mcp` Scope, 만료, 회전 유예, 즉시 폐기, 원문 1회 표시
+- 개인 API 키: 관리자 허용 `read`/`write`/`mcp` Scope, 키별 권한 변경, 만료, 회전 유예, 즉시 폐기, 원문 1회 표시
 - REST/OpenAPI 3.1 및 MCP Streamable HTTP 9개 Tool
 - 로그인 화면과 프로필 컨텍스트 메뉴에 버전·Commit 표시
 
@@ -38,24 +38,25 @@ React 19 + TypeScript + Material UI 7을 사용한다. 방문자 운영 화면�
 PostgreSQL 14+ 데이터베이스를 준비한 뒤 GitHub Release의 이미지 하나만 내부망으로 반입한다.
 
 ```bash
-docker load < VisitFlow-v2.0.0-linux-amd64-image.tar.gz
+docker load < visitflow-v2.1.0.tar.gz
 
 export POSTGRES_DSN='postgres://visitflow:password@postgres.intra:5432/visitflow?sslmode=require'
 export BOOTSTRAP_ADMIN='admin'
 export BOOTSTRAP_ADMIN_PASSWORD='change-this-strong-password'
-export VISITFLOW_IMAGE_TAG='2.0.0'
+export ENCRYPTION_KEY="$(openssl rand -base64 32)"
 docker compose up -d
 ```
 
-애플리케이션 컨테이너가 받는 환경변수는 정확히 세 개다.
+애플리케이션 컨테이너가 받는 환경변수는 정확히 네 개다.
 
 | 환경변수 | 설명 |
 | --- | --- |
 | `POSTGRES_DSN` | PostgreSQL DSN |
 | `BOOTSTRAP_ADMIN` | 최초 최고 관리자 아이디 |
 | `BOOTSTRAP_ADMIN_PASSWORD` | 최초 관리자 비밀번호, 12자 이상 |
+| `ENCRYPTION_KEY` | 개인정보·OIDC Secret·Token 암호화용 32바이트 키(Base64 또는 64자리 hex) |
 
-`VISITFLOW_IMAGE_TAG`는 Compose가 로컬 이미지 태그를 선택하는 셸 치환값이며 컨테이너에는 전달되지 않는다. 부트스트랩 사용자가 이미 있으면 환경변수 비밀번호로 덮어쓰지 않는다.
+`ENCRYPTION_KEY`는 `openssl rand -base64 32`로 한 번 생성한 뒤 PostgreSQL 백업과 함께 별도 보관한다. 값을 분실하거나 다른 값으로 바꾸면 기존 암호화 데이터를 복구할 수 없다. 부트스트랩 사용자가 이미 있으면 환경변수 비밀번호로 덮어쓰지 않는다.
 
 `http://host:8080`에 접속한 뒤 관리자 → 시스템 설정에서 회사명, 기준 URL, Keycloak, 승인·QR, SMS, 보존·파기, 세션·키 정책을 구성한다. 운영 환경은 리버스 프록시에서 HTTPS를 종료하고 `X-Forwarded-Proto`와 `X-Forwarded-Host`를 전달해야 카메라와 Secure Cookie를 정상 사용할 수 있다.
 
@@ -82,7 +83,7 @@ MCP Tool은 `search_visits`, `get_today_visitors`, `get_current_visitors`, `get_
 
 ## 백업과 복구
 
-PostgreSQL 백업과 `visitflow-data` 볼륨을 한 세트로 백업한다. `/var/lib/visitflow/master.key`를 잃으면 DB에 암호화된 개인정보와 Client Secret을 복호화할 수 없다. 개인 API 키 원문은 서버에 저장하지 않아 복구할 수 없으며 새 키로 회전해야 한다.
+PostgreSQL 백업과 `ENCRYPTION_KEY`를 한 세트로 백업한다. 키를 잃으면 DB에 암호화된 개인정보와 Client Secret을 복호화할 수 없다. 개인 API 키 원문은 서버에 저장하지 않아 복구할 수 없으며 새 키로 회전해야 한다.
 
 ## 개발·검증
 
@@ -94,9 +95,9 @@ docker build -t visitflow:dev .
 
 ## 릴리스
 
-`v*.*.*` 태그를 push하면 GitHub Actions가 `linux/amd64` 단일 서비스 이미지를 빌드한다. `docker save | gzip`으로 만든 `VisitFlow-vX.Y.Z-linux-amd64-image.tar.gz`만 Release 자산으로 첨부하며 런타임에는 레지스트리나 인터넷이 필요 없다.
+`v*.*.*` 태그를 push하면 GitHub Actions가 `linux/amd64` 단일 서비스 이미지 `visitflow:vX.Y.Z`를 빌드한다. `docker save | gzip`으로 만든 `visitflow-vX.Y.Z.tar.gz`만 Release 자산으로 첨부하며 런타임에는 레지스트리나 인터넷이 필요 없다. 아카이브에는 Compose가 바로 사용할 수 있는 `visitflow:latest` 별칭도 포함된다.
 
 ```bash
 ./scripts/release-image.sh 2.0.0
-gzip -t VisitFlow-v2.0.0-linux-amd64-image.tar.gz
+gzip -t visitflow-v2.1.0.tar.gz
 ```

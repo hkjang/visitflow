@@ -2,7 +2,7 @@
 
 ## 최초 실행
 
-컨테이너에는 `POSTGRES_DSN`, `BOOTSTRAP_ADMIN`, `BOOTSTRAP_ADMIN_PASSWORD` 세 환경변수만 전달한다. 최초 관리자만 환경변수로 생성하며 이후 비밀번호·SSO·정책·연동은 관리자 UI에서 바꾼다.
+컨테이너에는 `POSTGRES_DSN`, `BOOTSTRAP_ADMIN`, `BOOTSTRAP_ADMIN_PASSWORD`, `ENCRYPTION_KEY` 네 환경변수만 전달한다. 최초 관리자와 설치 암호화 키만 환경변수로 주입하며 이후 비밀번호·SSO·정책·연동은 관리자 UI에서 바꾼다.
 
 ## 필수 운영 설정
 
@@ -30,8 +30,8 @@
 
 ## 백업
 
-PostgreSQL과 `/var/lib/visitflow/master.key`를 같은 복구 시점으로 백업한다. Master Key는 Client Secret과 개인정보 복호화에 필요하므로 별도 보안 백업을 유지한다.
+PostgreSQL과 `ENCRYPTION_KEY`를 같은 복구 시점으로 백업한다. Encryption Key는 Client Secret과 개인정보 복호화에 필요하므로 별도 보안 백업을 유지한다.
 
 ## 오프라인 업그레이드
 
-새 Release의 `VisitFlow-vX.Y.Z-linux-amd64-image.tar.gz`를 반입해 `docker load`하고 Compose 이미지 태그만 변경한다. 시작 시 멱등 Migration이 자동 적용된다. 업그레이드 전 PostgreSQL과 Master Key를 백업한다.
+새 Release의 `visitflow-vX.Y.Z.tar.gz`를 반입해 `docker load`한다. 아카이브의 `visitflow:latest` 별칭을 Compose가 바로 사용하며 시작 시 멱등 Migration이 자동 적용된다. 업그레이드 전 PostgreSQL과 `ENCRYPTION_KEY`를 백업한다.

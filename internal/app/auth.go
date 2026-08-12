@@ -12,7 +12,8 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-chi/chi/v5"
-	"github.com/hkjang/seaton/internal/platform"
+	"github.com/hkjang/visitflow/internal/platform"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
 )
@@ -64,6 +65,7 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 		err = s.db.QueryRow(r.Context(), `SELECT COALESCE(password_hash,'') FROM users WHERE id=$1`, u.ID).Scan(&hash)
 	}
 	if err != nil || hash == "" || bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
+		s.audit(r.Context(), "", "auth.login_failed", "user", "", r.RemoteAddr, map[string]string{"source": "local", "username": strings.TrimSpace(in.Username)})
 		time.Sleep(250 * time.Millisecond)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "아이디 또는 비밀번호를 확인하세요")
 		return
@@ -112,7 +114,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		apiKeyAuth := false
 		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-			if strings.HasPrefix(raw, "vf_") || strings.HasPrefix(raw, "seat_") {
+			if strings.HasPrefix(raw, "vf_") {
 				var keyID string
 				var err error
 				u, err = scanUser(s.db.QueryRow(r.Context(), `SELECT u.id,u.username,u.display_name,COALESCE(u.email,''),u.employee_id,u.role,u.source,u.last_login_at
@@ -126,8 +128,25 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 					writeError(w, http.StatusUnauthorized, "invalid_api_key", "API 키가 유효하지 않습니다")
 					return
 				}
+				allowedValue, _ := s.getSetting(r.Context(), "security.api_key_allowed_scopes")
+				allowed := map[string]bool{}
+				for _, scope := range strings.Fields(allowedValue) {
+					allowed[scope] = true
+				}
+				filtered := apiScopes[:0]
+				for _, scope := range apiScopes {
+					if allowed[scope] {
+						filtered = append(filtered, scope)
+					}
+				}
+				apiScopes = filtered
 				apiKeyAuth = true
-				if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && r.URL.Path != "/mcp" && !containsString(apiScopes, "write") {
+				readRequest := r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions
+				if r.URL.Path != "/mcp" && readRequest && !containsString(apiScopes, "read") {
+					writeError(w, http.StatusForbidden, "insufficient_scope", "read 범위가 있는 API 키가 필요합니다")
+					return
+				}
+				if r.URL.Path != "/mcp" && !readRequest && !containsString(apiScopes, "write") {
 					writeError(w, http.StatusForbidden, "insufficient_scope", "write 범위가 있는 API 키가 필요합니다")
 					return
 				}
@@ -159,6 +178,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), userContextKey, u)
 		ctx = context.WithValue(ctx, csrfContextKey, csrf)
 		ctx = context.WithValue(ctx, apiScopesContextKey, apiScopes)
+		ctx = context.WithValue(ctx, apiKeyAuthContextKey, apiKeyAuth)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -199,6 +219,17 @@ func (s *Server) requireAudit(next http.Handler) http.Handler {
 		u, _ := userFrom(r)
 		if !u.CanAudit() {
 			writeError(w, http.StatusForbidden, "auditor_required", "감사 조회 권한이 필요합니다")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireSecurity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, _ := userFrom(r)
+		if u.Role != RoleSecurity && !u.IsAdmin() {
+			writeError(w, http.StatusForbidden, "security_required", "보안 담당자 권한이 필요합니다")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -303,7 +334,7 @@ func (s *Server) oidcStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "oidc_state_failed", "SSO 요청을 시작하지 못했습니다")
 		return
 	}
-	cfg := oauth2.Config{ClientID: clientID, ClientSecret: secret, Endpoint: provider.Endpoint(), RedirectURL: requestBaseURL(r) + "/api/v1/auth/oidc/callback", Scopes: s.oidcScopes(r.Context())}
+	cfg := oauth2.Config{ClientID: clientID, ClientSecret: secret, Endpoint: provider.Endpoint(), RedirectURL: s.publicBaseURL(r.Context(), r) + "/api/v1/auth/oidc/callback", Scopes: s.oidcScopes(r.Context())}
 	http.Redirect(w, r, cfg.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
 }
 
@@ -327,7 +358,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "oidc_discovery_failed", "Keycloak 연결을 확인하세요")
 		return
 	}
-	cfg := oauth2.Config{ClientID: clientID, ClientSecret: secret, Endpoint: provider.Endpoint(), RedirectURL: requestBaseURL(r) + "/api/v1/auth/oidc/callback", Scopes: s.oidcScopes(r.Context())}
+	cfg := oauth2.Config{ClientID: clientID, ClientSecret: secret, Endpoint: provider.Endpoint(), RedirectURL: s.publicBaseURL(r.Context(), r) + "/api/v1/auth/oidc/callback", Scopes: s.oidcScopes(r.Context())}
 	token, err := cfg.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(verifier))
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "oidc_exchange_failed", "SSO 인증 코드를 확인하지 못했습니다")
@@ -352,7 +383,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		PhoneNumber       string   `json:"phone_number"`
 		Groups            []string `json:"groups"`
 	}
-	if err := idToken.Claims(&claims); err != nil || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(nonce)) != 1 {
+	if err := idToken.Claims(&claims); err != nil || claims.Subject == "" || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(nonce)) != 1 {
 		writeError(w, http.StatusUnauthorized, "invalid_oidc_claims", "Keycloak 토큰 요청값이 일치하지 않습니다")
 		return
 	}
@@ -371,15 +402,16 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	autoProvision, _ := s.getSetting(r.Context(), "oidc.auto_provision")
 	if autoProvision != "true" {
 		var exists bool
-		if err := s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE lower(username)=lower($1) AND active)`, username).Scan(&exists); err != nil || !exists {
+		if err := s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE active AND source='oidc' AND ((oidc_issuer=$1 AND oidc_subject=$2) OR (oidc_subject IS NULL AND lower(username)=lower($3))))`, issuer, claims.Subject, username).Scan(&exists); err != nil || !exists {
 			writeError(w, http.StatusForbidden, "oidc_provision_disabled", "등록된 사용자만 SSO로 로그인할 수 있습니다")
 			return
 		}
 	}
-	id := newID()
-	err = s.db.QueryRow(r.Context(), `INSERT INTO users(id,username,display_name,email,role,source,last_login_at) VALUES($1,$2,$3,$4,$5,'oidc',now())
-		ON CONFLICT(username) DO UPDATE SET display_name=EXCLUDED.display_name,email=EXCLUDED.email,source='oidc',last_login_at=now(),
-		role=CASE WHEN users.role IN ('admin','super_admin') THEN users.role ELSE EXCLUDED.role END RETURNING id`, id, username, name, claims.Email, role).Scan(&id)
+	id, err := s.upsertOIDCUser(r.Context(), issuer, claims.Subject, username, name, claims.Email, role)
+	if conflict, ok := err.(oidcIdentityConflict); ok {
+		writeError(w, http.StatusConflict, "oidc_identity_conflict", conflict.Error())
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_provision_failed", "SSO 사용자를 등록하지 못했습니다")
 		return
@@ -396,6 +428,31 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r.Context(), u.ID, "auth.login", "user", u.ID, r.RemoteAddr, map[string]string{"source": "oidc"})
 	http.Redirect(w, r, returnTo, http.StatusFound)
+}
+
+type oidcIdentityConflict string
+
+func (e oidcIdentityConflict) Error() string { return string(e) }
+
+func (s *Server) upsertOIDCUser(ctx context.Context, issuer, subject, username, name, email, role string) (string, error) {
+	var id, source, boundSubject string
+	err := s.db.QueryRow(ctx, `SELECT id,source,COALESCE(oidc_subject,'') FROM users WHERE oidc_issuer=$1 AND oidc_subject=$2`, issuer, subject).Scan(&id, &source, &boundSubject)
+	if err == pgx.ErrNoRows {
+		err = s.db.QueryRow(ctx, `SELECT id,source,COALESCE(oidc_subject,'') FROM users WHERE lower(username)=lower($1)`, username).Scan(&id, &source, &boundSubject)
+		if err == nil && (source != "oidc" || boundSubject != "") {
+			return "", oidcIdentityConflict("같은 아이디의 다른 인증 계정이 있습니다. 관리자에게 OIDC 계정 연결을 요청하세요")
+		}
+	}
+	if err != nil && err != pgx.ErrNoRows {
+		return "", err
+	}
+	if id == "" {
+		id = newID()
+		_, err = s.db.Exec(ctx, `INSERT INTO users(id,username,display_name,email,role,source,oidc_issuer,oidc_subject,last_login_at) VALUES($1,$2,$3,$4,$5,'oidc',$6,$7,now())`, id, username, name, email, role, issuer, subject)
+		return id, err
+	}
+	_, err = s.db.Exec(ctx, `UPDATE users SET display_name=$2,email=NULLIF($3,''),source='oidc',oidc_issuer=$4,oidc_subject=$5,last_login_at=now(),role=CASE WHEN role_override OR role='super_admin' THEN role ELSE $6 END,updated_at=now() WHERE id=$1`, id, name, email, issuer, subject, role)
+	return id, err
 }
 
 func requestBaseURL(r *http.Request) string {
@@ -460,21 +517,22 @@ func (s *Server) testOIDC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "oidc_discovery_failed", fmt.Sprintf("Discovery 실패: %v", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "issuer": issuer, "authorizationEndpoint": provider.Endpoint().AuthURL, "tokenEndpoint": provider.Endpoint().TokenURL, "redirectUri": requestBaseURL(r) + "/api/v1/auth/oidc/callback"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "issuer": issuer, "authorizationEndpoint": provider.Endpoint().AuthURL, "tokenEndpoint": provider.Endpoint().TokenURL, "redirectUri": s.publicBaseURL(r.Context(), r) + "/api/v1/auth/oidc/callback"})
 }
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT id,username,display_name,COALESCE(email,''),employee_id,role,source,last_login_at FROM users ORDER BY display_name`)
+	rows, err := s.db.Query(r.Context(), `SELECT id,username,display_name,COALESCE(email,''),employee_id,role,source,last_login_at,active,department_id,site_scope,role_override FROM users ORDER BY display_name`)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
 	defer rows.Close()
-	users := []User{}
+	users := []map[string]any{}
 	for rows.Next() {
-		u, err := scanUser(rows)
-		if err == nil {
-			users = append(users, u)
+		var u User
+		var active, roleOverride bool
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.EmployeeID, &u.Role, &u.Source, &u.LastLoginAt, &active, &u.DepartmentID, &u.SiteScope, &roleOverride); err == nil {
+			users = append(users, map[string]any{"id": u.ID, "username": u.Username, "displayName": u.DisplayName, "email": u.Email, "employeeId": u.EmployeeID, "role": u.Role, "source": u.Source, "lastLoginAt": u.LastLoginAt, "active": active, "departmentId": u.DepartmentID, "siteScope": u.SiteScope, "roleOverride": roleOverride})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": users})
@@ -482,8 +540,11 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Role   string `json:"role"`
-		Active *bool  `json:"active"`
+		Role           string    `json:"role"`
+		Active         *bool     `json:"active"`
+		DepartmentID   *string   `json:"departmentId"`
+		SiteScope      *[]string `json:"siteScope"`
+		UseOIDCMapping *bool     `json:"useOidcMapping"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -493,13 +554,60 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_role", "권한 값이 올바르지 않습니다")
 		return
 	}
-	_, err := s.db.Exec(r.Context(), `UPDATE users SET role=COALESCE(NULLIF($2,''),role),active=COALESCE($3,active),updated_at=now() WHERE id=$1`, chiURLParam(r, "userID"), in.Role, in.Active)
+	id := chiURLParam(r, "userID")
+	var beforeRole string
+	var beforeActive, beforeRoleOverride bool
+	var beforeDepartment *string
+	var beforeSites []string
+	if err := s.db.QueryRow(r.Context(), `SELECT role,active,department_id,site_scope,role_override FROM users WHERE id=$1`, id).Scan(&beforeRole, &beforeActive, &beforeDepartment, &beforeSites, &beforeRoleOverride); err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	afterRole, afterActive := beforeRole, beforeActive
+	if in.Role != "" {
+		afterRole = in.Role
+	}
+	if in.Active != nil {
+		afterActive = *in.Active
+	}
+	if beforeRole == RoleSuperAdmin && (afterRole != RoleSuperAdmin || !afterActive) {
+		var superAdmins int
+		if err := s.db.QueryRow(r.Context(), `SELECT count(*) FROM users WHERE role='super_admin' AND active`).Scan(&superAdmins); err != nil {
+			notFoundOrServer(w, err)
+			return
+		}
+		if superAdmins <= 1 {
+			writeError(w, http.StatusConflict, "last_super_admin", "마지막 최고 관리자는 권한을 낮추거나 비활성화할 수 없습니다")
+			return
+		}
+	}
+	departmentSet := in.DepartmentID != nil
+	department := ""
+	if departmentSet {
+		department = *in.DepartmentID
+	}
+	sitesSet := in.SiteScope != nil
+	sites := beforeSites
+	if sitesSet {
+		sites = *in.SiteScope
+	}
+	roleOverride := beforeRoleOverride
+	if in.Role != "" {
+		roleOverride = true
+	}
+	if in.UseOIDCMapping != nil && *in.UseOIDCMapping {
+		roleOverride = false
+	}
+	_, err := s.db.Exec(r.Context(), `UPDATE users SET role=COALESCE(NULLIF($2,''),role),active=COALESCE($3,active),department_id=CASE WHEN $4 THEN NULLIF($5,'') ELSE department_id END,site_scope=CASE WHEN $6 THEN $7 ELSE site_scope END,role_override=$8,updated_at=now() WHERE id=$1`, id, in.Role, in.Active, departmentSet, department, sitesSet, sites, roleOverride)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "user.update", "user", chiURLParam(r, "userID"), r.RemoteAddr, in)
+	s.audit(r.Context(), u.ID, "user.update", "user", id, r.RemoteAddr, map[string]any{
+		"before": map[string]any{"role": beforeRole, "active": beforeActive, "departmentId": beforeDepartment, "siteScope": beforeSites, "roleOverride": beforeRoleOverride},
+		"after":  map[string]any{"role": afterRole, "active": afterActive, "departmentId": in.DepartmentID, "siteScope": sites, "roleOverride": roleOverride},
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

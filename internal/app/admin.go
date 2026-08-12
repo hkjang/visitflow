@@ -114,7 +114,7 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listVisitors(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),count(vv.id),max(v.start_at),p.erased_at FROM visitors p LEFT JOIN visitor_visits vv ON vv.visitor_id=p.id LEFT JOIN visits v ON v.id=vv.visit_id GROUP BY p.id ORDER BY max(v.start_at) DESC NULLS LAST LIMIT 300`)
+	rows, err := s.db.Query(r.Context(), `SELECT p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),count(vv.id),max(v.start_at),p.masked_at,p.erased_at FROM visitors p LEFT JOIN visitor_visits vv ON vv.visitor_id=p.id LEFT JOIN visits v ON v.id=vv.visit_id GROUP BY p.id ORDER BY max(v.start_at) DESC NULLS LAST LIMIT 300`)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -124,9 +124,13 @@ func (s *Server) listVisitors(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, nameEnc, phoneEnc, company string
 		var visits int
-		var lastVisit, erased *time.Time
-		if rows.Scan(&id, &nameEnc, &phoneEnc, &company, &visits, &lastVisit, &erased) == nil {
-			items = append(items, map[string]any{"id": id, "name": s.decryptOptional(nameEnc), "phone": maskPhone(s.decryptOptional(phoneEnc)), "company": company, "visitCount": visits, "lastVisitAt": lastVisit, "erasedAt": erased})
+		var lastVisit, masked, erased *time.Time
+		if rows.Scan(&id, &nameEnc, &phoneEnc, &company, &visits, &lastVisit, &masked, &erased) == nil {
+			name := s.decryptOptional(nameEnc)
+			if masked != nil {
+				name = maskName(name)
+			}
+			items = append(items, map[string]any{"id": id, "name": name, "phone": maskPhone(s.decryptOptional(phoneEnc)), "company": company, "visitCount": visits, "lastVisitAt": lastVisit, "maskedAt": masked, "erasedAt": erased})
 		}
 	}
 	u, _ := userFrom(r)

@@ -26,7 +26,9 @@ type mcpError struct {
 }
 
 func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
-	if scopes, _ := r.Context().Value(apiScopesContextKey).([]string); len(scopes) > 0 && !containsString(scopes, "mcp") {
+	apiKeyAuth, _ := r.Context().Value(apiKeyAuthContextKey).(bool)
+	scopes, _ := r.Context().Value(apiScopesContextKey).([]string)
+	if !apiKeyAuth || !containsString(scopes, "mcp") {
 		writeError(w, 403, "insufficient_scope", "mcp 범위가 있는 API 키가 필요합니다")
 		return
 	}
@@ -105,7 +107,7 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		if !u.CanManageLobby() && !u.CanAudit() {
 			return nil, errMCP("로비 또는 감사 권한이 필요합니다")
 		}
-		rows, err := s.db.Query(r.Context(), `SELECT vv.id,p.name_encrypted,COALESCE(p.company,''),h.display_name,si.name,vv.checked_in_at FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id JOIN sites si ON si.id=v.site_id WHERE vv.status='CHECKED_IN' ORDER BY vv.checked_in_at DESC LIMIT 200`)
+		rows, err := s.db.Query(r.Context(), `SELECT vv.id,p.name_encrypted,COALESCE(p.company,''),h.display_name,si.name,vv.checked_in_at FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id JOIN sites si ON si.id=v.site_id WHERE vv.status='CHECKED_IN' AND ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[])) ORDER BY vv.checked_in_at DESC LIMIT 200`, u.Role, u.SiteScope)
 		if err != nil {
 			return nil, err
 		}
@@ -176,7 +178,11 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		if company == "" {
 			return nil, errMCP("company는 필수입니다")
 		}
-		rows, err := s.db.Query(r.Context(), `SELECT p.name_encrypted,p.company,v.request_no,v.start_at,v.status,h.display_name FROM visitors p JOIN visitor_visits vv ON vv.visitor_id=p.id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id WHERE lower(p.company)=lower($1) AND v.start_at>=now()-($2::int*interval '1 month') ORDER BY v.start_at DESC LIMIT 200`, company, months)
+		departmentID := ""
+		if u.DepartmentID != nil {
+			departmentID = *u.DepartmentID
+		}
+		rows, err := s.db.Query(r.Context(), `SELECT p.name_encrypted,p.company,v.request_no,v.start_at,v.status,h.display_name FROM visitors p JOIN visitor_visits vv ON vv.visitor_id=p.id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id WHERE lower(p.company)=lower($1) AND v.start_at>=now()-($2::int*interval '1 month') AND ($4 IN ('admin','super_admin','security','auditor') OR ($4='lobby' AND (cardinality($6::text[])=0 OR v.site_id=ANY($6::text[]))) OR ($4='dept_manager' AND v.department_id=NULLIF($5,'')) OR v.host_user_id=$3) ORDER BY v.start_at DESC LIMIT 200`, company, months, u.ID, u.Role, departmentID, u.SiteScope)
 		if err != nil {
 			return nil, err
 		}
@@ -190,13 +196,17 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		}
 		return map[string]any{"items": items, "count": len(items), "months": months}, nil
 	case "get_lobby_status":
+		if !u.CanManageLobby() && !u.CanAudit() {
+			return nil, errMCP("로비 또는 감사 권한이 필요합니다")
+		}
 		var scheduled, current, completed, noShow int
 		err := s.db.QueryRow(r.Context(), `SELECT
 			count(*) FILTER(WHERE vv.status='SCHEDULED' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date),
 			count(*) FILTER(WHERE vv.status='CHECKED_IN'),
 			count(*) FILTER(WHERE vv.status='CHECKED_OUT' AND (vv.checked_out_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date),
 			count(*) FILTER(WHERE vv.status='NO_SHOW' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date)
-			FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites s ON s.id=v.site_id`).Scan(&scheduled, &current, &completed, &noShow)
+			FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites s ON s.id=v.site_id
+			WHERE ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[]))`, u.Role, u.SiteScope).Scan(&scheduled, &current, &completed, &noShow)
 		return map[string]any{"scheduled": scheduled, "current": current, "completed": completed, "noShow": noShow}, err
 	case "get_visit_statistics":
 		if !u.IsAdmin() {

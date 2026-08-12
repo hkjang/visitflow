@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/hkjang/seaton/internal/platform"
+	"github.com/hkjang/visitflow/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/skip2/go-qrcode"
 )
@@ -199,7 +199,7 @@ func (s *Server) queryVisits(ctx context.Context, u User, status, period, search
 	rows, err := s.db.Query(ctx, `
 		SELECT v.id,v.request_no,v.host_user_id,h.display_name,v.department_id,COALESCE(o.name,''),v.site_id,s.name,v.lobby_id,COALESCE(l.name,''),
 		v.start_at,v.end_at,v.purpose,COALESCE(v.place_detail,''),v.status,v.source,v.created_at,
-		count(vv.id),COALESCE((array_agg(p.name_encrypted ORDER BY vv.is_primary DESC,vv.created_at))[1],''),COALESCE((array_agg(p.company ORDER BY vv.is_primary DESC,vv.created_at))[1],'')
+		count(vv.id),COALESCE((array_agg(p.name_encrypted ORDER BY vv.is_primary DESC,vv.created_at))[1],''),COALESCE((array_agg(p.company ORDER BY vv.is_primary DESC,vv.created_at))[1],''),(array_agg(p.masked_at ORDER BY vv.is_primary DESC,vv.created_at))[1]
 		FROM visits v JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id
 		LEFT JOIN organizations o ON o.id=v.department_id LEFT JOIN lobbies l ON l.id=v.lobby_id
 		LEFT JOIN visitor_visits vv ON vv.visit_id=v.id LEFT JOIN visitors p ON p.id=vv.visitor_id
@@ -218,10 +218,14 @@ func (s *Server) queryVisits(ctx context.Context, u User, status, period, search
 	for rows.Next() {
 		var item VisitSummary
 		var nameEncrypted string
-		if err := rows.Scan(&item.ID, &item.RequestNo, &item.HostUserID, &item.HostName, &item.DepartmentID, &item.DepartmentName, &item.SiteID, &item.SiteName, &item.LobbyID, &item.LobbyName, &item.StartAt, &item.EndAt, &item.Purpose, &item.PlaceDetail, &item.Status, &item.Source, &item.CreatedAt, &item.VisitorCount, &nameEncrypted, &item.Company); err != nil {
+		var maskedAt *time.Time
+		if err := rows.Scan(&item.ID, &item.RequestNo, &item.HostUserID, &item.HostName, &item.DepartmentID, &item.DepartmentName, &item.SiteID, &item.SiteName, &item.LobbyID, &item.LobbyName, &item.StartAt, &item.EndAt, &item.Purpose, &item.PlaceDetail, &item.Status, &item.Source, &item.CreatedAt, &item.VisitorCount, &nameEncrypted, &item.Company, &maskedAt); err != nil {
 			return nil, err
 		}
 		item.PrimaryVisitor = s.decryptOptional(nameEncrypted)
+		if maskedAt != nil {
+			item.PrimaryVisitor = maskName(item.PrimaryVisitor)
+		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -307,55 +311,132 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 	if approval == "true" && source != "lobby" {
 		status, participantStatus = "PENDING_APPROVAL", "PENDING_APPROVAL"
 	}
+	occurrences := 1
+	if len(in.Recurrence) > 0 {
+		if source == "lobby" || fmt.Sprint(in.Recurrence["frequency"]) != "weekly" {
+			return nil, visitError{400, "invalid_recurrence", "반복 예약은 일반 방문의 매주 반복만 지원합니다"}
+		}
+		switch value := in.Recurrence["occurrences"].(type) {
+		case float64:
+			occurrences = int(value)
+		case int:
+			occurrences = value
+		case json.Number:
+			occurrences, _ = strconv.Atoi(value.String())
+		default:
+			occurrences = 0
+		}
+		if occurrences < 2 || occurrences > 52 || occurrences*len(in.Visitors) > 500 {
+			return nil, visitError{400, "invalid_recurrence", "반복 예약은 2~52회, 전체 방문자 일정은 최대 500건까지 가능합니다"}
+		}
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	visitID := newID()
-	random, _ := platform.RandomToken(5)
-	requestNo := fmt.Sprintf("VF-%s-%s", time.Now().Format("060102"), strings.ToUpper(strings.ReplaceAll(random, "_", ""))[:6])
-	recurrence, _ := json.Marshal(in.Recurrence)
 	policy := map[string]string{"approvalEnabled": approval}
 	policyJSON, _ := json.Marshal(policy)
-	_, err = tx.Exec(ctx, `INSERT INTO visits(id,request_no,host_user_id,department_id,site_id,lobby_id,start_at,end_at,purpose,place_detail,notes,status,source,recurrence,policy_snapshot) VALUES($1,$2,$3,NULLIF($4,''),$5,NULLIF($6,''),$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,$13,$14,$15)`, visitID, requestNo, hostID, in.DepartmentID, in.SiteID, in.LobbyID, in.StartAt, in.EndAt, in.Purpose, in.PlaceDetail, in.Notes, status, source, recurrence, policyJSON)
-	if err != nil {
-		return nil, err
+	seriesID := ""
+	if occurrences > 1 {
+		seriesID = newID()
 	}
+	type createdVisit struct {
+		ID        string `json:"id"`
+		RequestNo string `json:"requestNo"`
+		Status    string `json:"status"`
+	}
+	created := make([]createdVisit, 0, occurrences)
 	passURLs := []string{}
-	for i, input := range in.Visitors {
-		visitorID, err := s.upsertVisitor(ctx, tx, input)
+	for occurrence := 0; occurrence < occurrences; occurrence++ {
+		scheduled := in
+		scheduled.StartAt = in.StartAt.AddDate(0, 0, occurrence*7)
+		scheduled.EndAt = in.EndAt.AddDate(0, 0, occurrence*7)
+		visitID := newID()
+		random, randomErr := platform.RandomToken(5)
+		if randomErr != nil {
+			return nil, randomErr
+		}
+		requestNo := fmt.Sprintf("VF-%s-%s", scheduled.StartAt.Format("060102"), strings.ToUpper(strings.ReplaceAll(random, "_", ""))[:6])
+		recurrenceValue := map[string]any{}
+		if occurrences > 1 {
+			recurrenceValue = map[string]any{"frequency": "weekly", "occurrences": occurrences, "index": occurrence + 1, "seriesId": seriesID}
+		}
+		recurrenceJSON, _ := json.Marshal(recurrenceValue)
+		persistedStatus := status
+		persistedParticipantStatus := participantStatus
+		if autoCheckIn {
+			persistedStatus, persistedParticipantStatus = "CHECKED_IN", "CHECKED_IN"
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO visits(id,request_no,host_user_id,department_id,site_id,lobby_id,start_at,end_at,purpose,place_detail,notes,status,source,recurrence,policy_snapshot) VALUES($1,$2,$3,NULLIF($4,''),$5,NULLIF($6,''),$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,$13,$14,$15)`, visitID, requestNo, hostID, scheduled.DepartmentID, scheduled.SiteID, scheduled.LobbyID, scheduled.StartAt, scheduled.EndAt, scheduled.Purpose, scheduled.PlaceDetail, scheduled.Notes, persistedStatus, source, recurrenceJSON, policyJSON)
 		if err != nil {
 			return nil, err
 		}
-		vvID := newID()
-		equipment, _ := json.Marshal(input.Equipment)
-		_, err = tx.Exec(ctx, `INSERT INTO visitor_visits(id,visit_id,visitor_id,is_primary,equipment,status) VALUES($1,$2,$3,$4,$5,$6)`, vvID, visitID, visitorID, i == 0, equipment, participantStatus)
+		_, err = tx.Exec(ctx, `INSERT INTO visit_events(visit_id,event_type,actor_user_id,method,details) VALUES($1,'REQUESTED',$2,$3,$4)`, visitID, actor.ID, source, policyJSON)
 		if err != nil {
 			return nil, err
 		}
-		if status == "SCHEDULED" {
-			raw, err := s.issueQRTx(ctx, tx, vvID, in.StartAt, in.EndAt, "")
+		for visitorIndex, input := range scheduled.Visitors {
+			visitorID, upsertErr := s.upsertVisitor(ctx, tx, input)
+			if upsertErr != nil {
+				return nil, upsertErr
+			}
+			vvID := newID()
+			equipment, _ := json.Marshal(input.Equipment)
+			_, err = tx.Exec(ctx, `INSERT INTO visitor_visits(id,visit_id,visitor_id,is_primary,equipment,status,checked_in_at) VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $7 THEN now() ELSE NULL END)`, vvID, visitID, visitorID, visitorIndex == 0, equipment, persistedParticipantStatus, autoCheckIn)
 			if err != nil {
 				return nil, err
 			}
-			passURL := s.publicBaseURL(ctx, r) + "/q/" + raw
-			passURLs = append(passURLs, passURL)
-			if err := s.queueVisitorNotificationTx(ctx, tx, visitID, input.Phone, input, in, passURL); err != nil {
-				return nil, err
+			if status == "SCHEDULED" {
+				raw, issueErr := s.issueQRTx(ctx, tx, vvID, scheduled.StartAt, scheduled.EndAt, "")
+				if issueErr != nil {
+					return nil, issueErr
+				}
+				if autoCheckIn {
+					_, err = tx.Exec(ctx, `UPDATE qr_tokens SET used_at=now() WHERE visitor_visit_id=$1 AND revoked_at IS NULL`, vvID)
+					if err != nil {
+						return nil, err
+					}
+				}
+				passURL := s.publicBaseURL(ctx, r) + "/q/" + raw
+				if occurrence == 0 {
+					passURLs = append(passURLs, passURL)
+				}
+				if queueErr := s.queueVisitorNotificationTx(ctx, tx, visitID, input.Phone, input, scheduled, passURL); queueErr != nil {
+					return nil, queueErr
+				}
+			}
+			if autoCheckIn {
+				_, err = tx.Exec(ctx, `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_IN',$3,NULLIF($4,''),'walk_in')`, visitID, vvID, actor.ID, scheduled.LobbyID)
+				if err != nil {
+					return nil, err
+				}
+				var recipientEnc, lobbyName string
+				_ = tx.QueryRow(ctx, `SELECT COALESCE(phone_encrypted,'') FROM users WHERE id=$1`, hostID).Scan(&recipientEnc)
+				_ = tx.QueryRow(ctx, `SELECT COALESCE(name,'현장 로비') FROM lobbies WHERE id=NULLIF($1,'')`, scheduled.LobbyID).Scan(&lobbyName)
+				tmpl, _ := s.getSetting(ctx, "notification.arrival_template")
+				body := renderTemplate(tmpl, map[string]string{"visitor": input.Name, "lobby": lobbyName, "checkedIn": time.Now().Local().Format("15:04")})
+				if queueErr := s.queueNotificationTx(ctx, tx, visitID, s.decryptOptional(recipientEnc), "sms", "host_arrival", body); queueErr != nil {
+					return nil, queueErr
+				}
 			}
 		}
+		created = append(created, createdVisit{ID: visitID, RequestNo: requestNo, Status: persistedStatus})
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO visit_events(visit_id,event_type,actor_user_id,method,details) VALUES($1,'REQUESTED',$2,$3,$4)`, visitID, actor.ID, source, policyJSON)
-	if err == nil {
-		err = tx.Commit(ctx)
-	}
+	err = tx.Commit(ctx)
 	if err != nil {
 		return nil, err
 	}
-	s.audit(ctx, actor.ID, "visit.create", "visit", visitID, requestRemote(r), map[string]any{"requestNo": requestNo, "visitorCount": len(in.Visitors), "source": source})
+	for _, item := range created {
+		s.audit(ctx, actor.ID, "visit.create", "visit", item.ID, requestRemote(r), map[string]any{"requestNo": item.RequestNo, "visitorCount": len(in.Visitors), "source": source, "seriesId": seriesID})
+	}
 	s.publishLobbyEvent("visit.updated")
-	result := map[string]any{"id": visitID, "requestNo": requestNo, "status": status, "visitorCount": len(in.Visitors)}
+	first := created[0]
+	result := map[string]any{"id": first.ID, "requestNo": first.RequestNo, "status": first.Status, "visitorCount": len(in.Visitors), "occurrenceCount": len(created)}
+	if len(created) > 1 {
+		result["seriesId"] = seriesID
+		result["occurrences"] = created
+	}
 	if len(passURLs) > 0 {
 		result["passUrls"] = passURLs
 	}
@@ -400,7 +481,7 @@ func (s *Server) upsertVisitor(ctx context.Context, tx pgx.Tx, in VisitorInput) 
 		id = newID()
 		_, err = tx.Exec(ctx, `INSERT INTO visitors(id,name_encrypted,name_hash,phone_encrypted,phone_hash,email_encrypted,company,title,vehicle_encrypted,consented_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),NULLIF($9,''),now())`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, hash, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,name_hash=$3,phone_encrypted=$4,email_encrypted=NULLIF($5,''),company=NULLIF($6,''),title=NULLIF($7,''),vehicle_encrypted=NULLIF($8,''),consented_at=now(),updated_at=now() WHERE id=$1`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
+		_, err = tx.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,name_hash=$3,phone_encrypted=$4,email_encrypted=NULLIF($5,''),company=NULLIF($6,''),title=NULLIF($7,''),vehicle_encrypted=NULLIF($8,''),consented_at=now(),masked_at=NULL,updated_at=now() WHERE id=$1`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
 	}
 	return id, err
 }
@@ -505,7 +586,7 @@ func (s *Server) getVisit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) visitParticipants(ctx context.Context, visitID string, includePass bool) ([]map[string]any, error) {
-	rows, err := s.db.Query(ctx, `SELECT vv.id,p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.email_encrypted,''),COALESCE(p.company,''),COALESCE(p.title,''),COALESCE(p.vehicle_encrypted,''),vv.equipment,vv.status,vv.badge_no,vv.checked_in_at,vv.checked_out_at,
+	rows, err := s.db.Query(ctx, `SELECT vv.id,p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.email_encrypted,''),COALESCE(p.company,''),COALESCE(p.title,''),COALESCE(p.vehicle_encrypted,''),p.masked_at,vv.equipment,vv.status,vv.badge_no,vv.checked_in_at,vv.checked_out_at,
 		COALESCE(q.token_encrypted,''),q.version FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id LEFT JOIN LATERAL (SELECT token_encrypted,version FROM qr_tokens WHERE visitor_visit_id=vv.id AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1) q ON true WHERE vv.visit_id=$1 ORDER BY vv.is_primary DESC,vv.created_at`, visitID)
 	if err != nil {
 		return nil, err
@@ -515,15 +596,20 @@ func (s *Server) visitParticipants(ctx context.Context, visitID string, includeP
 	for rows.Next() {
 		var vvID, visitorID, nameEnc, phoneEnc, emailEnc, company, title, vehicleEnc, status, tokenEnc string
 		var equipment []byte
+		var maskedAt *time.Time
 		var badge *string
 		var checkedIn, checkedOut *time.Time
 		var version *int
-		if err := rows.Scan(&vvID, &visitorID, &nameEnc, &phoneEnc, &emailEnc, &company, &title, &vehicleEnc, &equipment, &status, &badge, &checkedIn, &checkedOut, &tokenEnc, &version); err != nil {
+		if err := rows.Scan(&vvID, &visitorID, &nameEnc, &phoneEnc, &emailEnc, &company, &title, &vehicleEnc, &maskedAt, &equipment, &status, &badge, &checkedIn, &checkedOut, &tokenEnc, &version); err != nil {
 			return nil, err
 		}
 		var equipmentValue any = []string{}
 		_ = json.Unmarshal(equipment, &equipmentValue)
-		item := map[string]any{"id": vvID, "visitorId": visitorID, "name": s.decryptOptional(nameEnc), "phone": maskPhone(s.decryptOptional(phoneEnc)), "email": s.decryptOptional(emailEnc), "company": company, "title": title, "vehicle": s.decryptOptional(vehicleEnc), "equipment": equipmentValue, "status": status, "badgeNo": badge, "checkedInAt": checkedIn, "checkedOutAt": checkedOut, "qrVersion": version}
+		name, email, vehicle := s.decryptOptional(nameEnc), s.decryptOptional(emailEnc), s.decryptOptional(vehicleEnc)
+		if maskedAt != nil {
+			name, email, vehicle = maskName(name), "", ""
+		}
+		item := map[string]any{"id": vvID, "visitorId": visitorID, "name": name, "phone": maskPhone(s.decryptOptional(phoneEnc)), "email": email, "company": company, "title": title, "vehicle": vehicle, "equipment": equipmentValue, "status": status, "badgeNo": badge, "checkedInAt": checkedIn, "checkedOutAt": checkedOut, "qrVersion": version, "maskedAt": maskedAt}
 		if includePass && tokenEnc != "" {
 			item["passPath"] = "/q/" + s.decryptOptional(tokenEnc)
 		}
@@ -549,12 +635,35 @@ func (s *Server) updateVisit(w http.ResponseWriter, r *http.Request) {
 	}
 	u, _ := userFrom(r)
 	id := chi.URLParam(r, "visitID")
-	tag, err := s.db.Exec(r.Context(), `UPDATE visits SET start_at=$3,end_at=$4,purpose=$5,place_detail=NULLIF($6,''),lobby_id=NULLIF($7,''),updated_at=now() WHERE id=$1 AND (host_user_id=$2 OR $8) AND status IN ('PENDING_APPROVAL','SCHEDULED','APPROVED')`, id, u.ID, in.StartAt, in.EndAt, strings.TrimSpace(in.Purpose), in.PlaceDetail, in.LobbyID, u.IsAdmin())
-	if err != nil || tag.RowsAffected() == 0 {
+	var oldStart, oldEnd time.Time
+	var oldPurpose, oldPlace, oldLobby string
+	if err := s.db.QueryRow(r.Context(), `SELECT start_at,end_at,purpose,COALESCE(place_detail,''),COALESCE(lobby_id,'') FROM visits WHERE id=$1 AND (host_user_id=$2 OR $3) AND status IN ('PENDING_APPROVAL','SCHEDULED','APPROVED')`, id, u.ID, u.IsAdmin()).Scan(&oldStart, &oldEnd, &oldPurpose, &oldPlace, &oldLobby); err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "visit.update", "visit", id, r.RemoteAddr, in)
+	earlyMinutes, _ := strconv.Atoi(settingOr(s, r.Context(), "visit.early_checkin_minutes", "60"))
+	lateMinutes, _ := strconv.Atoi(settingOr(s, r.Context(), "visit.late_grace_minutes", "120"))
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	_, err = tx.Exec(r.Context(), `UPDATE visits SET start_at=$2,end_at=$3,purpose=$4,place_detail=NULLIF($5,''),lobby_id=NULLIF($6,''),updated_at=now() WHERE id=$1`, id, in.StartAt, in.EndAt, strings.TrimSpace(in.Purpose), in.PlaceDetail, in.LobbyID)
+	if err == nil {
+		_, err = tx.Exec(r.Context(), `UPDATE qr_tokens SET valid_from=$2-($3::int*interval '1 minute'),valid_until=$4+($5::int*interval '1 minute') WHERE visitor_visit_id IN (SELECT id FROM visitor_visits WHERE visit_id=$1) AND revoked_at IS NULL`, id, in.StartAt, earlyMinutes, in.EndAt, lateMinutes)
+	}
+	if err == nil {
+		err = tx.Commit(r.Context())
+	}
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	s.audit(r.Context(), u.ID, "visit.update", "visit", id, r.RemoteAddr, map[string]any{
+		"before": map[string]any{"startAt": oldStart, "endAt": oldEnd, "purpose": oldPurpose, "placeDetail": oldPlace, "lobbyId": oldLobby},
+		"after":  in,
+	})
 	s.publishLobbyEvent("visit.updated")
 	w.WriteHeader(http.StatusNoContent)
 }

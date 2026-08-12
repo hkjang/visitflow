@@ -1,1 +1,28 @@
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VisitFlow · 방문의 모든 흐름</title><link rel="icon" href="favicon.svg"><link rel="stylesheet" href="style.css"></head><body><header><a class="brand" href="#"><span>VF</span>VisitFlow</a><a class="github" href="https://github.com/hkjang/seaton">GitHub</a></header><main><section class="hero"><p class="eyebrow">ENTERPRISE VISITOR OPERATIONS</p><h1>방문의 시작부터<br><em>안전한 퇴실</em>까지.</h1><p class="lead">신청 · 승인 · QR · 로비 · 알림 · 감사 추적을 한 흐름으로 운영하는 오프라인 방문자 관리 플랫폼입니다.</p><div class="badges"><b>Go + React</b><b>PostgreSQL</b><b>Keycloak OIDC</b><b>REST + MCP</b></div></section><section class="grid"><article><small>01</small><h2>빠른 방문 신청</h2><p>단체 방문, 템플릿, 정책 기반 승인과 방문자별 QR 발급을 연결합니다.</p></article><article><small>02</small><h2>실시간 로비</h2><p>카메라·USB Scanner, 현장 방문, 현재 체류와 퇴실을 SSE로 갱신합니다.</p></article><article><small>03</small><h2>검증 가능한 보안</h2><p>개인정보 암호화, Replay 차단, 키 회전, Watch List와 감사 추적을 제공합니다.</p></article></section><section class="offline"><div><p class="eyebrow">AIR-GAPPED READY</p><h2>Docker 이미지 하나로 내부망에.</h2><p>런타임 CDN, Registry, Redis 없이 PostgreSQL과 단일 서비스 컨테이너만으로 운영합니다.</p></div><pre>docker load &lt; VisitFlow-v2.0.0-linux-amd64-image.tar.gz<br>POSTGRES_DSN=... BOOTSTRAP_ADMIN=... docker compose up -d</pre></section></main><footer>VisitFlow · Offline-first visitor management</footer></body></html>
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VisitFlow · 방문의 모든 흐름</title>
+  <link rel="icon" href="favicon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header><a class="brand" href="#"><span>VF</span>VisitFlow</a><a class="github" href="https://github.com/hkjang/visitflow">GitHub</a></header>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">ENTERPRISE VISITOR OPERATIONS</p>
+      <h1>방문의 시작부터<br><em>안전한 퇴실</em>까지.</h1>
+      <p class="lead">신청 · 승인 · QR · 로비 · 알림 · 감사 추적을 한 흐름으로 운영하는 오프라인 방문자 관리 플랫폼입니다.</p>
+      <div class="badges"><b>Go + React</b><b>PostgreSQL</b><b>Keycloak OIDC</b><b>REST + MCP</b></div>
+    </section>
+    <section class="grid">
+      <article><small>01</small><h2>빠른 방문 신청</h2><p>단체·반복 방문, CSV/XLSX, 템플릿, 정책 기반 승인과 방문자별 QR 발급을 연결합니다.</p></article>
+      <article><small>02</small><h2>실시간 로비</h2><p>카메라·USB Scanner, 현장 방문, 현재 체류와 퇴실을 SSE로 갱신합니다.</p></article>
+      <article><small>03</small><h2>검증 가능한 보안</h2><p>개인정보 암호화, Replay 차단, 키 회전, Watch List와 감사 추적을 제공합니다.</p></article>
+    </section>
+    <section class="offline"><div><p class="eyebrow">AIR-GAPPED READY</p><h2>Docker 이미지 하나로 내부망에.</h2><p>런타임 CDN, Registry, Redis 없이 PostgreSQL과 단일 서비스 컨테이너만으로 운영합니다.</p></div><pre>docker load &lt; visitflow-v2.1.0.tar.gz<br>POSTGRES_DSN=... BOOTSTRAP_ADMIN=... <br>ENCRYPTION_KEY=... docker compose up -d</pre></section>
+  </main>
+  <footer>VisitFlow · Offline-first visitor management</footer>
+</body>
+</html>

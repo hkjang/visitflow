@@ -1,4 +1,4 @@
-module github.com/hkjang/seaton
+module github.com/hkjang/visitflow
 
 go 1.24.0
 

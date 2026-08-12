@@ -14,10 +14,15 @@ export const theme = createTheme({
   },
   shape: { borderRadius: 14 },
   typography: {
+    fontSize: 16,
     fontFamily: 'Inter, Pretendard, "Noto Sans KR", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     h4: { fontWeight: 800, letterSpacing: "-0.035em" },
     h5: { fontWeight: 780, letterSpacing: "-0.025em" },
     h6: { fontWeight: 740 },
+    body1: { fontSize: "1rem", lineHeight: 1.65 },
+    body2: { fontSize: ".9375rem", lineHeight: 1.6 },
+    caption: { fontSize: ".8125rem", lineHeight: 1.5 },
+    overline: { fontSize: ".8125rem", lineHeight: 1.7 },
     button: { fontWeight: 730, textTransform: "none" },
   },
   components: {
@@ -34,6 +39,8 @@ export const theme = createTheme({
     MuiCard: { styleOverrides: { root: { border: "1px solid #DFE8E4", boxShadow: "0 10px 32px rgba(19,65,55,.065)" } } },
     MuiTextField: { defaultProps: { size: "small" } },
     MuiFormControl: { defaultProps: { size: "small" } },
+    MuiInputBase: { styleOverrides: { root: { fontSize: 16 } } },
+    MuiTableCell: { styleOverrides: { root: { fontSize: 15, lineHeight: 1.55 } } },
     MuiTableHead: { styleOverrides: { root: { backgroundColor: "#F0F5F3" } } },
   },
 });

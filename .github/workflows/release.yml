@@ -25,21 +25,22 @@ jobs:
             --build-arg "VERSION=${version}" \
             --build-arg "COMMIT=${COMMIT}" \
             --build-arg "BUILT_AT=${built_at}" \
-            -t "visitflow:${version}" .
-          docker save "visitflow:${version}" | gzip -9 > "VisitFlow-${VERSION}-linux-amd64-image.tar.gz"
+            -t "visitflow:v${version}" \
+            -t "visitflow:latest" .
+          docker save "visitflow:v${version}" "visitflow:latest" | gzip -9 > "visitflow-v${version}.tar.gz"
       - name: Verify image archive
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          test -s "VisitFlow-${VERSION}-linux-amd64-image.tar.gz"
-          gzip -t "VisitFlow-${VERSION}-linux-amd64-image.tar.gz"
+          test -s "visitflow-${VERSION}.tar.gz"
+          gzip -t "visitflow-${VERSION}.tar.gz"
       - name: Create GitHub release with image only
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ github.ref_name }}
         run: |
           gh release create "$VERSION" \
-            "VisitFlow-${VERSION}-linux-amd64-image.tar.gz" \
+            "visitflow-${VERSION}.tar.gz" \
             --verify-tag \
             --generate-notes \
             --title "VisitFlow ${VERSION}"

@@ -14,11 +14,12 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 | `write` | REST/MCP 변경 |
 | `mcp` | MCP 연결 |
 
-회전하면 새 버전이 생성되고 기존 키는 관리자 설정 유예시간 동안만 유효하다. 즉시 폐기하면 유예 없이 무효화된다.
+관리자는 허용 Scope, 기본 만료일, 사용자별 활성 키 한도를 설정한다. 사용자는 허용 범위 안에서 키별 Scope를 변경할 수 있다. 관리자가 Scope를 제거하면 기존 키에도 즉시 차단된다. 회전하면 새 버전과 새 만료일이 생성되고 기존 키는 관리자 설정 유예시간 동안만 유효하다. 즉시 폐기하면 유예 없이 무효화된다.
 
 ## REST 대표 경로
 
 - `POST /api/v1/visits` 단일·단체 방문 신청
+- `POST /api/v1/visits/import/preview` CSV/XLSX 방문자 가져오기 검증
 - `GET /api/v1/visits` 사용자/부서/사업장 범위 방문 검색
 - `POST /api/v1/visits/{id}/approve|reject|cancel`
 - `POST /api/v1/visitor-visits/{id}/qr/reissue`
@@ -29,6 +30,7 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `GET /api/v1/admin/statistics|audit-logs|notifications|visitors`
 - `GET|PUT /api/v1/settings`
 - `GET|POST /api/v1/api-keys`
+- `PATCH /api/v1/api-keys/{keyID}` 키 이름·Scope 변경
 
 OpenAPI 3.1 문서는 실행 중인 서비스의 `/api/v1/openapi.json`에서 제공한다.
 

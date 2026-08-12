@@ -3,11 +3,19 @@ package app
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/hkjang/seaton/internal/platform"
+	"github.com/hkjang/visitflow/internal/platform"
 )
+
+func (s *Server) apiKeyPolicy(w http.ResponseWriter, r *http.Request) {
+	allowed, _ := s.getSetting(r.Context(), "security.api_key_allowed_scopes")
+	days, _ := strconv.Atoi(settingOr(s, r.Context(), "security.api_key_days", "90"))
+	maxActive, _ := strconv.Atoi(settingOr(s, r.Context(), "security.api_key_max_active", "10"))
+	writeJSON(w, http.StatusOK, map[string]any{"allowedScopes": strings.Fields(allowed), "defaultExpiryDays": days, "maxActiveKeys": maxActive})
+}
 
 func (s *Server) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 	u, _ := userFrom(r)
@@ -48,8 +56,24 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	if len(in.Scopes) == 0 {
 		in.Scopes = []string{"read", "mcp"}
 	}
-	if !validScopes(in.Scopes) {
-		writeError(w, 400, "invalid_scopes", "지원 범위는 read, write, mcp입니다")
+	if !s.validScopes(r, in.Scopes) {
+		writeError(w, 400, "invalid_scopes", "관리자가 허용한 키 범위만 선택할 수 있습니다")
+		return
+	}
+	u, _ := userFrom(r)
+	maxActive := 10
+	if v, _ := s.getSetting(r.Context(), "security.api_key_max_active"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n >= 1 && n <= 100 {
+			maxActive = n
+		}
+	}
+	var active int
+	if err := s.db.QueryRow(r.Context(), `SELECT count(*) FROM api_keys WHERE user_id=$1 AND (revoked_at IS NULL OR grace_until>now()) AND (expires_at IS NULL OR expires_at>now())`, u.ID).Scan(&active); err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	if active >= maxActive {
+		writeError(w, http.StatusConflict, "api_key_limit", "활성 개인 키 한도에 도달했습니다")
 		return
 	}
 	days := 90
@@ -73,7 +97,6 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	raw := "vf_" + rawPart
 	prefix := raw[:13]
 	id := newID()
-	u, _ := userFrom(r)
 	expires := time.Now().Add(time.Duration(days) * 24 * time.Hour)
 	_, err = s.db.Exec(r.Context(), `INSERT INTO api_keys(id,user_id,name,prefix,secret_hash,scopes,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, id, u.ID, in.Name, prefix, s.keys.Digest(raw), in.Scopes, expires)
 	if err != nil {
@@ -84,14 +107,45 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, map[string]any{"id": id, "key": raw, "prefix": prefix, "expiresAt": expires, "message": "이 키는 다시 표시되지 않습니다. 안전한 곳에 보관하세요."})
 }
 
+func (s *Server) updateAPIKey(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name   string   `json:"name"`
+		Scopes []string `json:"scopes"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" || !s.validScopes(r, in.Scopes) {
+		writeError(w, http.StatusBadRequest, "invalid_key_policy", "키 이름과 관리자가 허용한 범위를 확인하세요")
+		return
+	}
+	u, _ := userFrom(r)
+	id := chi.URLParam(r, "keyID")
+	var beforeName string
+	var beforeScopes []string
+	if err := s.db.QueryRow(r.Context(), `SELECT name,scopes FROM api_keys WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`, id, u.ID).Scan(&beforeName, &beforeScopes); err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	if _, err := s.db.Exec(r.Context(), `UPDATE api_keys SET name=$3,scopes=$4 WHERE id=$1 AND user_id=$2`, id, u.ID, in.Name, in.Scopes); err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	s.audit(r.Context(), u.ID, "api_key.policy_update", "api_key", id, r.RemoteAddr, map[string]any{
+		"before": map[string]any{"name": beforeName, "scopes": beforeScopes},
+		"after":  map[string]any{"name": in.Name, "scopes": in.Scopes},
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 	oldID := chi.URLParam(r, "keyID")
 	u, _ := userFrom(r)
 	var name string
 	var scopes []string
 	var version int
-	var expires *time.Time
-	err := s.db.QueryRow(r.Context(), `SELECT name,scopes,version,expires_at FROM api_keys WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL`, oldID, u.ID).Scan(&name, &scopes, &version, &expires)
+	err := s.db.QueryRow(r.Context(), `SELECT name,scopes,version FROM api_keys WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`, oldID, u.ID).Scan(&name, &scopes, &version)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -102,6 +156,13 @@ func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 			graceHours = n
 		}
 	}
+	expiryDays := 90
+	if v, _ := s.getSetting(r.Context(), "security.api_key_days"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n >= 1 && n <= 3650 {
+			expiryDays = n
+		}
+	}
+	expires := time.Now().Add(time.Duration(expiryDays) * 24 * time.Hour)
 	rawPart, _ := platform.RandomToken(32)
 	raw := "vf_" + rawPart
 	prefix := raw[:13]
@@ -141,13 +202,21 @@ func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-func validScopes(scopes []string) bool {
-	if len(scopes) > 3 {
+func (s *Server) validScopes(r *http.Request, scopes []string) bool {
+	if len(scopes) == 0 || len(scopes) > 3 {
 		return false
+	}
+	allowedValue, _ := s.getSetting(r.Context(), "security.api_key_allowed_scopes")
+	if strings.TrimSpace(allowedValue) == "" {
+		allowedValue = "read write mcp"
+	}
+	allowed := map[string]bool{}
+	for _, scope := range strings.Fields(allowedValue) {
+		allowed[scope] = true
 	}
 	seen := map[string]bool{}
 	for _, v := range scopes {
-		if v != "read" && v != "write" && v != "mcp" {
+		if !allowed[v] || (v != "read" && v != "write" && v != "mcp") {
 			return false
 		}
 		if seen[v] {

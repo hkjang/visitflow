@@ -13,6 +13,7 @@ import { AdminPage } from "./pages/AdminPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { KeysPage } from "./pages/KeysPage";
 import { MobilePassPage } from "./pages/MobilePassPage";
+import { ApprovalsPage } from "./pages/ApprovalsPage";
 
 function Protected() {
   const { user } = useAuth();
@@ -22,10 +23,14 @@ function LobbyGuard({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   return user && ["lobby", "security", "admin", "super_admin"].includes(user.role) ? children : <Navigate to="/" replace />;
 }
-function AdminGuard({ children, audit = false }: { children: React.ReactNode; audit?: boolean }) {
+function AdminGuard({ children, audit = false, security = false }: { children: React.ReactNode; audit?: boolean; security?: boolean }) {
   const { user } = useAuth();
-  const roles = audit ? ["auditor", "security", "admin", "super_admin"] : ["admin", "super_admin"];
+  const roles = audit ? ["auditor", "security", "admin", "super_admin"] : security ? ["security", "admin", "super_admin"] : ["admin", "super_admin"];
   return user && roles.includes(user.role) ? children : <Navigate to="/" replace />;
+}
+function ApprovalGuard({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  return user && ["dept_manager", "security", "admin", "super_admin"].includes(user.role) ? children : <Navigate to="/" replace />;
 }
 export default function App() {
   const { loading } = useAuth();
@@ -39,9 +44,11 @@ export default function App() {
         <Route path="visits/new" element={<VisitFormPage />} />
         <Route path="visits" element={<VisitsPage />} />
         <Route path="templates" element={<TemplatesPage />} />
+        <Route path="approvals" element={<ApprovalGuard><ApprovalsPage /></ApprovalGuard>} />
         <Route path="lobby" element={<LobbyGuard><LobbyPage /></LobbyGuard>} />
         <Route path="lobby/scan" element={<LobbyGuard><ScannerPage /></LobbyGuard>} />
         <Route path="lobby/walk-in" element={<LobbyGuard><VisitFormPage walkIn /></LobbyGuard>} />
+        <Route path="admin/visits" element={<AdminGuard security><AdminPage fixedSection="visits" /></AdminGuard>} />
         <Route path="admin/:section" element={<AdminGuard><AdminPage /></AdminGuard>} />
         <Route path="admin/audit" element={<AdminGuard audit><AdminPage fixedSection="audit" /></AdminGuard>} />
         <Route path="admin/settings" element={<AdminGuard><SettingsPage /></AdminGuard>} />
