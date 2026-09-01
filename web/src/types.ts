@@ -62,6 +62,39 @@ export interface ReferenceData {
   hosts?: { id: string; name: string; email?: string; departmentId?: string }[];
 }
 
+export interface FrequentVisitor {
+  id: string;
+  name: string;
+  phone: string;
+  email?: string;
+  company?: string;
+  title?: string;
+  vehicle?: string;
+  equipment: string[];
+  consent: boolean;
+  consentedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  templateCount: number;
+}
+
+export interface VisitTemplatePayload {
+  purpose?: string;
+  placeDetail?: string;
+  company?: string;
+}
+
+export interface VisitTemplate {
+  id: string;
+  name: string;
+  payload: VisitTemplatePayload;
+  frequentVisitorIds: string[];
+  frequentVisitorCount: number;
+  frequentVisitors?: FrequentVisitor[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type VisitStatus =
   | "REQUESTED"
   | "PENDING_APPROVAL"
@@ -110,4 +143,18 @@ export interface LobbyVisitor {
   endAt: string;
   status: VisitStatus;
   checkedInAt?: string;
+}
+
+export interface GuidePost {
+  id: string;
+  title: string;
+  category: string;
+  content?: string;
+  excerpt?: string;
+  published: boolean;
+  pinned: boolean;
+  authorName: string;
+  publishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }

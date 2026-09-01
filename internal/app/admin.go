@@ -93,7 +93,10 @@ func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT n.id,n.visit_id,n.channel,n.template_key,n.status,n.attempts,COALESCE(n.error,''),n.created_at,n.sent_at,n.recipient_encrypted FROM notifications n ORDER BY n.created_at DESC LIMIT 300`)
+	rows, err := s.db.Query(r.Context(), `SELECT n.id,n.visit_id,n.channel,n.template_key,n.status,n.attempts,COALESCE(n.error,''),n.created_at,n.sent_at,n.recipient_encrypted,
+		COALESCE(na.name,'기존 Adapter'),COALESCE(nr.name,''),n.next_attempt_at
+		FROM notifications n LEFT JOIN notification_api_configs na ON na.id=n.api_config_id LEFT JOIN notification_rules nr ON nr.id=n.rule_id
+		ORDER BY n.created_at DESC LIMIT 300`)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -101,14 +104,18 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, channel, key, status, errorText, recipientEnc string
+		var id, channel, key, status, errorText, recipientEnc, apiName, ruleName string
 		var visitID *string
 		var attempts int
-		var created time.Time
+		var created, nextAttempt time.Time
 		var sent *time.Time
-		if rows.Scan(&id, &visitID, &channel, &key, &status, &attempts, &errorText, &created, &sent, &recipientEnc) == nil {
-			items = append(items, map[string]any{"id": id, "visitId": visitID, "channel": channel, "templateKey": key, "status": status, "attempts": attempts, "error": errorText, "recipient": maskPhone(s.decryptOptional(recipientEnc)), "createdAt": created, "sentAt": sent})
+		if rows.Scan(&id, &visitID, &channel, &key, &status, &attempts, &errorText, &created, &sent, &recipientEnc, &apiName, &ruleName, &nextAttempt) == nil {
+			items = append(items, map[string]any{"id": id, "visitId": visitID, "channel": channel, "templateKey": key, "status": status, "attempts": attempts, "error": errorText, "recipient": maskPhone(s.decryptOptional(recipientEnc)), "apiConfigName": apiName, "ruleName": ruleName, "createdAt": created, "sentAt": sent, "nextAttemptAt": nextAttempt})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		notFoundOrServer(w, err)
+		return
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
 }

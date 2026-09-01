@@ -1,12 +1,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/jpeg"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -388,7 +390,7 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 				return nil, err
 			}
 			if status == "SCHEDULED" {
-				raw, issueErr := s.issueQRTx(ctx, tx, vvID, scheduled.StartAt, scheduled.EndAt, "")
+				raw, _, issueErr := s.issueQRTx(ctx, tx, vvID, scheduled.StartAt, scheduled.EndAt, "")
 				if issueErr != nil {
 					return nil, issueErr
 				}
@@ -402,7 +404,11 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 				if occurrence == 0 {
 					passURLs = append(passURLs, passURL)
 				}
-				if queueErr := s.queueVisitorNotificationTx(ctx, tx, visitID, input.Phone, input, scheduled, passURL); queueErr != nil {
+				eventAt := time.Now()
+				if queueErr := s.queueNotificationEventTx(ctx, tx, visitID, vvID, "visit_confirmed", eventAt); queueErr != nil {
+					return nil, queueErr
+				}
+				if queueErr := s.queueNotificationEventTx(ctx, tx, visitID, vvID, "visit_start", eventAt); queueErr != nil {
 					return nil, queueErr
 				}
 			}
@@ -411,12 +417,7 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 				if err != nil {
 					return nil, err
 				}
-				var recipientEnc, lobbyName string
-				_ = tx.QueryRow(ctx, `SELECT COALESCE(phone_encrypted,'') FROM users WHERE id=$1`, hostID).Scan(&recipientEnc)
-				_ = tx.QueryRow(ctx, `SELECT COALESCE(name,'현장 로비') FROM lobbies WHERE id=NULLIF($1,'')`, scheduled.LobbyID).Scan(&lobbyName)
-				tmpl, _ := s.getSetting(ctx, "notification.arrival_template")
-				body := renderTemplate(tmpl, map[string]string{"visitor": input.Name, "lobby": lobbyName, "checkedIn": time.Now().Local().Format("15:04")})
-				if queueErr := s.queueNotificationTx(ctx, tx, visitID, s.decryptOptional(recipientEnc), "sms", "host_arrival", body); queueErr != nil {
+				if queueErr := s.queueNotificationEventTx(ctx, tx, visitID, vvID, "checked_in", time.Now()); queueErr != nil {
 					return nil, queueErr
 				}
 			}
@@ -495,15 +496,19 @@ func (s *Server) publicBaseURL(ctx context.Context, r *http.Request) string {
 	return base
 }
 
-func (s *Server) issueQRTx(ctx context.Context, tx pgx.Tx, participantID string, startAt, endAt time.Time, rotatedFrom string) (string, error) {
+func (s *Server) issueQRTx(ctx context.Context, tx pgx.Tx, participantID string, startAt, endAt time.Time, rotatedFrom string) (string, string, error) {
 	random, err := platform.RandomToken(32)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	raw := "vfq_" + random
+	fileSeq, err := platform.RandomToken(18)
+	if err != nil {
+		return "", "", err
+	}
 	encrypted, err := s.keys.Encrypt(raw)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	version := 1
 	if rotatedFrom != "" {
@@ -519,8 +524,8 @@ func (s *Server) issueQRTx(ctx context.Context, tx pgx.Tx, participantID string,
 	}
 	validFrom := startAt.Add(-time.Duration(earlyMinutes) * time.Minute)
 	validUntil := endAt.Add(time.Duration(lateMinutes) * time.Minute)
-	_, err = tx.Exec(ctx, `INSERT INTO qr_tokens(id,visitor_visit_id,token_hash,token_encrypted,prefix,version,valid_from,valid_until,rotated_from) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''))`, newID(), participantID, s.keys.Digest("qr:"+raw), encrypted, raw[:12], version, validFrom, validUntil, rotatedFrom)
-	return raw, err
+	_, err = tx.Exec(ctx, `INSERT INTO qr_tokens(id,visitor_visit_id,token_hash,token_encrypted,prefix,version,valid_from,valid_until,rotated_from,qrcode_file_seq) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),$10)`, newID(), participantID, s.keys.Digest("qr:"+raw), encrypted, raw[:12], version, validFrom, validUntil, rotatedFrom, fileSeq)
+	return raw, fileSeq, err
 }
 
 func (s *Server) queueVisitorNotificationTx(ctx context.Context, tx pgx.Tx, visitID, phone string, visitor VisitorInput, visit VisitInput, passURL string) error {
@@ -587,20 +592,20 @@ func (s *Server) getVisit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) visitParticipants(ctx context.Context, visitID string, includePass bool) ([]map[string]any, error) {
 	rows, err := s.db.Query(ctx, `SELECT vv.id,p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.email_encrypted,''),COALESCE(p.company,''),COALESCE(p.title,''),COALESCE(p.vehicle_encrypted,''),p.masked_at,vv.equipment,vv.status,vv.badge_no,vv.checked_in_at,vv.checked_out_at,
-		COALESCE(q.token_encrypted,''),q.version FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id LEFT JOIN LATERAL (SELECT token_encrypted,version FROM qr_tokens WHERE visitor_visit_id=vv.id AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1) q ON true WHERE vv.visit_id=$1 ORDER BY vv.is_primary DESC,vv.created_at`, visitID)
+		COALESCE(q.token_encrypted,''),q.version,COALESCE(q.qrcode_file_seq,'') FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id LEFT JOIN LATERAL (SELECT token_encrypted,version,qrcode_file_seq FROM qr_tokens WHERE visitor_visit_id=vv.id AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1) q ON true WHERE vv.visit_id=$1 ORDER BY vv.is_primary DESC,vv.created_at`, visitID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var vvID, visitorID, nameEnc, phoneEnc, emailEnc, company, title, vehicleEnc, status, tokenEnc string
+		var vvID, visitorID, nameEnc, phoneEnc, emailEnc, company, title, vehicleEnc, status, tokenEnc, fileSeq string
 		var equipment []byte
 		var maskedAt *time.Time
 		var badge *string
 		var checkedIn, checkedOut *time.Time
 		var version *int
-		if err := rows.Scan(&vvID, &visitorID, &nameEnc, &phoneEnc, &emailEnc, &company, &title, &vehicleEnc, &maskedAt, &equipment, &status, &badge, &checkedIn, &checkedOut, &tokenEnc, &version); err != nil {
+		if err := rows.Scan(&vvID, &visitorID, &nameEnc, &phoneEnc, &emailEnc, &company, &title, &vehicleEnc, &maskedAt, &equipment, &status, &badge, &checkedIn, &checkedOut, &tokenEnc, &version, &fileSeq); err != nil {
 			return nil, err
 		}
 		var equipmentValue any = []string{}
@@ -612,6 +617,7 @@ func (s *Server) visitParticipants(ctx context.Context, visitID string, includeP
 		item := map[string]any{"id": vvID, "visitorId": visitorID, "name": name, "phone": maskPhone(s.decryptOptional(phoneEnc)), "email": email, "company": company, "title": title, "vehicle": vehicle, "equipment": equipmentValue, "status": status, "badgeNo": badge, "checkedInAt": checkedIn, "checkedOutAt": checkedOut, "qrVersion": version, "maskedAt": maskedAt}
 		if includePass && tokenEnc != "" {
 			item["passPath"] = "/q/" + s.decryptOptional(tokenEnc)
+			item["qrcodeImagePath"] = "/img/visitor/" + fileSeq + ".jpg"
 		}
 		items = append(items, item)
 	}
@@ -654,6 +660,9 @@ func (s *Server) updateVisit(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `UPDATE qr_tokens SET valid_from=$2-($3::int*interval '1 minute'),valid_until=$4+($5::int*interval '1 minute') WHERE visitor_visit_id IN (SELECT id FROM visitor_visits WHERE visit_id=$1) AND revoked_at IS NULL`, id, in.StartAt, earlyMinutes, in.EndAt, lateMinutes)
 	}
 	if err == nil {
+		err = s.refreshVisitStartNotificationsTx(r.Context(), tx, id)
+	}
+	if err == nil {
 		err = tx.Commit(r.Context())
 	}
 	if err != nil {
@@ -686,6 +695,35 @@ func (s *Server) cancelVisit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil && tag.RowsAffected() > 0 {
 		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,event_type,actor_user_id) VALUES($1,'CANCELLED',$2)`, id, u.ID)
+	}
+	if err == nil && tag.RowsAffected() > 0 {
+		err = s.cancelPendingVisitNotificationsTx(r.Context(), tx, id)
+	}
+	if err == nil && tag.RowsAffected() > 0 {
+		participantIDs := []string{}
+		rows, queryErr := tx.Query(r.Context(), `SELECT id FROM visitor_visits WHERE visit_id=$1 ORDER BY created_at`, id)
+		if queryErr != nil {
+			err = queryErr
+		} else {
+			for rows.Next() {
+				var participantID string
+				if scanErr := rows.Scan(&participantID); scanErr != nil {
+					err = scanErr
+					break
+				}
+				participantIDs = append(participantIDs, participantID)
+			}
+			if rows.Err() != nil {
+				err = rows.Err()
+			}
+			rows.Close()
+			for _, participantID := range participantIDs {
+				if err != nil {
+					break
+				}
+				err = s.queueNotificationEventTx(r.Context(), tx, id, participantID, "visit_cancelled", time.Now())
+			}
+		}
 	}
 	if err != nil || tag.RowsAffected() == 0 {
 		writeError(w, 409, "cannot_cancel", "취소할 수 없는 방문 상태이거나 권한이 없습니다")
@@ -745,36 +783,35 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 		_, err = tx.Exec(r.Context(), `UPDATE visitor_visits SET status=$2 WHERE visit_id=$1`, id, participantStatus)
 	}
 	if err == nil && approve {
-		var siteID, place string
-		err = tx.QueryRow(r.Context(), `SELECT site_id,COALESCE(place_detail,'') FROM visits WHERE id=$1`, id).Scan(&siteID, &place)
-		type approvalParticipant struct{ id, phoneEnc, nameEnc, company string }
-		participants := []approvalParticipant{}
-		rows, queryErr := tx.Query(r.Context(), `SELECT vv.id,p.phone_encrypted,p.name_encrypted,COALESCE(p.company,'') FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id WHERE vv.visit_id=$1`, id)
+		participants := []string{}
+		rows, queryErr := tx.Query(r.Context(), `SELECT id FROM visitor_visits WHERE visit_id=$1 ORDER BY created_at`, id)
 		if queryErr != nil {
 			err = queryErr
 		} else if err == nil {
 			for rows.Next() {
-				var participant approvalParticipant
-				if scanErr := rows.Scan(&participant.id, &participant.phoneEnc, &participant.nameEnc, &participant.company); scanErr != nil {
+				var participantID string
+				if scanErr := rows.Scan(&participantID); scanErr != nil {
 					err = scanErr
 					break
 				}
-				participants = append(participants, participant)
+				participants = append(participants, participantID)
 			}
 			if rows.Err() != nil {
 				err = rows.Err()
 			}
 			rows.Close()
-			for _, participant := range participants {
-				raw, issueErr := s.issueQRTx(r.Context(), tx, participant.id, startAt, endAt, "")
+			for _, participantID := range participants {
+				_, _, issueErr := s.issueQRTx(r.Context(), tx, participantID, startAt, endAt, "")
 				if issueErr != nil {
 					err = issueErr
 					break
 				}
-				visitor := VisitorInput{Name: s.decryptOptional(participant.nameEnc), Phone: s.decryptOptional(participant.phoneEnc), Company: participant.company}
-				input := VisitInput{SiteID: siteID, StartAt: startAt, EndAt: endAt, PlaceDetail: place}
-				passURL := s.publicBaseURL(r.Context(), r) + "/q/" + raw
-				if queueErr := s.queueVisitorNotificationTx(r.Context(), tx, id, visitor.Phone, visitor, input, passURL); queueErr != nil {
+				eventAt := time.Now()
+				if queueErr := s.queueNotificationEventTx(r.Context(), tx, id, participantID, "visit_confirmed", eventAt); queueErr != nil {
+					err = queueErr
+					break
+				}
+				if queueErr := s.queueNotificationEventTx(r.Context(), tx, id, participantID, "visit_start", eventAt); queueErr != nil {
 					err = queueErr
 					break
 				}
@@ -797,6 +834,19 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func qrParticipantStatusTerminal(status string) bool {
+	switch status {
+	case "CHECKED_OUT", "CANCELLED", "REJECTED", "NO_SHOW":
+		return true
+	default:
+		return false
+	}
+}
+
+func qrAvailableForNotification(status string, validUntil, revokedAt *time.Time, now time.Time) bool {
+	return !qrParticipantStatusTerminal(status) && validUntil != nil && revokedAt == nil && !now.After(*validUntil)
+}
+
 func (s *Server) reissueQR(w http.ResponseWriter, r *http.Request) {
 	u, _ := userFrom(r)
 	participantID := chi.URLParam(r, "visitorVisitID")
@@ -806,19 +856,55 @@ func (s *Server) reissueQR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var visitID, hostID, oldID string
+	var visitID, participantStatus string
+	err = tx.QueryRow(r.Context(), `SELECT visit_id,status FROM visitor_visits WHERE id=$1 FOR UPDATE`, participantID).Scan(&visitID, &participantStatus)
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	var hostID, visitStatus string
 	var startAt, endAt time.Time
-	err = tx.QueryRow(r.Context(), `SELECT v.id,v.host_user_id,v.start_at,v.end_at,COALESCE((SELECT id FROM qr_tokens WHERE visitor_visit_id=vv.id AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1),'') FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE vv.id=$1 AND v.status IN ('SCHEDULED','APPROVED') FOR UPDATE`, participantID).Scan(&visitID, &hostID, &startAt, &endAt, &oldID)
-	if err != nil || (hostID != u.ID && !u.CanManageLobby() && !u.IsAdmin()) {
+	err = tx.QueryRow(r.Context(), `SELECT host_user_id,start_at,end_at,status FROM visits WHERE id=$1`, visitID).Scan(&hostID, &startAt, &endAt, &visitStatus)
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	if hostID != u.ID && !u.CanManageLobby() && !u.IsAdmin() {
 		writeError(w, 403, "reissue_forbidden", "QR을 재발급할 수 없습니다")
 		return
 	}
-	if oldID != "" {
-		_, err = tx.Exec(r.Context(), `UPDATE qr_tokens SET revoked_at=now() WHERE id=$1`, oldID)
+	if qrParticipantStatusTerminal(participantStatus) {
+		writeError(w, http.StatusConflict, "participant_not_reissuable", "종료·취소·반려 또는 미방문 처리된 방문자는 QR을 재발급할 수 없습니다")
+		return
 	}
-	var raw string
+	if visitStatus != "SCHEDULED" && visitStatus != "APPROVED" {
+		writeError(w, http.StatusConflict, "visit_not_reissuable", "QR을 재발급할 수 없는 방문 상태입니다")
+		return
+	}
+	var oldID string
+	err = tx.QueryRow(r.Context(), `SELECT id FROM qr_tokens WHERE visitor_visit_id=$1 AND revoked_at IS NULL ORDER BY issued_at DESC,version DESC,id DESC LIMIT 1 FOR UPDATE`, participantID).Scan(&oldID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		oldID, err = "", nil
+	}
 	if err == nil {
-		raw, err = s.issueQRTx(r.Context(), tx, participantID, startAt, endAt, oldID)
+		_, err = tx.Exec(r.Context(), `UPDATE qr_tokens SET revoked_at=now() WHERE visitor_visit_id=$1 AND revoked_at IS NULL`, participantID)
+	}
+	var raw, fileSeq string
+	if err == nil {
+		raw, fileSeq, err = s.issueQRTx(r.Context(), tx, participantID, startAt, endAt, oldID)
+	}
+	if err == nil {
+		_, err = tx.Exec(r.Context(), `UPDATE notifications SET status='cancelled',error=NULL,
+			attempts=CASE WHEN status='sending' THEN GREATEST(attempts-1,0) ELSE attempts END,claimed_at=NULL,claim_token=NULL
+			WHERE visitor_visit_id=$1 AND status IN ('queued','failed','sending') AND (
+				(rule_id IS NULL AND template_key='visitor_pass') OR rule_id IN (SELECT id FROM notification_rules WHERE event='visit_confirmed')
+			)`, participantID)
+	}
+	if err == nil {
+		err = s.queueNotificationEventTx(r.Context(), tx, visitID, participantID, "visit_confirmed", time.Now())
+	}
+	if err == nil {
+		err = s.refreshVisitStartNotificationsTx(r.Context(), tx, visitID, participantID)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -828,14 +914,24 @@ func (s *Server) reissueQR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r.Context(), u.ID, "qr.reissue", "visitor_visit", participantID, r.RemoteAddr, map[string]string{"visitId": visitID})
-	writeJSON(w, 201, map[string]string{"passUrl": s.publicBaseURL(r.Context(), r) + "/q/" + raw})
+	baseURL := s.publicBaseURL(r.Context(), r)
+	writeJSON(w, 201, map[string]string{
+		"passUrl": strings.TrimRight(baseURL, "/") + "/q/" + raw, "qrcodeFileSeq": fileSeq,
+		"qrcodeImageUrl": strings.TrimRight(baseURL, "/") + "/img/visitor/" + fileSeq + ".jpg",
+	})
 }
 
 func (s *Server) resendVisitNotification(w http.ResponseWriter, r *http.Request) {
 	u, _ := userFrom(r)
 	id := chi.URLParam(r, "visitID")
-	var hostID string
-	if err := s.db.QueryRow(r.Context(), `SELECT host_user_id FROM visits WHERE id=$1`, id).Scan(&hostID); err != nil {
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var hostID, status string
+	if err = tx.QueryRow(r.Context(), `SELECT host_user_id,status FROM visits WHERE id=$1 FOR UPDATE`, id).Scan(&hostID, &status); err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
@@ -843,13 +939,67 @@ func (s *Server) resendVisitNotification(w http.ResponseWriter, r *http.Request)
 		writeError(w, 403, "forbidden", "재발송 권한이 없습니다")
 		return
 	}
-	tag, err := s.db.Exec(r.Context(), `UPDATE notifications SET status='queued',attempts=0,error=NULL,next_attempt_at=now() WHERE id IN (SELECT id FROM notifications WHERE visit_id=$1 AND template_key='visitor_pass' ORDER BY created_at DESC)`, id)
+	if status != "APPROVED" && status != "SCHEDULED" && status != "ARRIVED" && status != "CHECKED_IN" {
+		writeError(w, http.StatusConflict, "visit_not_notifiable", "진행 중인 방문만 방문 안내를 재발송할 수 있습니다")
+		return
+	}
+	participantIDs := []string{}
+	rows, err := tx.Query(r.Context(), `SELECT vv.id,vv.status,q.valid_until,q.revoked_at
+		FROM visitor_visits vv
+		LEFT JOIN LATERAL (
+			SELECT valid_until,revoked_at FROM qr_tokens
+			WHERE visitor_visit_id=vv.id
+			ORDER BY issued_at DESC,version DESC,id DESC LIMIT 1
+		) q ON true
+		WHERE vv.visit_id=$1 ORDER BY vv.created_at`, id)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "notification.resend", "visit", id, r.RemoteAddr, map[string]int64{"count": tag.RowsAffected()})
-	writeJSON(w, 200, map[string]int64{"queued": tag.RowsAffected()})
+	for rows.Next() {
+		var participantID, participantStatus string
+		var validUntil, revokedAt *time.Time
+		if err = rows.Scan(&participantID, &participantStatus, &validUntil, &revokedAt); err != nil {
+			rows.Close()
+			notFoundOrServer(w, err)
+			return
+		}
+		if qrAvailableForNotification(participantStatus, validUntil, revokedAt, time.Now()) {
+			participantIDs = append(participantIDs, participantID)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		notFoundOrServer(w, err)
+		return
+	}
+	rows.Close()
+	if len(participantIDs) == 0 {
+		writeError(w, http.StatusConflict, "no_valid_qr", "재발송할 수 있는 유효한 방문자 QR이 없습니다")
+		return
+	}
+	_, err = tx.Exec(r.Context(), `UPDATE notifications SET status='cancelled',error=NULL,
+		attempts=CASE WHEN status='sending' THEN GREATEST(attempts-1,0) ELSE attempts END,claimed_at=NULL,claim_token=NULL
+		WHERE visit_id=$1 AND status IN ('queued','failed','sending') AND (
+			(rule_id IS NULL AND template_key='visitor_pass') OR rule_id IN (SELECT id FROM notification_rules WHERE event='visit_confirmed')
+		)`, id)
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	queued := 0
+	for _, participantID := range participantIDs {
+		if err = s.queueNotificationEventCountTx(r.Context(), tx, id, participantID, "visit_confirmed", time.Now(), &queued); err != nil {
+			notFoundOrServer(w, err)
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	s.audit(r.Context(), u.ID, "notification.resend", "visit", id, r.RemoteAddr, map[string]int{"count": queued})
+	writeJSON(w, 200, map[string]int{"queued": queued})
 }
 
 func (s *Server) createWalkIn(w http.ResponseWriter, r *http.Request) {
@@ -893,14 +1043,22 @@ func parseQRValue(value string) (raw, ts, sig string) {
 
 func (s *Server) validateDynamicQR(ctx context.Context, raw, ts, sig string) bool {
 	seconds, _ := strconv.Atoi(settingOr(s, ctx, "visit.dynamic_qr_seconds", "0"))
+	return s.validateQRSignature(raw, ts, sig, seconds, time.Now())
+}
+
+func (s *Server) validateQRSignature(raw, ts, sig string, seconds int, now time.Time) bool {
 	if seconds <= 0 {
 		return true
+	}
+	if ts == "static" {
+		expected := hex.EncodeToString(s.keys.Digest("qr-static:" + raw))[:24]
+		return sig != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(sig)) == 1
 	}
 	window, err := strconv.ParseInt(ts, 10, 64)
 	if err != nil || sig == "" {
 		return false
 	}
-	current := time.Now().Unix() / int64(seconds)
+	current := now.Unix() / int64(seconds)
 	if window < current-1 || window > current+1 {
 		return false
 	}
@@ -925,6 +1083,11 @@ func (s *Server) qrURL(ctx context.Context, base, raw string) string {
 		value += "?ts=" + ts + "&sig=" + sig
 	}
 	return value
+}
+
+func (s *Server) staticQRURL(base, raw string) string {
+	sig := hex.EncodeToString(s.keys.Digest("qr-static:" + raw))[:24]
+	return strings.TrimRight(base, "/") + "/q/" + raw + "?ts=static&sig=" + sig
 }
 
 func (s *Server) publicPass(w http.ResponseWriter, r *http.Request) {
@@ -956,6 +1119,79 @@ func (s *Server) publicPassQR(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(png)
+}
+
+func validQRCodeFileSeq(value string) bool {
+	if len(value) != 24 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' && char != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func encodeQRJPEG(value string) ([]byte, error) {
+	code, err := qrcode.New(value, qrcode.Medium)
+	if err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	if err := jpeg.Encode(&output, code.Image(560), &jpeg.Options{Quality: 100}); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+func (s *Server) publicVisitorQRJPEG(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	fileSeq := chi.URLParam(r, "qrcode_file_seq")
+	if !validQRCodeFileSeq(fileSeq) {
+		http.NotFound(w, r)
+		return
+	}
+	var tokenEncrypted, visitStatus, participantStatus string
+	var validUntil time.Time
+	var revokedAt *time.Time
+	err := s.db.QueryRow(r.Context(), `SELECT qt.token_encrypted,v.status,vv.status,qt.valid_until,qt.revoked_at
+		FROM qr_tokens qt
+		JOIN visitor_visits vv ON vv.id=qt.visitor_visit_id
+		JOIN visits v ON v.id=vv.visit_id
+		WHERE qt.qrcode_file_seq=$1`, fileSeq).Scan(&tokenEncrypted, &visitStatus, &participantStatus, &validUntil, &revokedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		s.logger.Error("public qr lookup failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "qr_failed", "QR 이미지를 조회하지 못했습니다")
+		return
+	}
+	if revokedAt != nil || time.Now().After(validUntil) || qrParticipantStatusTerminal(visitStatus) || qrParticipantStatusTerminal(participantStatus) {
+		http.NotFound(w, r)
+		return
+	}
+	raw, err := s.keys.Decrypt(tokenEncrypted)
+	if err != nil {
+		s.logger.Error("public qr token decrypt failed", "error", err, "qrcode_file_seq", fileSeq)
+		writeError(w, http.StatusInternalServerError, "qr_failed", "QR 이미지를 만들지 못했습니다")
+		return
+	}
+	image, err := encodeQRJPEG(s.staticQRURL(s.publicBaseURL(r.Context(), r), raw))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "qr_failed", "QR 이미지를 만들지 못했습니다")
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s.jpg"`, fileSeq))
+	w.Header().Set("Content-Length", strconv.Itoa(len(image)))
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(image)
+	}
 }
 
 func (s *Server) verifyQR(w http.ResponseWriter, r *http.Request) {
@@ -1048,12 +1284,7 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_IN',$3,NULLIF($4,''),$5)`, visitID, participantID, u.ID, in.LobbyID, in.Method)
 	}
 	if err == nil {
-		var recipientEnc string
-		_ = tx.QueryRow(r.Context(), `SELECT COALESCE(phone_encrypted,'') FROM users WHERE id=$1`, hostID).Scan(&recipientEnc)
-		recipient := s.decryptOptional(recipientEnc)
-		tmpl, _ := s.getSetting(r.Context(), "notification.arrival_template")
-		body := renderTemplate(tmpl, map[string]string{"visitor": s.decryptOptional(visitorNameEnc), "lobby": lobbyName, "checkedIn": now.Local().Format("15:04")})
-		err = s.queueNotificationTx(r.Context(), tx, visitID, recipient, "sms", "host_arrival", body)
+		err = s.queueNotificationEventTx(r.Context(), tx, visitID, participantID, "checked_in", now)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -1096,6 +1327,9 @@ func (s *Server) checkOut(w http.ResponseWriter, r *http.Request) {
 			WHEN EXISTS(SELECT 1 FROM visitor_visits WHERE visit_id=$1 AND status='CHECKED_IN') THEN 'CHECKED_IN'
 			WHEN EXISTS(SELECT 1 FROM visitor_visits WHERE visit_id=$1 AND status IN ('SCHEDULED','ARRIVED')) THEN 'SCHEDULED'
 			ELSE 'CHECKED_OUT' END,updated_at=now() WHERE id=$1`, visitID)
+	}
+	if err == nil {
+		err = s.queueNotificationEventTx(r.Context(), tx, visitID, in.VisitorVisitID, "checked_out", time.Now())
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -1156,60 +1390,4 @@ func (s *Server) lobbyList(w http.ResponseWriter, r *http.Request, current bool)
 		WHERE ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[]))`, u.Role, u.SiteScope).Scan(&scheduled, &currentCount, &completed, &noShow)
 	counts := map[string]int{"scheduled": scheduled, "current": currentCount, "completed": completed, "noShow": noShow}
 	writeJSON(w, 200, map[string]any{"counts": counts, "items": items})
-}
-
-func (s *Server) listVisitTemplates(w http.ResponseWriter, r *http.Request) {
-	u, _ := userFrom(r)
-	rows, err := s.db.Query(r.Context(), `SELECT id,name,payload,created_at,updated_at FROM visit_templates WHERE user_id=$1 ORDER BY updated_at DESC`, u.ID)
-	if err != nil {
-		notFoundOrServer(w, err)
-		return
-	}
-	defer rows.Close()
-	items := []map[string]any{}
-	for rows.Next() {
-		var id, name string
-		var payload []byte
-		var created, updated time.Time
-		if rows.Scan(&id, &name, &payload, &created, &updated) == nil {
-			var value any
-			_ = json.Unmarshal(payload, &value)
-			items = append(items, map[string]any{"id": id, "name": name, "payload": value, "createdAt": created, "updatedAt": updated})
-		}
-	}
-	writeJSON(w, 200, map[string]any{"items": items})
-}
-
-func (s *Server) createVisitTemplate(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Name    string         `json:"name"`
-		Payload map[string]any `json:"payload"`
-	}
-	if !decodeJSON(w, r, &in) {
-		return
-	}
-	if strings.TrimSpace(in.Name) == "" {
-		writeError(w, 400, "name_required", "템플릿 이름은 필수입니다")
-		return
-	}
-	u, _ := userFrom(r)
-	id := newID()
-	payload, _ := json.Marshal(in.Payload)
-	_, err := s.db.Exec(r.Context(), `INSERT INTO visit_templates(id,user_id,name,payload) VALUES($1,$2,$3,$4)`, id, u.ID, strings.TrimSpace(in.Name), payload)
-	if err != nil {
-		notFoundOrServer(w, err)
-		return
-	}
-	s.audit(r.Context(), u.ID, "visit_template.create", "visit_template", id, r.RemoteAddr, nil)
-	writeJSON(w, 201, map[string]string{"id": id})
-}
-
-func (s *Server) deleteVisitTemplate(w http.ResponseWriter, r *http.Request) {
-	u, _ := userFrom(r)
-	tag, err := s.db.Exec(r.Context(), `DELETE FROM visit_templates WHERE id=$1 AND user_id=$2`, chi.URLParam(r, "templateID"), u.ID)
-	if err != nil || tag.RowsAffected() == 0 {
-		notFoundOrServer(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }

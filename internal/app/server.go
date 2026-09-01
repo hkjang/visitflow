@@ -46,6 +46,8 @@ func (s *Server) Routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	r.Get("/readyz", s.ready)
+	r.Get("/img/visitor/{qrcode_file_seq}.jpg", s.publicVisitorQRJPEG)
+	r.Head("/img/visitor/{qrcode_file_seq}.jpg", s.publicVisitorQRJPEG)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/version", s.versionInfo)
 		r.Get("/auth/config", s.authConfig)
@@ -75,7 +77,15 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/visitor-visits/{visitorVisitID}/qr/reissue", s.reissueQR)
 			r.Get("/visit-templates", s.listVisitTemplates)
 			r.Post("/visit-templates", s.createVisitTemplate)
+			r.Get("/visit-templates/{templateID}", s.getVisitTemplate)
+			r.Put("/visit-templates/{templateID}", s.updateVisitTemplate)
 			r.Delete("/visit-templates/{templateID}", s.deleteVisitTemplate)
+			r.Get("/frequent-visitors", s.listFrequentVisitors)
+			r.Post("/frequent-visitors", s.createFrequentVisitor)
+			r.Put("/frequent-visitors/{frequentVisitorID}", s.updateFrequentVisitor)
+			r.Delete("/frequent-visitors/{frequentVisitorID}", s.deleteFrequentVisitor)
+			r.Get("/guides", s.listPublishedGuides)
+			r.Get("/guides/{guideID}", s.getPublishedGuide)
 			r.Get("/api-keys", s.listAPIKeys)
 			r.Get("/api-key-policy", s.apiKeyPolicy)
 			r.Post("/api-keys", s.createAPIKey)
@@ -108,11 +118,23 @@ func (s *Server) Routes() http.Handler {
 				r.Get("/admin/dashboard", s.adminDashboard)
 				r.Get("/admin/statistics", s.statistics)
 				r.Get("/admin/notifications", s.listNotifications)
+				r.Get("/admin/notification-apis", s.listNotificationAPIs)
+				r.Post("/admin/notification-apis", s.createNotificationAPI)
+				r.Put("/admin/notification-apis/{apiID}", s.updateNotificationAPI)
+				r.Delete("/admin/notification-apis/{apiID}", s.deleteNotificationAPI)
+				r.Get("/admin/notification-rules", s.listNotificationRules)
+				r.Post("/admin/notification-rules", s.createNotificationRule)
+				r.Put("/admin/notification-rules/{ruleID}", s.updateNotificationRule)
+				r.Delete("/admin/notification-rules/{ruleID}", s.deleteNotificationRule)
 				r.Get("/admin/users", s.listUsers)
 				r.Patch("/admin/users/{userID}", s.updateUser)
 				r.Post("/admin/sites", s.upsertSite)
 				r.Post("/admin/lobbies", s.upsertLobby)
 				r.Post("/admin/organizations", s.upsertDepartment)
+				r.Get("/admin/guides", s.listAdminGuides)
+				r.Post("/admin/guides", s.createGuide)
+				r.Put("/admin/guides/{guideID}", s.updateGuide)
+				r.Delete("/admin/guides/{guideID}", s.deleteGuide)
 				r.Get("/settings", s.listSettings)
 				r.Put("/settings", s.updateSettings)
 				r.Post("/settings/oidc/test", s.testOIDC)
@@ -172,7 +194,7 @@ func (s *Server) versionInfo(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) spaHandler() http.Handler {
 	assets := http.FileServer(http.FS(s.webFS))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/mcp" {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/img/") || r.URL.Path == "/mcp" {
 			http.NotFound(w, r)
 			return
 		}

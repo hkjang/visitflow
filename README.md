@@ -15,11 +15,14 @@ VisitFlow는 Go API와 React/Material UI를 하나의 Docker 이미지에 포함
 
 ## 주요 기능
 
-- 개인 서비스: 단일·단체·매주 반복 방문 신청, CSV/XLSX 가져오기, 방문 템플릿, 일정/상태 조회, 취소, SMS 재발송
+- 개인 서비스: 단일·단체·매주 반복 방문 신청, CSV/XLSX 가져오기, 수정 가능한 방문 템플릿과 자주 방문자 주소록, 일정/상태 조회, 취소, 알림 재발송
 - 승인 Workflow: 관리자 설정으로 전체 비활성화 또는 부서/보안 담당 승인 운영
 - 방문자별 서버 검증 QR: 개인정보 미포함, HMAC 조회, 1회 사용, Replay 감지, 폐기·회전·재발급
 - 모바일 방문증: 앱 설치 없이 QR, 장소, 시간, 마스킹된 담당자와 상태 표시
 - 로비 서비스: 웹/모바일 카메라, USB QR 스캐너, 현장 방문, 실시간 SSE, 체크인/퇴실
+- 메시지 연동: SMS·MMS·카카오별 Base URL/Path/Method/Header/Parameter와 발송 이벤트·예약 시점·수신 대상·호출 API를 관리자 화면에서 관리
+- 외부 MMS용 QR 이미지: `GET /img/visitor/{qrcode_file_seq}.jpg`로 서버 검증 QR을 JPEG 형식으로 제공
+- 사용자 가이드 게시판: 관리자는 초안·게시·상단 고정 글을 관리하고 모든 로그인 사용자는 게시된 안내를 열람
 - 운영 관리: 멀티 사업장·로비, 조직, RBAC, Watch List, 통계, 알림 재시도, 감사 로그
 - 개인정보: AES-256-GCM 필드 암호화, 목록 마스킹, 전화번호 HMAC 색인, 정책 기반 자동 파기
 - Keycloak OIDC: Issuer URL, Client ID, Client Secret 설정만으로 Discovery + Authorization Code/PKCE 연동
@@ -42,7 +45,7 @@ React 19 + TypeScript + Material UI 7을 사용한다. 방문자 운영 화면�
 PostgreSQL 14+ 데이터베이스를 준비한 뒤 GitHub Release의 이미지 하나만 내부망으로 반입한다.
 
 ```bash
-docker load < visitflow-v2.1.0.tar.gz
+docker load < visitflow-v2.2.0.tar.gz
 
 export POSTGRES_DSN='postgres://visitflow:password@postgres.intra:5432/visitflow?sslmode=require'
 export BOOTSTRAP_ADMIN='admin'
@@ -103,5 +106,5 @@ docker build -t visitflow:dev .
 
 ```bash
 ./scripts/release-image.sh 2.0.0
-gzip -t visitflow-v2.1.0.tar.gz
+gzip -t visitflow-v2.2.0.tar.gz
 ```

@@ -20,6 +20,8 @@ import LogoutRounded from "@mui/icons-material/LogoutRounded";
 import InfoOutlined from "@mui/icons-material/InfoOutlined";
 import EditOutlined from "@mui/icons-material/EditOutlined";
 import HourglassTopRounded from "@mui/icons-material/HourglassTopRounded";
+import MenuBookRounded from "@mui/icons-material/MenuBookRounded";
+import NotificationsActiveRounded from "@mui/icons-material/NotificationsActiveRounded";
 import { Logo } from "./Logo";
 import { useAuth } from "../auth";
 import { api, patchJSON } from "../api";
@@ -60,6 +62,7 @@ export function AppShell() {
       { label: "방문 신청", path: "/visits/new", icon: <AddCircleOutlineRounded /> },
       { label: "내 방문 일정", path: "/visits", icon: <EventNoteRounded /> },
       { label: "방문 템플릿", path: "/templates", icon: <BookmarkBorderRounded /> },
+      { label: "사용자 가이드", path: "/guides", icon: <MenuBookRounded /> },
     ];
     if (user && ["dept_manager", "security", "admin", "super_admin"].includes(user.role)) personal.push({ label: "방문 승인", path: "/approvals", icon: <HourglassTopRounded /> });
     const lobbyItems: Nav[] = lobby ? [
@@ -72,6 +75,8 @@ export function AppShell() {
       { label: "방문 · 방문자", path: "/admin/visits", icon: <GroupsRounded /> },
       { label: "조직 · 사업장", path: "/admin/resources", icon: <DomainRounded /> },
       { label: "통계 · 알림", path: "/admin/statistics", icon: <BarChartRounded /> },
+      { label: "문자 API · 발송 규칙", path: "/admin/notification-settings", icon: <NotificationsActiveRounded /> },
+      { label: "사용자 가이드 관리", path: "/admin/guides", icon: <MenuBookRounded /> },
     ] : security ? [{ label: "방문 · Watch List", path: "/admin/visits", icon: <GroupsRounded /> }] : [];
     if (auditor) adminItems.push({ label: "Audit Log", path: "/admin/audit", icon: <PolicyRounded /> });
     if (admin) adminItems.push({ label: "시스템 설정", path: "/admin/settings", icon: <SettingsRounded /> }, { label: "API / MCP", path: "/admin/api", icon: <KeyRounded /> });

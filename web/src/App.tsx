@@ -14,6 +14,8 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { KeysPage } from "./pages/KeysPage";
 import { MobilePassPage } from "./pages/MobilePassPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
+import { GuidePage } from "./pages/GuidePage";
+import { NotificationSettingsPage } from "./pages/NotificationSettingsPage";
 
 function Protected() {
   const { user } = useAuth();
@@ -44,11 +46,14 @@ export default function App() {
         <Route path="visits/new" element={<VisitFormPage />} />
         <Route path="visits" element={<VisitsPage />} />
         <Route path="templates" element={<TemplatesPage />} />
+        <Route path="guides" element={<GuidePage />} />
         <Route path="approvals" element={<ApprovalGuard><ApprovalsPage /></ApprovalGuard>} />
         <Route path="lobby" element={<LobbyGuard><LobbyPage /></LobbyGuard>} />
         <Route path="lobby/scan" element={<LobbyGuard><ScannerPage /></LobbyGuard>} />
         <Route path="lobby/walk-in" element={<LobbyGuard><VisitFormPage walkIn /></LobbyGuard>} />
         <Route path="admin/visits" element={<AdminGuard security><AdminPage fixedSection="visits" /></AdminGuard>} />
+        <Route path="admin/guides" element={<AdminGuard><GuidePage admin /></AdminGuard>} />
+        <Route path="admin/notification-settings" element={<AdminGuard><NotificationSettingsPage /></AdminGuard>} />
         <Route path="admin/:section" element={<AdminGuard><AdminPage /></AdminGuard>} />
         <Route path="admin/audit" element={<AdminGuard audit><AdminPage fixedSection="audit" /></AdminGuard>} />
         <Route path="admin/settings" element={<AdminGuard><SettingsPage /></AdminGuard>} />

@@ -27,7 +27,13 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `POST /api/v1/checkins`, `POST /api/v1/checkouts`
 - `GET /api/v1/lobby/today|current|stream`
 - `POST /api/v1/lobby/walk-ins`
+- `GET|POST /api/v1/visit-templates`, `GET|PUT|DELETE /api/v1/visit-templates/{id}`
+- `GET|POST /api/v1/frequent-visitors`, `PUT|DELETE /api/v1/frequent-visitors/{id}`
+- `GET /api/v1/guides`, `GET /api/v1/guides/{id}`
+- `GET|HEAD /img/visitor/{qrcode_file_seq}.jpg` 외부 MMS Gateway용 QR JPEG
 - `GET /api/v1/admin/statistics|audit-logs|notifications|visitors`
+- `GET|POST /api/v1/admin/notification-apis|notification-rules` 및 항목별 `PUT|DELETE`
+- `GET|POST /api/v1/admin/guides`, `PUT|DELETE /api/v1/admin/guides/{id}`
 - `GET|PUT /api/v1/settings`
 - `GET|POST /api/v1/api-keys`
 - `PATCH /api/v1/api-keys/{keyID}` 키 이름·Scope 변경
