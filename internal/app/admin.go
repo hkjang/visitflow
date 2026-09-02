@@ -115,25 +115,55 @@ func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// auditLogFilters is the audit screen's filter set. The on-screen list and the
+// CSV export parse it through the same code so a download always contains the
+// rows the auditor narrowed to; an export that quietly widens back to every
+// actor and date is worse than no export in a compliance review.
+type auditLogFilters struct {
+	action string
+	actor  string
+	from   *time.Time
+	to     *time.Time
+}
+
+func parseAuditLogFilters(r *http.Request) auditLogFilters {
+	filters := auditLogFilters{
+		action: strings.TrimSpace(r.URL.Query().Get("action")),
+		actor:  strings.TrimSpace(r.URL.Query().Get("actor")),
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("from")); value != "" {
+		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			filters.from = &parsed
+		}
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("to")); value != "" {
+		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			filters.to = &parsed
+		}
+	}
+	return filters
+}
+
+// details records what the export actually covered, so the audit trail of an
+// export names its scope instead of implying the whole log was taken.
+func (f auditLogFilters) details() map[string]any {
+	out := map[string]any{"action": f.action, "actor": f.actor}
+	if f.from != nil {
+		out["from"] = f.from.Format(time.RFC3339)
+	}
+	if f.to != nil {
+		out["to"] = f.to.Format(time.RFC3339)
+	}
+	return out
+}
+
 func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit < 1 || limit > 500 {
 		limit = 200
 	}
-	action := strings.TrimSpace(r.URL.Query().Get("action"))
-	actor := strings.TrimSpace(r.URL.Query().Get("actor"))
+	filters := parseAuditLogFilters(r)
 	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
-	var from, to *time.Time
-	if value := strings.TrimSpace(r.URL.Query().Get("from")); value != "" {
-		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
-			from = &parsed
-		}
-	}
-	if value := strings.TrimSpace(r.URL.Query().Get("to")); value != "" {
-		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
-			to = &parsed
-		}
-	}
 	// Keyset on the bigserial id keeps paging stable while new rows arrive.
 	rows, err := s.db.Query(r.Context(), `SELECT a.id,COALESCE(u.display_name,'system'),a.action,a.resource_type,COALESCE(a.resource_id,''),COALESCE(a.ip_address,''),a.details,a.created_at
 		FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_user_id
@@ -142,7 +172,7 @@ func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {
 		AND ($4::bigint=0 OR a.id<$4)
 		AND ($5::timestamptz IS NULL OR a.created_at>=$5)
 		AND ($6::timestamptz IS NULL OR a.created_at<=$6)
-		ORDER BY a.id DESC LIMIT $2`, action, limit+1, actor, before, from, to)
+		ORDER BY a.id DESC LIMIT $2`, filters.action, limit+1, filters.actor, before, filters.from, filters.to)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return

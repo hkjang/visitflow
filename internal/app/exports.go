@@ -78,10 +78,14 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 100000 {
 		limit = 10000
 	}
-	action := strings.TrimSpace(r.URL.Query().Get("action"))
+	filters := parseAuditLogFilters(r)
 	rows, err := s.db.Query(r.Context(), `SELECT a.id,a.created_at,COALESCE(u.display_name,'system'),a.action,a.resource_type,COALESCE(a.resource_id,''),COALESCE(a.ip_address,''),a.details::text
 		FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_user_id
-		WHERE ($1='' OR a.action ILIKE $1||'%') ORDER BY a.created_at DESC LIMIT $2`, action, limit)
+		WHERE ($1='' OR a.action ILIKE $1||'%')
+		AND ($3='' OR u.display_name ILIKE '%'||$3||'%' OR u.username ILIKE '%'||$3||'%')
+		AND ($4::timestamptz IS NULL OR a.created_at>=$4)
+		AND ($5::timestamptz IS NULL OR a.created_at<=$5)
+		ORDER BY a.id DESC LIMIT $2`, filters.action, limit, filters.actor, filters.from, filters.to)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -102,7 +106,9 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	writer.Flush()
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "audit.export", "audit_log", "", clientIP(r), map[string]any{"count": count, "action": action})
+	details := filters.details()
+	details["count"] = count
+	s.audit(r.Context(), u.ID, "audit.export", "audit_log", "", clientIP(r), details)
 }
 
 func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
