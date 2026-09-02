@@ -101,7 +101,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), actor.ID, "user.create", "user", id, r.RemoteAddr, map[string]any{"username": in.Username, "role": in.Role, "generatedPassword": generated})
+	s.audit(r.Context(), actor.ID, "user.create", "user", id, clientIP(r), map[string]any{"username": in.Username, "role": in.Role, "generatedPassword": generated})
 	response := map[string]any{"id": id, "username": in.Username, "mustChangePassword": true}
 	if generated {
 		response["temporaryPassword"] = password
@@ -153,7 +153,7 @@ func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request) {
 			notFoundOrServer(w, err)
 			return
 		}
-		s.audit(r.Context(), actor.ID, "user.password_reset_mail", "user", id, r.RemoteAddr, map[string]any{"sent": sent})
+		s.audit(r.Context(), actor.ID, "user.password_reset_mail", "user", id, clientIP(r), map[string]any{"sent": sent})
 		writeJSON(w, http.StatusOK, map[string]any{"emailSent": sent, "to": maskEmail(email)})
 		return
 	}
@@ -198,7 +198,7 @@ func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), actor.ID, "user.password_reset", "user", id, r.RemoteAddr, map[string]any{"revokedSessions": sessions.RowsAffected()})
+	s.audit(r.Context(), actor.ID, "user.password_reset", "user", id, clientIP(r), map[string]any{"revokedSessions": sessions.RowsAffected()})
 	writeJSON(w, http.StatusOK, map[string]any{"temporaryPassword": password, "revokedSessions": sessions.RowsAffected(), "mustChangePassword": true})
 }
 
@@ -236,6 +236,6 @@ func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), actor.ID, "user.sessions_revoke", "user", id, r.RemoteAddr, map[string]any{"revokedSessions": sessions.RowsAffected(), "revokedKeys": keys.RowsAffected()})
+	s.audit(r.Context(), actor.ID, "user.sessions_revoke", "user", id, clientIP(r), map[string]any{"revokedSessions": sessions.RowsAffected(), "revokedKeys": keys.RowsAffected()})
 	writeJSON(w, http.StatusOK, map[string]any{"revokedSessions": sessions.RowsAffected(), "revokedKeys": keys.RowsAffected()})
 }

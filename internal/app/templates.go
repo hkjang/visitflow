@@ -104,7 +104,7 @@ func (s *Server) listFrequentVisitors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	s.audit(r.Context(), u.ID, "frequent_visitor.list", "frequent_visitor", "", r.RemoteAddr, map[string]int{"count": len(items)})
+	s.audit(r.Context(), u.ID, "frequent_visitor.list", "frequent_visitor", "", clientIP(r), map[string]int{"count": len(items)})
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -178,7 +178,7 @@ func (s *Server) createFrequentVisitor(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "frequent_visitor.create", "frequent_visitor", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "frequent_visitor.create", "frequent_visitor", id, clientIP(r), nil)
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -216,7 +216,7 @@ func (s *Server) updateFrequentVisitor(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "frequent_visitor.update", "frequent_visitor", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "frequent_visitor.update", "frequent_visitor", id, clientIP(r), nil)
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
 }
 
@@ -254,7 +254,7 @@ func (s *Server) deleteFrequentVisitor(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "frequent_visitor.delete", "frequent_visitor", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "frequent_visitor.delete", "frequent_visitor", id, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -347,7 +347,7 @@ func (s *Server) getVisitTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	s.audit(r.Context(), u.ID, "visit_template.view", "visit_template", id, r.RemoteAddr, map[string]int{"frequentVisitorCount": len(visitors)})
+	s.audit(r.Context(), u.ID, "visit_template.view", "visit_template", id, clientIP(r), map[string]int{"frequentVisitorCount": len(visitors)})
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -424,7 +424,7 @@ func (s *Server) saveVisitTemplate(w http.ResponseWriter, r *http.Request, templ
 		action = "visit_template.create"
 		status = http.StatusCreated
 	}
-	s.audit(r.Context(), u.ID, action, "visit_template", templateID, r.RemoteAddr, map[string]int{"frequentVisitorCount": len(in.FrequentVisitorIDs)})
+	s.audit(r.Context(), u.ID, action, "visit_template", templateID, clientIP(r), map[string]int{"frequentVisitorCount": len(in.FrequentVisitorIDs)})
 	writeJSON(w, status, map[string]string{"id": templateID})
 }
 
@@ -476,6 +476,6 @@ func (s *Server) deleteVisitTemplate(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "visit_template.delete", "visit_template", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "visit_template.delete", "visit_template", id, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }

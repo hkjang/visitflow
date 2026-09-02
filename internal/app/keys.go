@@ -103,7 +103,7 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "api_key.create", "api_key", id, r.RemoteAddr, map[string]any{"name": in.Name, "scopes": in.Scopes})
+	s.audit(r.Context(), u.ID, "api_key.create", "api_key", id, clientIP(r), map[string]any{"name": in.Name, "scopes": in.Scopes})
 	writeJSON(w, 201, map[string]any{"id": id, "key": raw, "prefix": prefix, "expiresAt": expires, "message": "이 키는 다시 표시되지 않습니다. 안전한 곳에 보관하세요."})
 }
 
@@ -132,7 +132,7 @@ func (s *Server) updateAPIKey(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "api_key.policy_update", "api_key", id, r.RemoteAddr, map[string]any{
+	s.audit(r.Context(), u.ID, "api_key.policy_update", "api_key", id, clientIP(r), map[string]any{
 		"before": map[string]any{"name": beforeName, "scopes": beforeScopes},
 		"after":  map[string]any{"name": in.Name, "scopes": in.Scopes},
 	})
@@ -182,7 +182,7 @@ func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "api_key.rotate", "api_key", newIDValue, r.RemoteAddr, map[string]any{"rotatedFrom": oldID, "graceUntil": graceUntil})
+	s.audit(r.Context(), u.ID, "api_key.rotate", "api_key", newIDValue, clientIP(r), map[string]any{"rotatedFrom": oldID, "graceUntil": graceUntil})
 	writeJSON(w, 201, map[string]any{"id": newIDValue, "key": raw, "prefix": prefix, "version": version + 1, "oldKeyGraceUntil": graceUntil, "message": "새 키는 다시 표시되지 않습니다. 기존 키는 유예기간 후 만료됩니다."})
 }
 
@@ -198,7 +198,7 @@ func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "not_found", "활성 API 키가 없습니다")
 		return
 	}
-	s.audit(r.Context(), u.ID, "api_key.revoke", "api_key", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "api_key.revoke", "api_key", id, clientIP(r), nil)
 	w.WriteHeader(204)
 }
 

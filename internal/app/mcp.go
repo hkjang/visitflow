@@ -171,7 +171,7 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		if err = tx.Commit(r.Context()); err != nil {
 			return nil, err
 		}
-		s.audit(r.Context(), u.ID, "visit.cancel", "visit", id, r.RemoteAddr, map[string]string{"source": "mcp"})
+		s.audit(r.Context(), u.ID, "visit.cancel", "visit", id, clientIP(r), map[string]string{"source": "mcp"})
 		s.publishLobbyEvent("visit.cancelled")
 		return map[string]any{"cancelled": true, "visitId": id}, nil
 	case "search_visitor_history":

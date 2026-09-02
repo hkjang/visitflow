@@ -89,7 +89,7 @@ func (s *Server) upsertVisitType(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "visit_type.upsert", "visit_type", in.ID, r.RemoteAddr, map[string]any{"code": in.Code, "name": in.Name})
+	s.audit(r.Context(), u.ID, "visit_type.upsert", "visit_type", in.ID, clientIP(r), map[string]any{"code": in.Code, "name": in.Name})
 	writeJSON(w, http.StatusOK, in)
 }
 
@@ -106,7 +106,7 @@ func (s *Server) deleteVisitType(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "visit_type.disable", "visit_type", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "visit_type.disable", "visit_type", id, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 

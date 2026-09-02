@@ -79,7 +79,7 @@ func (s *Server) cancelParticipant(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "visit.participant_cancel", "visitor_visit", participantID, r.RemoteAddr, map[string]any{"visitId": visitID, "visitCancelled": visitCancelled})
+	s.audit(r.Context(), u.ID, "visit.participant_cancel", "visitor_visit", participantID, clientIP(r), map[string]any{"visitId": visitID, "visitCancelled": visitCancelled})
 	s.publishLobbyEvent("visit.updated")
 	writeJSON(w, http.StatusOK, map[string]any{"visitCancelled": visitCancelled, "remaining": remaining})
 }
@@ -137,7 +137,7 @@ func (s *Server) cancelSeries(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "visit.cancel_series", "visit", id, r.RemoteAddr, map[string]any{"seriesId": seriesID, "cancelled": cancelled})
+	s.audit(r.Context(), u.ID, "visit.cancel_series", "visit", id, clientIP(r), map[string]any{"seriesId": seriesID, "cancelled": cancelled})
 	s.publishLobbyEvent("visit.cancelled")
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": cancelled})
 }
@@ -220,7 +220,7 @@ func (s *Server) manualCheckIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.checkIns.Add(1)
-	s.audit(r.Context(), u.ID, "visit.checkin", "visitor_visit", in.VisitorVisitID, r.RemoteAddr, map[string]string{"visitId": visitID, "method": "manual", "reason": in.Reason, "lobbyId": in.LobbyID})
+	s.audit(r.Context(), u.ID, "visit.checkin", "visitor_visit", in.VisitorVisitID, clientIP(r), map[string]string{"visitId": visitID, "method": "manual", "reason": in.Reason, "lobbyId": in.LobbyID})
 	s.publishLobbyEvent("visitor.checked_in")
 	writeJSON(w, http.StatusCreated, map[string]any{"visitorVisitId": in.VisitorVisitID, "visitId": visitID, "checkedInAt": now})
 }

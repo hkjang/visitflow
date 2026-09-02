@@ -211,7 +211,7 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "profile.update", "user", u.ID, r.RemoteAddr, map[string]any{
+	s.audit(r.Context(), u.ID, "profile.update", "user", u.ID, clientIP(r), map[string]any{
 		"departmentChanged": departmentSet, "phoneChanged": phoneSet, "phoneConfigured": phone != "",
 		"delegateChanged": delegateSet, "delegateUserId": delegateID, "delegateUntil": delegateUntil,
 	})
@@ -643,7 +643,7 @@ func requestRemote(r *http.Request) string {
 	if r == nil {
 		return "mcp"
 	}
-	return r.RemoteAddr
+	return clientIP(r)
 }
 
 func (s *Server) upsertVisitor(ctx context.Context, tx pgx.Tx, in VisitorInput) (string, error) {
@@ -785,7 +785,7 @@ func (s *Server) getVisit(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "visit.view", "visit", id, r.RemoteAddr, map[string]any{"visitorCount": len(participants)})
+	s.audit(r.Context(), u.ID, "visit.view", "visit", id, clientIP(r), map[string]any{"visitorCount": len(participants)})
 	writeJSON(w, http.StatusOK, map[string]any{"visit": summary, "visitors": participants, "detail": extras})
 }
 
@@ -883,7 +883,7 @@ func (s *Server) updateVisit(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "visit.update", "visit", id, r.RemoteAddr, map[string]any{
+	s.audit(r.Context(), u.ID, "visit.update", "visit", id, clientIP(r), map[string]any{
 		"before": map[string]any{"startAt": oldStart, "endAt": oldEnd, "purpose": oldPurpose, "placeDetail": oldPlace, "lobbyId": oldLobby},
 		"after":  in,
 	})
@@ -964,7 +964,7 @@ func (s *Server) cancelVisit(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "visit.cancel", "visit", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "visit.cancel", "visit", id, clientIP(r), nil)
 	s.publishLobbyEvent("visit.cancelled")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1074,7 +1074,7 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "visit."+strings.ToLower(status), "visit", id, r.RemoteAddr, map[string]string{"reason": in.Reason})
+	s.audit(r.Context(), u.ID, "visit."+strings.ToLower(status), "visit", id, clientIP(r), map[string]string{"reason": in.Reason})
 	s.publishLobbyEvent("visit.approval")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1158,7 +1158,7 @@ func (s *Server) reissueQR(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "qr.reissue", "visitor_visit", participantID, r.RemoteAddr, map[string]string{"visitId": visitID})
+	s.audit(r.Context(), u.ID, "qr.reissue", "visitor_visit", participantID, clientIP(r), map[string]string{"visitId": visitID})
 	baseURL := s.publicBaseURL(r.Context(), r)
 	writeJSON(w, 201, map[string]string{
 		"passUrl": strings.TrimRight(baseURL, "/") + "/q/" + raw, "qrcodeFileSeq": fileSeq,
@@ -1243,7 +1243,7 @@ func (s *Server) resendVisitNotification(w http.ResponseWriter, r *http.Request)
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "notification.resend", "visit", id, r.RemoteAddr, map[string]int{"count": queued})
+	s.audit(r.Context(), u.ID, "notification.resend", "visit", id, clientIP(r), map[string]int{"count": queued})
 	writeJSON(w, 200, map[string]int{"queued": queued})
 }
 
@@ -1475,7 +1475,7 @@ func (s *Server) verifyQR(w http.ResponseWriter, r *http.Request) {
 	if q.VisitID != "" {
 		details["visitId"] = q.VisitID
 	}
-	s.audit(r.Context(), u.ID, "qr.verify", "qr_token", q.TokenID, r.RemoteAddr, details)
+	s.audit(r.Context(), u.ID, "qr.verify", "qr_token", q.TokenID, clientIP(r), details)
 	if status != http.StatusOK {
 		s.metrics.qrRejected.Add(1)
 		writeError(w, status, result, message)
@@ -1550,7 +1550,7 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.checkIns.Add(1)
-	s.audit(r.Context(), u.ID, "visit.checkin", "visitor_visit", participantID, r.RemoteAddr, map[string]string{"visitId": visitID, "method": in.Method, "lobbyId": in.LobbyID})
+	s.audit(r.Context(), u.ID, "visit.checkin", "visitor_visit", participantID, clientIP(r), map[string]string{"visitId": visitID, "method": in.Method, "lobbyId": in.LobbyID})
 	s.publishLobbyEvent("visitor.checked_in")
 	writeJSON(w, 201, map[string]any{"visitorVisitId": participantID, "visitId": visitID, "checkedInAt": now})
 }
@@ -1596,7 +1596,7 @@ func (s *Server) checkOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.checkOuts.Add(1)
-	s.audit(r.Context(), u.ID, "visit.checkout", "visitor_visit", in.VisitorVisitID, r.RemoteAddr, map[string]string{"visitId": visitID, "method": in.Method})
+	s.audit(r.Context(), u.ID, "visit.checkout", "visitor_visit", in.VisitorVisitID, clientIP(r), map[string]string{"visitId": visitID, "method": in.Method})
 	s.publishLobbyEvent("visitor.checked_out")
 	w.WriteHeader(http.StatusNoContent)
 }

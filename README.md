@@ -80,6 +80,8 @@ docker compose up -d
 
 `http://host:8080`에 접속한 뒤 관리자 → 시스템 설정에서 회사명, 기준 URL, Keycloak, 승인·QR, SMS, 보존·파기, 세션·키·로그인 잠금 정책을 구성한다. 운영 환경은 리버스 프록시에서 HTTPS를 종료하고 `X-Forwarded-Proto`와 `X-Forwarded-Host`를 전달해야 카메라와 Secure Cookie를 정상 사용할 수 있다.
 
+리버스 프록시 뒤에서는 관리자 → 시스템 설정 → 보안의 `신뢰할 Reverse Proxy`에 프록시 IP나 CIDR을 등록한다(사내 대역 전체는 `private` 한 단어로 지정한다). 등록한 주소에서 온 요청만 `X-Forwarded-For`를 신뢰해 실제 접속 IP를 로그인 잠금, 공개 API 요청 한도, 동의 기록, 감사 로그에 사용한다. 비워두면 헤더를 무시하고 TCP 접속 주소를 사용하므로, 프록시를 쓰지 않는 설치에서 헤더를 위조해 잠금과 요청 한도를 우회할 수 없다.
+
 ## Keycloak 연결
 
 1. 관리자 → 시스템 설정 → Keycloak SSO에서 `Issuer URL`, `Client ID`, `Client Secret`을 입력한다.

@@ -109,7 +109,7 @@ func (s *Server) createRegistrationInvitation(w http.ResponseWriter, r *http.Req
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "registration.invite", "visitor_visit", participantID, r.RemoteAddr, map[string]any{"visitId": visitID, "expiresAt": expiresAt})
+	s.audit(r.Context(), u.ID, "registration.invite", "visitor_visit", participantID, clientIP(r), map[string]any{"visitId": visitID, "expiresAt": expiresAt})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": id, "expiresAt": expiresAt,
 		"registrationUrl": strings.TrimRight(s.publicBaseURL(r.Context(), r), "/") + "/r/" + token,
@@ -137,7 +137,7 @@ func (s *Server) revokeRegistrationInvitation(w http.ResponseWriter, r *http.Req
 		notFoundOrServer(w, pgx.ErrNoRows)
 		return
 	}
-	s.audit(r.Context(), u.ID, "registration.revoke", "visitor_visit", participantID, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "registration.revoke", "visitor_visit", participantID, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -281,7 +281,7 @@ func (s *Server) submitPublicRegistration(w http.ResponseWriter, r *http.Request
 		var watchID string
 		watchErr := s.db.QueryRow(r.Context(), `SELECT id FROM watchlist_entries WHERE active AND starts_at<=now() AND (ends_at IS NULL OR ends_at>now()) AND company<>'' AND lower(company)=lower($1) LIMIT 1`, in.Company).Scan(&watchID)
 		if watchErr == nil {
-			s.audit(r.Context(), "", "watchlist.match", "watchlist", watchID, r.RemoteAddr, map[string]string{"source": "self"})
+			s.audit(r.Context(), "", "watchlist.match", "watchlist", watchID, clientIP(r), map[string]string{"source": "self"})
 			writeError(w, http.StatusForbidden, "visit_restricted", "보안 정책에 따라 사전등록을 완료할 수 없습니다. 담당자에게 문의하세요")
 			return
 		}
@@ -351,7 +351,7 @@ func (s *Server) submitPublicRegistration(w http.ResponseWriter, r *http.Request
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), "", "registration.complete", "visitor_visit", target.ParticipantID, r.RemoteAddr, map[string]any{"visitId": target.VisitID, "locale": locale})
+	s.audit(r.Context(), "", "registration.complete", "visitor_visit", target.ParticipantID, clientIP(r), map[string]any{"visitId": target.VisitID, "locale": locale})
 	s.publishLobbyEvent("visit.updated")
 	writeJSON(w, http.StatusOK, map[string]any{"completed": true, "locale": locale})
 }

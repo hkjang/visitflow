@@ -470,7 +470,7 @@ func (s *Server) createNotificationAPI(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "notification_api.create", "notification_api", id, r.RemoteAddr, map[string]any{"name": in.Name, "channel": in.Channel, "secretCount": len(in.SecretKeys)})
+	s.audit(r.Context(), u.ID, "notification_api.create", "notification_api", id, clientIP(r), map[string]any{"name": in.Name, "channel": in.Channel, "secretCount": len(in.SecretKeys)})
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -561,7 +561,7 @@ func (s *Server) updateNotificationAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "notification_api.update", "notification_api", id, r.RemoteAddr, map[string]any{"name": in.Name, "channel": in.Channel, "enabled": enabled, "secretCount": len(in.SecretKeys), "disabledRules": disabledRules, "cancelledPending": cancelledPending})
+	s.audit(r.Context(), u.ID, "notification_api.update", "notification_api", id, clientIP(r), map[string]any{"name": in.Name, "channel": in.Channel, "enabled": enabled, "secretCount": len(in.SecretKeys), "disabledRules": disabledRules, "cancelledPending": cancelledPending})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -603,7 +603,7 @@ func (s *Server) deleteNotificationAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "notification_api.delete", "notification_api", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "notification_api.delete", "notification_api", id, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -685,7 +685,7 @@ func (s *Server) createNotificationRule(w http.ResponseWriter, r *http.Request) 
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "notification_rule.create", "notification_rule", id, r.RemoteAddr, map[string]any{"event": in.Event, "audience": in.Audience, "channel": in.Channel, "apiConfigId": in.APIConfigID, "offsetMinutes": in.OffsetMinutes})
+	s.audit(r.Context(), u.ID, "notification_rule.create", "notification_rule", id, clientIP(r), map[string]any{"event": in.Event, "audience": in.Audience, "channel": in.Channel, "apiConfigId": in.APIConfigID, "offsetMinutes": in.OffsetMinutes})
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -793,7 +793,7 @@ func (s *Server) updateNotificationRule(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "notification_rule.update", "notification_rule", id, r.RemoteAddr, map[string]any{"event": in.Event, "audience": in.Audience, "channel": in.Channel, "apiConfigId": in.APIConfigID, "offsetMinutes": in.OffsetMinutes, "enabled": enabled, "cancelledPending": cancelledPending, "refreshedVisits": refreshedVisits})
+	s.audit(r.Context(), u.ID, "notification_rule.update", "notification_rule", id, clientIP(r), map[string]any{"event": in.Event, "audience": in.Audience, "channel": in.Channel, "apiConfigId": in.APIConfigID, "offsetMinutes": in.OffsetMinutes, "enabled": enabled, "cancelledPending": cancelledPending, "refreshedVisits": refreshedVisits})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -831,7 +831,7 @@ func (s *Server) deleteNotificationRule(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "notification_rule.delete", "notification_rule", id, r.RemoteAddr, map[string]int64{"cancelledPending": cancelled.RowsAffected()})
+	s.audit(r.Context(), u.ID, "notification_rule.delete", "notification_rule", id, clientIP(r), map[string]int64{"cancelledPending": cancelled.RowsAffected()})
 	w.WriteHeader(http.StatusNoContent)
 }
 

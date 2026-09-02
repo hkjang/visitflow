@@ -41,7 +41,7 @@ func (s *Server) previewVisitorImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "visitor_import.preview", "visitor_import", "", r.RemoteAddr, map[string]any{"filename": filepath.Base(header.Filename), "rows": len(visitors), "warnings": len(warnings)})
+	s.audit(r.Context(), u.ID, "visitor_import.preview", "visitor_import", "", clientIP(r), map[string]any{"filename": filepath.Base(header.Filename), "rows": len(visitors), "warnings": len(warnings)})
 	writeJSON(w, http.StatusOK, map[string]any{"visitors": visitors, "warnings": warnings})
 }
 

@@ -72,7 +72,7 @@ func (s *Server) testSMTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		result["error"] = err.Error()
 	}
-	s.audit(r.Context(), u.ID, "smtp.test", "settings", "", r.RemoteAddr, result)
+	s.audit(r.Context(), u.ID, "smtp.test", "settings", "", clientIP(r), result)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -155,7 +155,7 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		s.logger.Error("password reset request failed", "error", err)
 	}
-	s.audit(r.Context(), "", "auth.password_reset_request", "user", userID, r.RemoteAddr, map[string]any{"identifier": identifier, "sent": sent})
+	s.audit(r.Context(), "", "auth.password_reset_request", "user", userID, clientIP(r), map[string]any{"identifier": identifier, "sent": sent})
 	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "message": "계정이 확인되면 등록된 이메일로 재설정 링크를 보냈습니다. 몇 분 안에 도착하지 않으면 스팸함을 확인하거나 관리자에게 문의하세요."})
 }
 
@@ -228,7 +228,7 @@ func (s *Server) completePasswordReset(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), userID, "auth.password_reset_complete", "user", userID, r.RemoteAddr, nil)
+	s.audit(r.Context(), userID, "auth.password_reset_complete", "user", userID, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -306,7 +306,7 @@ func (s *Server) updateMailPreferences(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "profile.mail_preferences", "user", u.ID, r.RemoteAddr, prefs)
+	s.audit(r.Context(), u.ID, "profile.mail_preferences", "user", u.ID, clientIP(r), prefs)
 	writeJSON(w, http.StatusOK, prefs)
 }
 

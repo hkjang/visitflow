@@ -76,7 +76,7 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	writer.Flush()
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "audit.export", "audit_log", "", r.RemoteAddr, map[string]any{"count": count, "action": action})
+	s.audit(r.Context(), u.ID, "audit.export", "audit_log", "", clientIP(r), map[string]any{"count": count, "action": action})
 }
 
 func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +122,7 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	writer.Flush()
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "visit.export", "visit", "", r.RemoteAddr, map[string]any{"count": count, "days": days})
+	s.audit(r.Context(), u.ID, "visit.export", "visit", "", clientIP(r), map[string]any{"count": count, "days": days})
 }
 
 func (s *Server) exportStatisticsCSV(w http.ResponseWriter, r *http.Request) {
@@ -158,5 +158,5 @@ func (s *Server) exportStatisticsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	writer.Flush()
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "statistics.export", "statistics", "", r.RemoteAddr, map[string]any{"days": days})
+	s.audit(r.Context(), u.ID, "statistics.export", "statistics", "", clientIP(r), map[string]any{"days": days})
 }

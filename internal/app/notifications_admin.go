@@ -52,7 +52,7 @@ func (s *Server) testNotificationAPI(w http.ResponseWriter, r *http.Request) {
 	if sendErr != nil {
 		result["error"] = sendErr.Error()
 	}
-	s.audit(r.Context(), u.ID, "notification_api.test", "notification_api", id, r.RemoteAddr, result)
+	s.audit(r.Context(), u.ID, "notification_api.test", "notification_api", id, clientIP(r), result)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -98,7 +98,7 @@ func (s *Server) retryNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "notification.retry", "notification", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "notification.retry", "notification", id, clientIP(r), nil)
 	writeJSON(w, http.StatusOK, map[string]int{"queued": 1})
 }
 
@@ -130,7 +130,7 @@ func (s *Server) retryFailedNotifications(w http.ResponseWriter, r *http.Request
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "notification.retry_failed", "notification", "", r.RemoteAddr, map[string]any{"selected": len(ids), "queued": tag.RowsAffected()})
+	s.audit(r.Context(), u.ID, "notification.retry_failed", "notification", "", clientIP(r), map[string]any{"selected": len(ids), "queued": tag.RowsAffected()})
 	writeJSON(w, http.StatusOK, map[string]int64{"selected": int64(len(ids)), "queued": tag.RowsAffected()})
 }
 
@@ -147,6 +147,6 @@ func (s *Server) cancelNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "notification.cancel", "notification", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "notification.cancel", "notification", id, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
