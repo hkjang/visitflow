@@ -1,0 +1,15 @@
+{
+  "name": "VisitFlow 방문자 관리",
+  "short_name": "VisitFlow",
+  "description": "방문 신청부터 승인, QR, 로비 체크인, 퇴실까지 연결하는 오프라인 기업용 방문자 관리 플랫폼",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#EAF1EE",
+  "theme_color": "#176B5B",
+  "lang": "ko",
+  "icons": [
+    { "src": "/logo-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

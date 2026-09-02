@@ -8,6 +8,9 @@ web/dist/
 web/*.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
+web/test-results/
+web/playwright-report/
+web/blob-report/
 
 # Embedded UI is produced inside Docker; keep only the fallback index.
 cmd/visitflow/webdist/assets/

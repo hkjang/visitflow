@@ -1,18 +1,88 @@
-import { useEffect, useState } from "react";
-import { Alert, Box, Card, CardContent, Chip, CircularProgress, Divider, Paper, Stack, Typography } from "@mui/material";
+import { useCallback, useEffect, useState } from "react";
+import { Alert, Box, Card, CardContent, Chip, CircularProgress, Divider, MenuItem, Paper, Select, Stack, Typography } from "@mui/material";
 import LocationOnOutlined from "@mui/icons-material/LocationOnOutlined";
 import ScheduleRounded from "@mui/icons-material/ScheduleRounded";
 import PersonOutlineRounded from "@mui/icons-material/PersonOutlineRounded";
 import ShieldOutlined from "@mui/icons-material/ShieldOutlined";
+import TranslateRounded from "@mui/icons-material/TranslateRounded";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { Logo } from "../components/Logo";
-import { StatusChip } from "../components/StatusChip";
+import { formatDateTime, formatTime, localeNames, translations, type Locale } from "../i18n";
 
-type Pass = { visitor: string; company?: string; host: string; department?: string; site: string; lobby?: string; purpose: string; startAt: string; endAt: string; status: string; version: number; qrImageUrl: string };
+type Pass = {
+  visitor: string; company?: string; host: string; department?: string; site: string; lobby?: string;
+  purpose: string; startAt: string; endAt: string; status: string; version: number;
+  locale: Locale; supportedLocales: Locale[]; qrImageUrl: string;
+};
+
 export function MobilePassPage() {
-  const { token } = useParams(); const [data, setData] = useState<Pass | null>(null); const [error, setError] = useState(""); const [tick, setTick] = useState(0);
-  useEffect(() => { if (!token) return; api<Pass>(`/api/v1/public/passes/${encodeURIComponent(token)}`).then(setData).catch((e) => setError(e.message)); const timer = window.setInterval(() => setTick((x) => x + 1), 15000); return () => window.clearInterval(timer); }, [token]);
-  return <Box sx={{ minHeight: "100vh", bgcolor: "#EAF1EE", p: { xs: 1.5, sm: 4 }, display: "grid", placeItems: "center" }}><Card sx={{ width: "100%", maxWidth: 480, overflow: "hidden", borderRadius: 4 }}><Box sx={{ bgcolor: "primary.dark", color: "white", p: 2.5 }}><Stack direction="row" justifyContent="space-between" alignItems="center"><Logo inverse /><Chip size="small" label={`PASS v${data?.version ?? "-"}`} sx={{ bgcolor: "rgba(255,255,255,.15)", color: "white" }} /></Stack></Box><CardContent sx={{ p: { xs: 2.5, sm: 4 } }}>{error ? <Alert severity="error">{error}</Alert> : !data ? <Box sx={{ py: 12, display: "grid", placeItems: "center" }}><CircularProgress /></Box> : <><Stack direction="row" justifyContent="space-between" alignItems="start"><Box><Typography variant="overline" color="text.secondary">VISITOR</Typography><Typography variant="h4">{data.visitor}</Typography><Typography color="text.secondary">{data.company || "회사 미입력"}</Typography></Box><StatusChip status={data.status} /></Stack><Paper variant="outlined" sx={{ p: 2, my: 3, textAlign: "center", bgcolor: "white" }}><Box component="img" src={`${data.qrImageUrl}&tick=${tick}`} alt="VisitFlow QR 방문증" sx={{ display: "block", width: "100%", maxWidth: 360, mx: "auto", imageRendering: "auto" }} /><Typography variant="caption" color="text.secondary">로비에 이 QR을 제시해 주세요 · 서버 실시간 검증</Typography></Paper><Stack spacing={2}><Info icon={<ScheduleRounded />} label="방문 일시" value={`${new Date(data.startAt).toLocaleString("ko-KR")} – ${new Date(data.endAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`} /><Info icon={<LocationOnOutlined />} label="방문 장소" value={`${data.site}${data.lobby ? ` · ${data.lobby}` : ""}`} /><Info icon={<PersonOutlineRounded />} label="담당자" value={`${data.department || "부서 미지정"} · ${data.host}`} /></Stack><Divider sx={{ my: 3 }} /><Alert icon={<ShieldOutlined />} severity="info">QR에는 이름·전화번호 같은 개인정보가 들어 있지 않습니다. 취소·재발급 시 즉시 무효화됩니다.</Alert></>}</CardContent></Card></Box>;
+  const { token } = useParams();
+  const [data, setData] = useState<Pass | null>(null);
+  const [error, setError] = useState("");
+  const [tick, setTick] = useState(0);
+  const [locale, setLocale] = useState<Locale | "">("");
+  const text = translations(locale || data?.locale);
+
+  const load = useCallback(async (requested: Locale | "") => {
+    if (!token) return;
+    const query = requested ? `?lang=${requested}` : "";
+    try {
+      setData(await api<Pass>(`/api/v1/public/passes/${encodeURIComponent(token)}${query}`));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : translations(requested).passNotFound);
+    }
+  }, [token]);
+
+  useEffect(() => { void load(locale); }, [load, locale]);
+  // The QR image is re-requested on a timer so a dynamic QR stays current.
+  useEffect(() => { const timer = window.setInterval(() => setTick((x) => x + 1), 15000); return () => window.clearInterval(timer); }, []);
+
+  const active = locale || data?.locale || "ko";
+  return <Box sx={{ minHeight: "100vh", bgcolor: "#EAF1EE", p: { xs: 1.5, sm: 4 }, display: "grid", placeItems: "center" }} lang={active}>
+    <Card sx={{ width: "100%", maxWidth: 480, overflow: "hidden", borderRadius: 4 }}>
+      <Box sx={{ bgcolor: "primary.dark", color: "white", p: 2.5 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
+          <Logo inverse />
+          <Chip size="small" label={`PASS v${data?.version ?? "-"}`} sx={{ bgcolor: "rgba(255,255,255,.15)", color: "white" }} />
+        </Stack>
+      </Box>
+      <CardContent sx={{ p: { xs: 2.5, sm: 4 } }}>
+        {data && (data.supportedLocales?.length ?? 0) > 1 && <Stack direction="row" spacing={1} alignItems="center" justifyContent="flex-end" mb={2}>
+          <TranslateRounded fontSize="small" color="action" />
+          <Select size="small" value={active} onChange={(e) => setLocale(e.target.value as Locale)} aria-label={text.language} sx={{ minWidth: 130 }}>
+            {data.supportedLocales.map((item) => <MenuItem key={item} value={item}>{localeNames[item] ?? item}</MenuItem>)}
+          </Select>
+        </Stack>}
+        {error ? <Alert severity="error">{error}</Alert> : !data ? <Box sx={{ py: 12, display: "grid", placeItems: "center" }}><CircularProgress /></Box> : <>
+          <Stack direction="row" justifyContent="space-between" alignItems="start">
+            <Box>
+              <Typography variant="overline" color="text.secondary">{text.visitor.toUpperCase()}</Typography>
+              <Typography variant="h4">{data.visitor}</Typography>
+              <Typography color="text.secondary">{data.company || text.companyMissing}</Typography>
+            </Box>
+            <Chip size="small" color={data.status === "CHECKED_IN" ? "success" : data.status === "EXPIRED" || data.status === "CANCELLED" ? "error" : "info"} label={text.statusLabels[data.status] ?? data.status} sx={{ fontWeight: 750 }} />
+          </Stack>
+          <Paper variant="outlined" sx={{ p: 2, my: 3, textAlign: "center", bgcolor: "white" }}>
+            <Box component="img" src={`${data.qrImageUrl}&tick=${tick}`} alt={text.passTitle} sx={{ display: "block", width: "100%", maxWidth: 360, mx: "auto" }} />
+            <Typography variant="caption" color="text.secondary">{text.scanHere}</Typography>
+          </Paper>
+          <Stack spacing={2}>
+            <Info icon={<ScheduleRounded />} label={text.visitTime} value={`${formatDateTime(data.startAt, active)} – ${formatTime(data.endAt, active)}`} />
+            <Info icon={<LocationOnOutlined />} label={text.place} value={`${data.site}${data.lobby ? ` · ${data.lobby}` : ""}`} />
+            <Info icon={<PersonOutlineRounded />} label={text.host} value={`${data.department || text.departmentMissing} · ${data.host}`} />
+          </Stack>
+          <Divider sx={{ my: 3 }} />
+          <Alert icon={<ShieldOutlined />} severity="info">{text.privacyNote}</Alert>
+        </>}
+      </CardContent>
+    </Card>
+  </Box>;
 }
-function Info({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) { return <Stack direction="row" spacing={1.5} alignItems="center"><Box sx={{ width: 38, height: 38, borderRadius: 2.5, bgcolor: "#EDF4F1", color: "primary.main", display: "grid", placeItems: "center" }}>{icon}</Box><Box><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="body2" fontWeight={750}>{value}</Typography></Box></Stack>; }
+
+function Info({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return <Stack direction="row" spacing={1.5} alignItems="center">
+    <Box sx={{ width: 38, height: 38, borderRadius: 2.5, bgcolor: "#EDF4F1", color: "primary.main", display: "grid", placeItems: "center" }}>{icon}</Box>
+    <Box><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="body2" fontWeight={750}>{value}</Typography></Box>
+  </Stack>;
+}

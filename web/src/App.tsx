@@ -13,6 +13,9 @@ import { AdminPage } from "./pages/AdminPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { KeysPage } from "./pages/KeysPage";
 import { MobilePassPage } from "./pages/MobilePassPage";
+import { SelfRegistrationPage } from "./pages/SelfRegistrationPage";
+import { KioskPage } from "./pages/KioskPage";
+import { RosterPage } from "./pages/RosterPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { GuidePage } from "./pages/GuidePage";
 import { NotificationSettingsPage } from "./pages/NotificationSettingsPage";
@@ -41,6 +44,8 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/q/:token" element={<MobilePassPage />} />
+      <Route path="/r/:token" element={<SelfRegistrationPage />} />
+      <Route path="/kiosk" element={<KioskPage />} />
       <Route element={<Protected />}>
         <Route index element={<PersonalDashboardPage />} />
         <Route path="visits/new" element={<VisitFormPage />} />
@@ -50,6 +55,7 @@ export default function App() {
         <Route path="approvals" element={<ApprovalGuard><ApprovalsPage /></ApprovalGuard>} />
         <Route path="lobby" element={<LobbyGuard><LobbyPage /></LobbyGuard>} />
         <Route path="lobby/scan" element={<LobbyGuard><ScannerPage /></LobbyGuard>} />
+        <Route path="lobby/roster" element={<LobbyGuard><RosterPage /></LobbyGuard>} />
         <Route path="lobby/walk-in" element={<LobbyGuard><VisitFormPage walkIn /></LobbyGuard>} />
         <Route path="admin/visits" element={<AdminGuard security><AdminPage fixedSection="visits" /></AdminGuard>} />
         <Route path="admin/guides" element={<AdminGuard><GuidePage admin /></AdminGuard>} />

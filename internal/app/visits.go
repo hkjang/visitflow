@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -127,14 +128,25 @@ func (s *Server) referenceData(w http.ResponseWriter, r *http.Request) {
 		}
 		rows.Close()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sites": sites, "lobbies": lobbies, "departments": departments, "hosts": hosts})
+	visitTypes, err := s.visitTypes(r.Context(), true)
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sites": sites, "lobbies": lobbies, "departments": departments, "hosts": hosts,
+		"visitTypes": visitTypes, "locales": s.supportedLocales(r.Context()), "defaultLocale": s.defaultLocale(r.Context()),
+		"selfRegistrationEnabled": settingOr(s, r.Context(), "visit.self_registration_enabled", "true") == "true",
+	})
 }
 
 func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		DisplayName  string `json:"displayName"`
-		Phone        string `json:"phone"`
-		DepartmentID string `json:"departmentId"`
+		DisplayName    string `json:"displayName"`
+		Phone          string `json:"phone"`
+		DepartmentID   string `json:"departmentId"`
+		DelegateUserID string `json:"delegateUserId"`
+		DelegateUntil  string `json:"delegateUntil"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -145,12 +157,39 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	_, err = s.db.Exec(r.Context(), `UPDATE users SET display_name=COALESCE(NULLIF($2,''),display_name),phone_encrypted=NULLIF($3,''),department_id=NULLIF($4,''),updated_at=now() WHERE id=$1`, u.ID, strings.TrimSpace(in.DisplayName), phone, in.DepartmentID)
+	delegateID := strings.TrimSpace(in.DelegateUserID)
+	var delegateUntil *time.Time
+	if delegateID != "" {
+		if delegateID == u.ID {
+			writeError(w, http.StatusBadRequest, "invalid_delegate", "본인을 대리자로 지정할 수 없습니다")
+			return
+		}
+		var active bool
+		if err := s.db.QueryRow(r.Context(), `SELECT active FROM users WHERE id=$1`, delegateID).Scan(&active); err != nil || !active {
+			writeError(w, http.StatusBadRequest, "invalid_delegate", "대리자로 지정할 수 있는 사용자가 아닙니다")
+			return
+		}
+		parsed, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(in.DelegateUntil))
+		if parseErr != nil || !parsed.After(time.Now()) {
+			writeError(w, http.StatusBadRequest, "invalid_delegate_period", "대리 지정 종료 시각은 현재 이후 값이어야 합니다")
+			return
+		}
+		if parsed.After(time.Now().AddDate(1, 0, 0)) {
+			writeError(w, http.StatusBadRequest, "invalid_delegate_period", "대리 지정은 최대 1년까지 설정할 수 있습니다")
+			return
+		}
+		delegateUntil = &parsed
+	}
+	_, err = s.db.Exec(r.Context(), `UPDATE users SET display_name=COALESCE(NULLIF($2,''),display_name),phone_encrypted=NULLIF($3,''),department_id=NULLIF($4,''),
+		delegate_user_id=NULLIF($5,''),delegate_until=$6,updated_at=now() WHERE id=$1`, u.ID, strings.TrimSpace(in.DisplayName), phone, in.DepartmentID, delegateID, delegateUntil)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "profile.update", "user", u.ID, r.RemoteAddr, map[string]any{"departmentChanged": in.DepartmentID != "", "phoneConfigured": in.Phone != ""})
+	s.audit(r.Context(), u.ID, "profile.update", "user", u.ID, r.RemoteAddr, map[string]any{
+		"departmentChanged": in.DepartmentID != "", "phoneConfigured": in.Phone != "",
+		"delegateUserId": delegateID, "delegateUntil": delegateUntil,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -171,12 +210,47 @@ func (s *Server) personalDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		counts[k] = count
 	}
-	items, err := s.queryVisits(r.Context(), u, "", "today", "", 8)
+	items, _, err := s.queryVisits(r.Context(), u, visitQuery{Period: "today", Limit: 8})
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"counts": counts, "items": items})
+}
+
+// visitQuery describes one page of the visit directory. Cursor keeps paging
+// stable while new visits are created, which a plain offset cannot do.
+type visitQuery struct {
+	Status string
+	Period string
+	Search string
+	Cursor string
+	Limit  int
+}
+
+// encodeVisitCursor and decodeVisitCursor carry the keyset position
+// (start_at, id) that the next page continues from.
+func encodeVisitCursor(item VisitSummary) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(item.StartAt.UTC().Format(time.RFC3339Nano) + "|" + item.ID))
+}
+
+func decodeVisitCursor(cursor string) (time.Time, string, bool) {
+	if cursor == "" {
+		return time.Time{}, "", false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	timestamp, id, found := strings.Cut(string(raw), "|")
+	if !found || id == "" {
+		return time.Time{}, "", false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	return parsed, id, true
 }
 
 func (s *Server) listVisits(w http.ResponseWriter, r *http.Request) {
@@ -185,35 +259,59 @@ func (s *Server) listVisits(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 200 {
 		limit = 100
 	}
-	items, err := s.queryVisits(r.Context(), u, r.URL.Query().Get("status"), r.URL.Query().Get("period"), r.URL.Query().Get("q"), limit)
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor != "" {
+		if _, _, ok := decodeVisitCursor(cursor); !ok {
+			writeError(w, http.StatusBadRequest, "invalid_cursor", "페이지 커서가 올바르지 않습니다")
+			return
+		}
+	}
+	items, nextCursor, err := s.queryVisits(r.Context(), u, visitQuery{
+		Status: r.URL.Query().Get("status"), Period: r.URL.Query().Get("period"),
+		Search: r.URL.Query().Get("q"), Cursor: cursor, Limit: limit,
+	})
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "nextCursor": nextCursor, "hasMore": nextCursor != ""})
 }
 
-func (s *Server) queryVisits(ctx context.Context, u User, status, period, search string, limit int) ([]VisitSummary, error) {
+// queryVisits returns one page plus the cursor for the next one. It fetches a
+// single extra row to decide whether more pages exist without a count query.
+func (s *Server) queryVisits(ctx context.Context, u User, q visitQuery) ([]VisitSummary, string, error) {
 	dept := ""
 	if u.DepartmentID != nil {
 		dept = *u.DepartmentID
 	}
+	if q.Limit < 1 {
+		q.Limit = 100
+	}
+	cursorTime, cursorID, hasCursor := decodeVisitCursor(q.Cursor)
+	search := strings.TrimSpace(q.Search)
 	rows, err := s.db.Query(ctx, `
 		SELECT v.id,v.request_no,v.host_user_id,h.display_name,v.department_id,COALESCE(o.name,''),v.site_id,s.name,v.lobby_id,COALESCE(l.name,''),
-		v.start_at,v.end_at,v.purpose,COALESCE(v.place_detail,''),v.status,v.source,v.created_at,
+		v.start_at,v.end_at,v.purpose,COALESCE(v.place_detail,''),v.status,v.source,v.created_at,v.visit_type_id,COALESCE(vt.name,''),
 		count(vv.id),COALESCE((array_agg(p.name_encrypted ORDER BY vv.is_primary DESC,vv.created_at))[1],''),COALESCE((array_agg(p.company ORDER BY vv.is_primary DESC,vv.created_at))[1],''),(array_agg(p.masked_at ORDER BY vv.is_primary DESC,vv.created_at))[1]
 		FROM visits v JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id
 		LEFT JOIN organizations o ON o.id=v.department_id LEFT JOIN lobbies l ON l.id=v.lobby_id
+		LEFT JOIN visit_types vt ON vt.id=v.visit_type_id
 		LEFT JOIN visitor_visits vv ON vv.visit_id=v.id LEFT JOIN visitors p ON p.id=vv.visitor_id
 		WHERE ($1='' OR v.status=$1)
 		AND ($2='' OR ($2='today' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date) OR ($2='upcoming' AND v.start_at>=now()) OR ($2='past' AND v.end_at<now()))
 		AND ($3='' OR v.id=$3 OR v.request_no ILIKE '%%'||$3||'%%' OR p.company ILIKE '%%'||$3||'%%' OR h.display_name ILIKE '%%'||$3||'%%' OR p.name_hash=$9 OR p.phone_hash=$10)
 		AND ($5 IN ('admin','super_admin','security','auditor')
 		 OR ($5='lobby' AND (cardinality($7::text[])=0 OR v.site_id=ANY($7::text[])))
-		 OR ($5='dept_manager' AND v.department_id=NULLIF($6,'')) OR v.host_user_id=$4)
-		GROUP BY v.id,h.display_name,o.name,s.name,l.name ORDER BY v.start_at DESC LIMIT $8`, status, period, strings.TrimSpace(search), u.ID, u.Role, dept, u.SiteScope, limit, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(search))), s.keys.Digest("phone:"+normalizePhone(search)))
+		 OR ($5='dept_manager' AND (v.department_id=NULLIF($6,'') OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=v.host_user_id AND hu.delegate_user_id=$4 AND hu.delegate_until>now())))
+		 OR v.host_user_id=$4
+		 OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=v.host_user_id AND hu.delegate_user_id=$4 AND hu.delegate_until>now()))
+		AND ($11=false OR (v.start_at,v.id)<($12::timestamptz,$13))
+		GROUP BY v.id,h.display_name,o.name,s.name,l.name,vt.name ORDER BY v.start_at DESC,v.id DESC LIMIT $8`,
+		q.Status, q.Period, search, u.ID, u.Role, dept, u.SiteScope, q.Limit+1,
+		s.keys.Digest("name:"+strings.ToLower(search)), s.keys.Digest("phone:"+normalizePhone(search)),
+		hasCursor, cursorTime, cursorID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	items := []VisitSummary{}
@@ -221,8 +319,8 @@ func (s *Server) queryVisits(ctx context.Context, u User, status, period, search
 		var item VisitSummary
 		var nameEncrypted string
 		var maskedAt *time.Time
-		if err := rows.Scan(&item.ID, &item.RequestNo, &item.HostUserID, &item.HostName, &item.DepartmentID, &item.DepartmentName, &item.SiteID, &item.SiteName, &item.LobbyID, &item.LobbyName, &item.StartAt, &item.EndAt, &item.Purpose, &item.PlaceDetail, &item.Status, &item.Source, &item.CreatedAt, &item.VisitorCount, &nameEncrypted, &item.Company, &maskedAt); err != nil {
-			return nil, err
+		if err := rows.Scan(&item.ID, &item.RequestNo, &item.HostUserID, &item.HostName, &item.DepartmentID, &item.DepartmentName, &item.SiteID, &item.SiteName, &item.LobbyID, &item.LobbyName, &item.StartAt, &item.EndAt, &item.Purpose, &item.PlaceDetail, &item.Status, &item.Source, &item.CreatedAt, &item.VisitTypeID, &item.VisitTypeName, &item.VisitorCount, &nameEncrypted, &item.Company, &maskedAt); err != nil {
+			return nil, "", err
 		}
 		item.PrimaryVisitor = s.decryptOptional(nameEncrypted)
 		if maskedAt != nil {
@@ -230,7 +328,15 @@ func (s *Server) queryVisits(ctx context.Context, u User, status, period, search
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	nextCursor := ""
+	if len(items) > q.Limit {
+		items = items[:q.Limit]
+		nextCursor = encodeVisitCursor(items[len(items)-1])
+	}
+	return items, nextCursor, nil
 }
 
 func (s *Server) createVisit(w http.ResponseWriter, r *http.Request) {
@@ -307,10 +413,16 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 			in.DepartmentID = *d
 		}
 	}
+	visitType, checklistJSON, err := s.applyVisitType(ctx, &in)
+	if err != nil {
+		return nil, err
+	}
 	approval, _ := s.getSetting(ctx, "visit.approval_enabled")
 	status := "SCHEDULED"
 	participantStatus := "SCHEDULED"
-	if approval == "true" && source != "lobby" {
+	// A visit type may require approval even when the global workflow is off,
+	// so that contractor work never bypasses review.
+	if (approval == "true" || visitType.RequiresApproval) && source != "lobby" {
 		status, participantStatus = "PENDING_APPROVAL", "PENDING_APPROVAL"
 	}
 	occurrences := 1
@@ -337,6 +449,7 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	consent := consentContextFrom(r, actor.ID, consentSource(source))
 	policy := map[string]string{"approvalEnabled": approval}
 	policyJSON, _ := json.Marshal(policy)
 	seriesID := ""
@@ -370,11 +483,11 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 		if autoCheckIn {
 			persistedStatus, persistedParticipantStatus = "CHECKED_IN", "CHECKED_IN"
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO visits(id,request_no,host_user_id,department_id,site_id,lobby_id,start_at,end_at,purpose,place_detail,notes,status,source,recurrence,policy_snapshot) VALUES($1,$2,$3,NULLIF($4,''),$5,NULLIF($6,''),$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,$13,$14,$15)`, visitID, requestNo, hostID, scheduled.DepartmentID, scheduled.SiteID, scheduled.LobbyID, scheduled.StartAt, scheduled.EndAt, scheduled.Purpose, scheduled.PlaceDetail, scheduled.Notes, persistedStatus, source, recurrenceJSON, policyJSON)
+		_, err = tx.Exec(ctx, `INSERT INTO visits(id,request_no,host_user_id,department_id,site_id,lobby_id,start_at,end_at,purpose,place_detail,notes,status,source,recurrence,policy_snapshot,visit_type_id,checklist) VALUES($1,$2,$3,NULLIF($4,''),$5,NULLIF($6,''),$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,$13,$14,$15,NULLIF($16,''),$17)`, visitID, requestNo, hostID, scheduled.DepartmentID, scheduled.SiteID, scheduled.LobbyID, scheduled.StartAt, scheduled.EndAt, scheduled.Purpose, scheduled.PlaceDetail, scheduled.Notes, persistedStatus, source, recurrenceJSON, policyJSON, scheduled.VisitTypeID, checklistJSON)
 		if err != nil {
 			return nil, err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO visit_events(visit_id,event_type,actor_user_id,method,details) VALUES($1,'REQUESTED',$2,$3,$4)`, visitID, actor.ID, source, policyJSON)
+		_, err = tx.Exec(ctx, `INSERT INTO visit_events(visit_id,event_type,actor_user_id,method,details) VALUES($1,'REQUESTED',NULLIF($2,''),$3,$4)`, visitID, actor.ID, source, policyJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -387,6 +500,11 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 			equipment, _ := json.Marshal(input.Equipment)
 			_, err = tx.Exec(ctx, `INSERT INTO visitor_visits(id,visit_id,visitor_id,is_primary,equipment,status,checked_in_at) VALUES($1,$2,$3,$4,$5,$6,CASE WHEN $7 THEN now() ELSE NULL END)`, vvID, visitID, visitorID, visitorIndex == 0, equipment, persistedParticipantStatus, autoCheckIn)
 			if err != nil {
+				return nil, err
+			}
+			participantConsent := consent
+			participantConsent.Locale = normalizeLocale(input.Locale)
+			if err = s.recordConsentTx(ctx, tx, visitorID, visitID, vvID, participantConsent); err != nil {
 				return nil, err
 			}
 			if status == "SCHEDULED" {
@@ -413,7 +531,7 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 				}
 			}
 			if autoCheckIn {
-				_, err = tx.Exec(ctx, `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_IN',$3,NULLIF($4,''),'walk_in')`, visitID, vvID, actor.ID, scheduled.LobbyID)
+				_, err = tx.Exec(ctx, `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_IN',NULLIF($3,''),NULLIF($4,''),'walk_in')`, visitID, vvID, actor.ID, scheduled.LobbyID)
 				if err != nil {
 					return nil, err
 				}
@@ -478,11 +596,13 @@ func (s *Server) upsertVisitor(ctx context.Context, tx pgx.Tx, in VisitorInput) 
 	if err != nil {
 		return "", err
 	}
+	locale := normalizeLocale(in.Locale)
 	if id == "" {
 		id = newID()
-		_, err = tx.Exec(ctx, `INSERT INTO visitors(id,name_encrypted,name_hash,phone_encrypted,phone_hash,email_encrypted,company,title,vehicle_encrypted,consented_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),NULLIF($9,''),now())`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, hash, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
+		_, err = tx.Exec(ctx, `INSERT INTO visitors(id,name_encrypted,name_hash,phone_encrypted,phone_hash,email_encrypted,company,title,vehicle_encrypted,locale,consented_at) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),NULLIF($8,''),NULLIF($9,''),$10,now())`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, hash, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc, locale)
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,name_hash=$3,phone_encrypted=$4,email_encrypted=NULLIF($5,''),company=NULLIF($6,''),title=NULLIF($7,''),vehicle_encrypted=NULLIF($8,''),consented_at=now(),masked_at=NULL,updated_at=now() WHERE id=$1`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc)
+		// An empty locale keeps whatever the visitor chose on a previous visit.
+		_, err = tx.Exec(ctx, `UPDATE visitors SET name_encrypted=$2,name_hash=$3,phone_encrypted=$4,email_encrypted=NULLIF($5,''),company=NULLIF($6,''),title=NULLIF($7,''),vehicle_encrypted=NULLIF($8,''),locale=COALESCE(NULLIF($9,''),locale),consented_at=now(),masked_at=NULL,updated_at=now() WHERE id=$1`, id, nameEnc, s.keys.Digest("name:"+strings.ToLower(strings.TrimSpace(in.Name))), phoneEnc, emailEnc, strings.TrimSpace(in.Company), strings.TrimSpace(in.Title), vehicleEnc, locale)
 	}
 	return id, err
 }
@@ -565,7 +685,7 @@ func (s *Server) queueNotificationTx(ctx context.Context, tx pgx.Tx, visitID, re
 func (s *Server) getVisit(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "visitID")
 	u, _ := userFrom(r)
-	items, err := s.queryVisits(r.Context(), u, "", "", id, 200)
+	items, _, err := s.queryVisits(r.Context(), u, visitQuery{Search: id, Limit: 200})
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -591,21 +711,26 @@ func (s *Server) getVisit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) visitParticipants(ctx context.Context, visitID string, includePass bool) ([]map[string]any, error) {
-	rows, err := s.db.Query(ctx, `SELECT vv.id,p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.email_encrypted,''),COALESCE(p.company,''),COALESCE(p.title,''),COALESCE(p.vehicle_encrypted,''),p.masked_at,vv.equipment,vv.status,vv.badge_no,vv.checked_in_at,vv.checked_out_at,
-		COALESCE(q.token_encrypted,''),q.version,COALESCE(q.qrcode_file_seq,'') FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id LEFT JOIN LATERAL (SELECT token_encrypted,version,qrcode_file_seq FROM qr_tokens WHERE visitor_visit_id=vv.id AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1) q ON true WHERE vv.visit_id=$1 ORDER BY vv.is_primary DESC,vv.created_at`, visitID)
+	rows, err := s.db.Query(ctx, `SELECT vv.id,p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.email_encrypted,''),COALESCE(p.company,''),COALESCE(p.title,''),COALESCE(p.vehicle_encrypted,''),p.masked_at,p.locale,vv.equipment,vv.status,vv.badge_no,vv.checked_in_at,vv.checked_out_at,
+		COALESCE(q.token_encrypted,''),q.version,COALESCE(q.qrcode_file_seq,''),ri.expires_at,COALESCE(c.source,'')
+		FROM visitor_visits vv JOIN visitors p ON p.id=vv.visitor_id
+		LEFT JOIN LATERAL (SELECT token_encrypted,version,qrcode_file_seq FROM qr_tokens WHERE visitor_visit_id=vv.id AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1) q ON true
+		LEFT JOIN LATERAL (SELECT expires_at FROM registration_invitations WHERE visitor_visit_id=vv.id AND completed_at IS NULL AND revoked_at IS NULL AND expires_at>now() LIMIT 1) ri ON true
+		LEFT JOIN LATERAL (SELECT source FROM consent_records WHERE visitor_visit_id=vv.id ORDER BY consented_at DESC LIMIT 1) c ON true
+		WHERE vv.visit_id=$1 ORDER BY vv.is_primary DESC,vv.created_at`, visitID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var vvID, visitorID, nameEnc, phoneEnc, emailEnc, company, title, vehicleEnc, status, tokenEnc, fileSeq string
+		var vvID, visitorID, nameEnc, phoneEnc, emailEnc, company, title, vehicleEnc, locale, status, tokenEnc, fileSeq, consentSourceValue string
 		var equipment []byte
 		var maskedAt *time.Time
 		var badge *string
-		var checkedIn, checkedOut *time.Time
+		var checkedIn, checkedOut, invitationExpiresAt *time.Time
 		var version *int
-		if err := rows.Scan(&vvID, &visitorID, &nameEnc, &phoneEnc, &emailEnc, &company, &title, &vehicleEnc, &maskedAt, &equipment, &status, &badge, &checkedIn, &checkedOut, &tokenEnc, &version, &fileSeq); err != nil {
+		if err := rows.Scan(&vvID, &visitorID, &nameEnc, &phoneEnc, &emailEnc, &company, &title, &vehicleEnc, &maskedAt, &locale, &equipment, &status, &badge, &checkedIn, &checkedOut, &tokenEnc, &version, &fileSeq, &invitationExpiresAt, &consentSourceValue); err != nil {
 			return nil, err
 		}
 		var equipmentValue any = []string{}
@@ -614,7 +739,7 @@ func (s *Server) visitParticipants(ctx context.Context, visitID string, includeP
 		if maskedAt != nil {
 			name, email, vehicle = maskName(name), "", ""
 		}
-		item := map[string]any{"id": vvID, "visitorId": visitorID, "name": name, "phone": maskPhone(s.decryptOptional(phoneEnc)), "email": email, "company": company, "title": title, "vehicle": vehicle, "equipment": equipmentValue, "status": status, "badgeNo": badge, "checkedInAt": checkedIn, "checkedOutAt": checkedOut, "qrVersion": version, "maskedAt": maskedAt}
+		item := map[string]any{"id": vvID, "visitorId": visitorID, "name": name, "phone": maskPhone(s.decryptOptional(phoneEnc)), "email": email, "company": company, "title": title, "vehicle": vehicle, "equipment": equipmentValue, "status": status, "badgeNo": badge, "checkedInAt": checkedIn, "checkedOutAt": checkedOut, "qrVersion": version, "maskedAt": maskedAt, "locale": locale, "consentSource": consentSourceValue, "registrationInviteExpiresAt": invitationExpiresAt}
 		if includePass && tokenEnc != "" {
 			item["passPath"] = "/q/" + s.decryptOptional(tokenEnc)
 			item["qrcodeImagePath"] = "/img/visitor/" + fileSeq + ".jpg"
@@ -694,7 +819,7 @@ func (s *Server) cancelVisit(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `UPDATE qr_tokens SET revoked_at=now() WHERE visitor_visit_id IN (SELECT id FROM visitor_visits WHERE visit_id=$1) AND revoked_at IS NULL`, id)
 	}
 	if err == nil && tag.RowsAffected() > 0 {
-		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,event_type,actor_user_id) VALUES($1,'CANCELLED',$2)`, id, u.ID)
+		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,event_type,actor_user_id) VALUES($1,'CANCELLED',NULLIF($2,''))`, id, u.ID)
 	}
 	if err == nil && tag.RowsAffected() > 0 {
 		err = s.cancelPendingVisitNotificationsTx(r.Context(), tx, id)
@@ -775,7 +900,9 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 		departmentID = *u.DepartmentID
 	}
 	var startAt, endAt time.Time
-	tag, err := tx.Exec(r.Context(), `UPDATE visits SET status=$2,approval_reason=NULLIF($3,''),approved_by=$4,approved_at=now(),updated_at=now() WHERE id=$1 AND status='PENDING_APPROVAL' AND ($5<>'dept_manager' OR department_id=NULLIF($6,''))`, id, status, in.Reason, u.ID, u.Role, departmentID)
+	tag, err := tx.Exec(r.Context(), `UPDATE visits SET status=$2,approval_reason=NULLIF($3,''),approved_by=$4,approved_at=now(),updated_at=now()
+		WHERE id=$1 AND status='PENDING_APPROVAL' AND ($5<>'dept_manager' OR department_id=NULLIF($6,'')
+			OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=visits.host_user_id AND hu.delegate_user_id=$4 AND hu.delegate_until>now()))`, id, status, in.Reason, u.ID, u.Role, departmentID)
 	if err == nil && tag.RowsAffected() > 0 {
 		err = tx.QueryRow(r.Context(), `SELECT start_at,end_at FROM visits WHERE id=$1`, id).Scan(&startAt, &endAt)
 	}
@@ -819,7 +946,7 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 		}
 	}
 	if err == nil && tag.RowsAffected() > 0 {
-		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,event_type,actor_user_id,details) VALUES($1,$2,$3,$4)`, id, status, u.ID, map[string]string{"reason": in.Reason})
+		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,event_type,actor_user_id,details) VALUES($1,$2,NULLIF($3,''),$4)`, id, status, u.ID, map[string]string{"reason": in.Reason})
 	}
 	if err != nil || tag.RowsAffected() == 0 {
 		writeError(w, 409, "approval_conflict", "승인 대기 상태가 아니거나 처리할 수 없습니다")
@@ -1018,6 +1145,7 @@ func (s *Server) createWalkIn(w http.ResponseWriter, r *http.Request) {
 
 type qrRecord struct {
 	TokenID, ParticipantID, VisitID, Status, ParticipantStatus, NameEnc, Company, HostName, Department, SiteID, SiteName, LobbyName, Purpose string
+	Locale                                                                                                                                   string
 	StartAt, EndAt, ValidFrom, ValidUntil                                                                                                    time.Time
 	UsedAt, RevokedAt                                                                                                                        *time.Time
 	Version                                                                                                                                  int
@@ -1025,7 +1153,7 @@ type qrRecord struct {
 
 func (s *Server) lookupQR(ctx context.Context, raw string) (qrRecord, error) {
 	var q qrRecord
-	err := s.db.QueryRow(ctx, `SELECT qt.id,vv.id,v.id,v.status,vv.status,p.name_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),si.id,si.name,COALESCE(l.name,''),v.purpose,v.start_at,v.end_at,qt.valid_from,qt.valid_until,qt.used_at,qt.revoked_at,qt.version FROM qr_tokens qt JOIN visitor_visits vv ON vv.id=qt.visitor_visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id JOIN sites si ON si.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE qt.token_hash=$1`, s.keys.Digest("qr:"+raw)).Scan(&q.TokenID, &q.ParticipantID, &q.VisitID, &q.Status, &q.ParticipantStatus, &q.NameEnc, &q.Company, &q.HostName, &q.Department, &q.SiteID, &q.SiteName, &q.LobbyName, &q.Purpose, &q.StartAt, &q.EndAt, &q.ValidFrom, &q.ValidUntil, &q.UsedAt, &q.RevokedAt, &q.Version)
+	err := s.db.QueryRow(ctx, `SELECT qt.id,vv.id,v.id,v.status,vv.status,p.name_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),si.id,si.name,COALESCE(l.name,''),v.purpose,p.locale,v.start_at,v.end_at,qt.valid_from,qt.valid_until,qt.used_at,qt.revoked_at,qt.version FROM qr_tokens qt JOIN visitor_visits vv ON vv.id=qt.visitor_visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id JOIN users h ON h.id=v.host_user_id JOIN sites si ON si.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE qt.token_hash=$1`, s.keys.Digest("qr:"+raw)).Scan(&q.TokenID, &q.ParticipantID, &q.VisitID, &q.Status, &q.ParticipantStatus, &q.NameEnc, &q.Company, &q.HostName, &q.Department, &q.SiteID, &q.SiteName, &q.LobbyName, &q.Purpose, &q.Locale, &q.StartAt, &q.EndAt, &q.ValidFrom, &q.ValidUntil, &q.UsedAt, &q.RevokedAt, &q.Version)
 	return q, err
 }
 
@@ -1101,7 +1229,8 @@ func (s *Server) publicPass(w http.ResponseWriter, r *http.Request) {
 	if time.Now().After(q.ValidUntil) && status == "SCHEDULED" {
 		status = "EXPIRED"
 	}
-	writeJSON(w, 200, map[string]any{"visitor": maskName(s.decryptOptional(q.NameEnc)), "company": q.Company, "host": maskName(q.HostName), "department": q.Department, "site": q.SiteName, "lobby": q.LobbyName, "purpose": q.Purpose, "startAt": q.StartAt, "endAt": q.EndAt, "status": status, "version": q.Version, "qrImageUrl": fmt.Sprintf("/api/v1/public/passes/%s/qr.png?v=%d&t=%d", raw, q.Version, time.Now().Unix()/30)})
+	locale := s.negotiateLocale(r.Context(), r.URL.Query().Get("lang"), q.Locale, r.Header.Get("Accept-Language"))
+	writeJSON(w, 200, map[string]any{"visitor": maskName(s.decryptOptional(q.NameEnc)), "company": q.Company, "host": maskName(q.HostName), "department": q.Department, "site": q.SiteName, "lobby": q.LobbyName, "purpose": q.Purpose, "startAt": q.StartAt, "endAt": q.EndAt, "status": status, "version": q.Version, "locale": locale, "supportedLocales": s.supportedLocales(r.Context()), "qrImageUrl": fmt.Sprintf("/api/v1/public/passes/%s/qr.png?v=%d&t=%d", raw, q.Version, time.Now().Unix()/30)})
 }
 
 func (s *Server) publicPassQR(w http.ResponseWriter, r *http.Request) {
@@ -1228,9 +1357,11 @@ func (s *Server) verifyQR(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r.Context(), u.ID, "qr.verify", "qr_token", q.TokenID, r.RemoteAddr, details)
 	if status != http.StatusOK {
+		s.metrics.qrRejected.Add(1)
 		writeError(w, status, result, message)
 		return
 	}
+	s.metrics.qrVerified.Add(1)
 	writeJSON(w, 200, map[string]any{"valid": true, "message": message, "token": raw, "visitorVisitId": q.ParticipantID, "visitId": q.VisitID, "visitor": s.decryptOptional(q.NameEnc), "company": q.Company, "host": q.HostName, "department": q.Department, "site": q.SiteName, "lobby": q.LobbyName, "purpose": q.Purpose, "startAt": q.StartAt, "endAt": q.EndAt})
 }
 
@@ -1281,7 +1412,7 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `UPDATE visits SET status='CHECKED_IN',updated_at=now() WHERE id=$1 AND status IN ('SCHEDULED','APPROVED','ARRIVED')`, visitID)
 	}
 	if err == nil {
-		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_IN',$3,NULLIF($4,''),$5)`, visitID, participantID, u.ID, in.LobbyID, in.Method)
+		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_IN',NULLIF($3,''),NULLIF($4,''),$5)`, visitID, participantID, u.ID, in.LobbyID, in.Method)
 	}
 	if err == nil {
 		err = s.queueNotificationEventTx(r.Context(), tx, visitID, participantID, "checked_in", now)
@@ -1293,6 +1424,7 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
+	s.metrics.checkIns.Add(1)
 	s.audit(r.Context(), u.ID, "visit.checkin", "visitor_visit", participantID, r.RemoteAddr, map[string]string{"visitId": visitID, "method": in.Method, "lobbyId": in.LobbyID})
 	s.publishLobbyEvent("visitor.checked_in")
 	writeJSON(w, 201, map[string]any{"visitorVisitId": participantID, "visitId": visitID, "checkedInAt": now})
@@ -1320,7 +1452,7 @@ func (s *Server) checkOut(w http.ResponseWriter, r *http.Request) {
 	var visitID string
 	err = tx.QueryRow(r.Context(), `UPDATE visitor_visits vv SET status='CHECKED_OUT',checked_out_at=now() FROM visits v WHERE vv.id=$1 AND vv.status='CHECKED_IN' AND v.id=vv.visit_id AND ($2<>'lobby' OR cardinality($3::text[])=0 OR v.site_id=ANY($3::text[])) RETURNING vv.visit_id`, in.VisitorVisitID, u.Role, u.SiteScope).Scan(&visitID)
 	if err == nil {
-		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_OUT',$3,NULLIF($4,''),$5)`, visitID, in.VisitorVisitID, u.ID, in.LobbyID, in.Method)
+		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,visitor_visit_id,event_type,actor_user_id,lobby_id,method) VALUES($1,$2,'CHECKED_OUT',NULLIF($3,''),NULLIF($4,''),$5)`, visitID, in.VisitorVisitID, u.ID, in.LobbyID, in.Method)
 	}
 	if err == nil {
 		_, err = tx.Exec(r.Context(), `UPDATE visits SET status=CASE
@@ -1338,10 +1470,15 @@ func (s *Server) checkOut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "checkout_conflict", "현재 방문 중인 방문자가 아니거나 이미 퇴실했습니다")
 		return
 	}
+	s.metrics.checkOuts.Add(1)
 	s.audit(r.Context(), u.ID, "visit.checkout", "visitor_visit", in.VisitorVisitID, r.RemoteAddr, map[string]string{"visitId": visitID, "method": in.Method})
 	s.publishLobbyEvent("visitor.checked_out")
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// lobbyListLimit caps one lobby page. The query fetches one extra row so the
+// response can report that more visitors exist.
+const lobbyListLimit = 300
 
 func (s *Server) lobbyToday(w http.ResponseWriter, r *http.Request) {
 	s.lobbyList(w, r, false)
@@ -1357,16 +1494,18 @@ func (s *Server) lobbyList(w http.ResponseWriter, r *http.Request, current bool)
 	if current {
 		where = `vv.status='CHECKED_IN'`
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT vv.id,v.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),s.name,COALESCE(l.name,''),v.start_at,v.end_at,vv.status,vv.checked_in_at FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE `+where+` AND ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[])) ORDER BY COALESCE(vv.checked_in_at,v.start_at) DESC LIMIT 300`, u.Role, u.SiteScope)
+	rows, err := s.db.Query(r.Context(), `SELECT vv.id,v.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),s.name,COALESCE(l.name,''),v.start_at,v.end_at,vv.status,vv.checked_in_at FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE `+where+` AND ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[])) ORDER BY COALESCE(vv.checked_in_at,v.start_at) DESC LIMIT 301`, u.Role, u.SiteScope)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
 	defer rows.Close()
 	items := []map[string]any{}
+	scanned := 0
 	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	phoneSearch := normalizePhone(search)
 	for rows.Next() {
+		scanned++
 		var participantID, visitID, nameEnc, phoneEnc, company, host, department, site, lobby, status string
 		var start, end time.Time
 		var checkedIn *time.Time
@@ -1389,5 +1528,11 @@ func (s *Server) lobbyList(w http.ResponseWriter, r *http.Request, current bool)
 		FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites s ON s.id=v.site_id
 		WHERE ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[]))`, u.Role, u.SiteScope).Scan(&scheduled, &currentCount, &completed, &noShow)
 	counts := map[string]int{"scheduled": scheduled, "current": currentCount, "completed": completed, "noShow": noShow}
-	writeJSON(w, 200, map[string]any{"counts": counts, "items": items})
+	// The list is capped; say so instead of silently dropping rows the lobby
+	// operator would then look for in vain.
+	truncated := scanned > lobbyListLimit
+	if truncated && len(items) > lobbyListLimit {
+		items = items[:lobbyListLimit]
+	}
+	writeJSON(w, 200, map[string]any{"counts": counts, "items": items, "truncated": truncated, "limit": lobbyListLimit})
 }

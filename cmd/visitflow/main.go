@@ -61,6 +61,12 @@ func main() {
 		os.Exit(1)
 	}
 	service := app.NewServer(db, keyring, logger, webFS, version, commit, builtAt)
+	// Fail closed on a wrong or rotated key: continuing would write data the
+	// existing ciphertext can never be read with again.
+	if err := service.EnsureEncryptionKey(ctx); err != nil {
+		logger.Error("encryption key verification failed", "error", err)
+		os.Exit(1)
+	}
 	if err := service.EnsureBootstrapAdmin(ctx, cfg.BootstrapAdmin, cfg.BootstrapAdminPassword); err != nil {
 		logger.Error("bootstrap administrator failed", "error", err)
 		os.Exit(1)

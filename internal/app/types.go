@@ -23,6 +23,16 @@ type User struct {
 	LastLoginAt  *time.Time `json:"lastLoginAt,omitempty"`
 	DepartmentID *string    `json:"departmentId,omitempty"`
 	SiteScope    []string   `json:"siteScope,omitempty"`
+	// Delegate receives this user's approvals and arrival notifications while
+	// DelegateUntil is in the future.
+	DelegateUserID *string    `json:"delegateUserId,omitempty"`
+	DelegateUntil  *time.Time `json:"delegateUntil,omitempty"`
+}
+
+// HasActiveDelegate reports whether approvals and notifications should route to
+// the delegate right now.
+func (u User) HasActiveDelegate(now time.Time) bool {
+	return u.DelegateUserID != nil && *u.DelegateUserID != "" && u.DelegateUntil != nil && u.DelegateUntil.After(now)
 }
 
 func (u User) IsAdmin() bool { return u.Role == RoleAdmin || u.Role == RoleSuperAdmin }
@@ -51,21 +61,40 @@ type VisitorInput struct {
 	Title     string   `json:"title,omitempty"`
 	Vehicle   string   `json:"vehicle,omitempty"`
 	Equipment []string `json:"equipment,omitempty"`
+	Locale    string   `json:"locale,omitempty"`
 	Consent   bool     `json:"consent"`
 }
 
 type VisitInput struct {
-	SiteID       string         `json:"siteId"`
-	LobbyID      string         `json:"lobbyId,omitempty"`
-	DepartmentID string         `json:"departmentId,omitempty"`
-	HostUserID   string         `json:"hostUserId,omitempty"`
-	StartAt      time.Time      `json:"startAt"`
-	EndAt        time.Time      `json:"endAt"`
-	Purpose      string         `json:"purpose"`
-	PlaceDetail  string         `json:"placeDetail,omitempty"`
-	Notes        string         `json:"notes,omitempty"`
-	Visitors     []VisitorInput `json:"visitors"`
-	Recurrence   map[string]any `json:"recurrence,omitempty"`
+	SiteID       string          `json:"siteId"`
+	LobbyID      string          `json:"lobbyId,omitempty"`
+	DepartmentID string          `json:"departmentId,omitempty"`
+	HostUserID   string          `json:"hostUserId,omitempty"`
+	VisitTypeID  string          `json:"visitTypeId,omitempty"`
+	StartAt      time.Time       `json:"startAt"`
+	EndAt        time.Time       `json:"endAt"`
+	Purpose      string          `json:"purpose"`
+	PlaceDetail  string          `json:"placeDetail,omitempty"`
+	Notes        string          `json:"notes,omitempty"`
+	Visitors     []VisitorInput  `json:"visitors"`
+	Recurrence   map[string]any  `json:"recurrence,omitempty"`
+	Checklist    map[string]bool `json:"checklist,omitempty"`
+}
+
+// VisitType is the site's compliance profile for a kind of visit: which
+// declarations the requester must acknowledge and whether approval is forced.
+type VisitType struct {
+	ID                     string `json:"id"`
+	Code                   string `json:"code"`
+	Name                   string `json:"name"`
+	Description            string `json:"description,omitempty"`
+	RequiresNDA            bool   `json:"requiresNda"`
+	RequiresSafetyBriefing bool   `json:"requiresSafetyBriefing"`
+	RequiresVehicle        bool   `json:"requiresVehicle"`
+	RequiresEquipment      bool   `json:"requiresEquipment"`
+	RequiresApproval       bool   `json:"requiresApproval"`
+	Active                 bool   `json:"active"`
+	SortOrder              int    `json:"sortOrder"`
 }
 
 type VisitSummary struct {
@@ -85,6 +114,8 @@ type VisitSummary struct {
 	PlaceDetail    string    `json:"placeDetail,omitempty"`
 	Status         string    `json:"status"`
 	Source         string    `json:"source"`
+	VisitTypeID    *string   `json:"visitTypeId,omitempty"`
+	VisitTypeName  string    `json:"visitTypeName,omitempty"`
 	VisitorCount   int       `json:"visitorCount"`
 	PrimaryVisitor string    `json:"primaryVisitor"`
 	Company        string    `json:"company,omitempty"`
@@ -97,3 +128,4 @@ const userContextKey ctxKey = "user"
 const csrfContextKey ctxKey = "csrf"
 const apiScopesContextKey ctxKey = "api_scopes"
 const apiKeyAuthContextKey ctxKey = "api_key_auth"
+const kioskContextKey ctxKey = "kiosk_device"

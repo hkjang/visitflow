@@ -59,11 +59,11 @@ func mcpTools() []map[string]any {
 		return map[string]any{"type": "string", "description": description}
 	}
 	return []map[string]any{
-		{"name": "search_visits", "description": "권한 범위 안에서 방문번호, 회사, 담당자와 상태로 방문 일정을 검색합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": stringProperty("검색어"), "status": stringProperty("방문 상태 코드"), "period": map[string]any{"type": "string", "enum": []string{"today", "upcoming", "past"}}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}},
-		{"name": "get_today_visitors", "description": "오늘 방문 예정자를 개인정보 마스킹 상태로 조회합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}},
+		{"name": "search_visits", "description": "권한 범위 안에서 방문번호, 회사, 담당자와 상태로 방문 일정을 검색합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"query": stringProperty("검색어"), "status": stringProperty("방문 상태 코드"), "period": map[string]any{"type": "string", "enum": []string{"today", "upcoming", "past"}}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "cursor": stringProperty("이전 응답의 nextCursor")}}},
+		{"name": "get_today_visitors", "description": "오늘 방문 예정자를 개인정보 마스킹 상태로 조회합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "cursor": stringProperty("이전 응답의 nextCursor")}}},
 		{"name": "get_current_visitors", "description": "현재 체크인 후 퇴실하지 않은 방문자를 조회합니다. 로비 또는 관리자 권한이 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 		{"name": "get_visit", "description": "방문 ID 또는 방문번호로 상세 내용을 조회합니다. 전화번호는 마스킹됩니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"visit_id": stringProperty("방문 ID 또는 방문번호")}, "required": []string{"visit_id"}}},
-		{"name": "create_visit", "description": "개인 방문 신청을 등록합니다. write 범위가 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"site_id": stringProperty("사업장 ID"), "lobby_id": stringProperty("로비 ID"), "start_at": stringProperty("RFC3339 시작시간"), "end_at": stringProperty("RFC3339 종료시간"), "purpose": stringProperty("방문 목적"), "visitor_name": stringProperty("방문자 이름"), "visitor_phone": stringProperty("방문자 휴대전화"), "company": stringProperty("회사명"), "consent": map[string]any{"type": "boolean"}}, "required": []string{"site_id", "start_at", "end_at", "purpose", "visitor_name", "visitor_phone", "consent"}}},
+		{"name": "create_visit", "description": "개인 방문 신청을 등록합니다. write 범위가 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"site_id": stringProperty("사업장 ID"), "lobby_id": stringProperty("로비 ID"), "start_at": stringProperty("RFC3339 시작시간"), "end_at": stringProperty("RFC3339 종료시간"), "purpose": stringProperty("방문 목적"), "visitor_name": stringProperty("방문자 이름"), "visitor_phone": stringProperty("방문자 휴대전화"), "company": stringProperty("회사명"), "visit_type_id": stringProperty("방문 유형 ID"), "consent": map[string]any{"type": "boolean"}}, "required": []string{"site_id", "start_at", "end_at", "purpose", "visitor_name", "visitor_phone", "consent"}}},
 		{"name": "cancel_visit", "description": "본인이 신청한 취소 가능한 방문을 취소하고 QR을 즉시 폐기합니다. write 범위가 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"visit_id": stringProperty("방문 ID")}, "required": []string{"visit_id"}}},
 		{"name": "search_visitor_history", "description": "회사 기준 방문 이력을 조회합니다. 이름과 전화번호는 마스킹됩니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"company": stringProperty("회사명"), "months": map[string]any{"type": "integer", "minimum": 1, "maximum": 60}}, "required": []string{"company"}}},
 		{"name": "get_lobby_status", "description": "오늘 예정·현재 방문중·퇴실·미방문 집계를 조회합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
@@ -98,11 +98,11 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 	}
 	switch name {
 	case "search_visits":
-		items, err := s.queryVisits(r.Context(), u, stringArg(args, "status"), stringArg(args, "period"), stringArg(args, "query"), limit)
-		return map[string]any{"items": items}, err
+		items, nextCursor, err := s.queryVisits(r.Context(), u, visitQuery{Status: stringArg(args, "status"), Period: stringArg(args, "period"), Search: stringArg(args, "query"), Cursor: stringArg(args, "cursor"), Limit: limit})
+		return map[string]any{"items": items, "nextCursor": nextCursor, "hasMore": nextCursor != ""}, err
 	case "get_today_visitors":
-		items, err := s.queryVisits(r.Context(), u, "", "today", "", limit)
-		return map[string]any{"items": items}, err
+		items, nextCursor, err := s.queryVisits(r.Context(), u, visitQuery{Period: "today", Cursor: stringArg(args, "cursor"), Limit: limit})
+		return map[string]any{"items": items, "nextCursor": nextCursor, "hasMore": nextCursor != ""}, err
 	case "get_current_visitors":
 		if !u.CanManageLobby() && !u.CanAudit() {
 			return nil, errMCP("로비 또는 감사 권한이 필요합니다")
@@ -125,7 +125,7 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		if id == "" {
 			return nil, errMCP("visit_id는 필수입니다")
 		}
-		items, err := s.queryVisits(r.Context(), u, "", "", id, 5)
+		items, _, err := s.queryVisits(r.Context(), u, visitQuery{Search: id, Limit: 5})
 		if err != nil || len(items) == 0 {
 			return nil, errMCP("방문을 찾을 수 없습니다")
 		}
@@ -149,7 +149,7 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		if err1 != nil || err2 != nil {
 			return nil, errMCP("start_at과 end_at은 RFC3339 형식이어야 합니다")
 		}
-		input := VisitInput{SiteID: stringArg(args, "site_id"), LobbyID: stringArg(args, "lobby_id"), StartAt: start, EndAt: end, Purpose: stringArg(args, "purpose"), Visitors: []VisitorInput{{Name: stringArg(args, "visitor_name"), Phone: stringArg(args, "visitor_phone"), Company: stringArg(args, "company"), Consent: consent}}}
+		input := VisitInput{SiteID: stringArg(args, "site_id"), LobbyID: stringArg(args, "lobby_id"), VisitTypeID: stringArg(args, "visit_type_id"), StartAt: start, EndAt: end, Purpose: stringArg(args, "purpose"), Visitors: []VisitorInput{{Name: stringArg(args, "visitor_name"), Phone: stringArg(args, "visitor_phone"), Company: stringArg(args, "company"), Consent: consent}}}
 		return s.createVisitRecord(r.Context(), r, u, input, "mcp", false)
 	case "cancel_visit":
 		if !writeAllowed() {

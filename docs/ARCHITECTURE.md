@@ -1,7 +1,7 @@
 # VisitFlow 아키텍처
 
 ```text
-임직원 Web  관리자 Web  로비/키오스크  모바일 방문증  MCP Client
+임직원 Web  관리자 Web  로비/키오스크  모바일 방문증·사전등록  MCP Client
        └────────────── same-origin HTTPS ───────────────┘
                               │
                ┌──────────────▼──────────────┐
@@ -25,7 +25,13 @@
 - QR: `vfq_` 256-bit Random Token, HMAC 조회, 개인정보 미포함, 유효기간·1회 사용·폐기·회전
 - Dynamic QR: 관리자가 30~60초 주기를 설정하면 시간 Window HMAC 서명을 추가하고 현재/직전 Window만 허용
 - MMS QR JPEG: 외부 Gateway가 내려받은 이미지 안의 QR에는 별도 HMAC 정적 서명을 사용한다. 난수 파일 경로·유효기간·폐기 상태는 계속 검증하지만 Dynamic Window 예외이므로 이미지 URL을 메시지 Gateway 외에 노출하지 않는다.
-- 감사: 로그인, 방문 변경, QR 검증, 입·퇴실, 개인정보/Watch List 조회, 설정과 키 변경 기록
+- 로그인 잠금: IP와 계정별 실패 횟수를 `auth_throttle`에 저장해 재시작과 다중 노드에서도 유지하고, 임계값을 넘으면 설정 시간 동안 차단
+- 공개 엔드포인트: 로그인·모바일 방문증·QR 이미지·셀프 사전등록에 IP 단위 분당 요청 한도를 적용해 Token 열거 차단
+- 암호화 키 검증: 부팅 시 저장된 검증 암호문을 복호화해 `ENCRYPTION_KEY` 일치를 확인하고, 불일치면 기동을 중단
+- 키오스크 기기: `vfk_` 기기 토큰은 SameSite=Strict Cookie와 Double Submit CSRF로 동작하며 로비 Route Group에서만 인증된다
+- CSP: 요청마다 nonce를 발급해 Material UI가 주입하는 Style Element에만 허용하고, Script는 파일 Source만 허용
+- 동의 기록: 방문자 동의를 주체(담당자 대행/본인), 정책 버전, 언어, IP, User Agent와 함께 `consent_records`에 이벤트로 보관
+- 감사: 로그인, 방문 변경, QR 검증, 입·퇴실, 개인정보/Watch List 조회, 명단 조회, 내보내기, 설정과 키 변경 기록
 
 ## 상태와 트랜잭션
 
@@ -45,5 +51,9 @@ REQUESTED → PENDING_APPROVAL → SCHEDULED → CHECKED_IN → CHECKED_OUT
 - MMS Gateway는 인증 없이 `GET /img/visitor/{qrcode_file_seq}.jpg`를 가져갈 수 있다. 식별자는 추측하기 어려운 난수이며 폐기·만료·취소·반려·퇴실·미방문 QR은 같은 404 응답으로 차단한다. 참가자별 활성 QR은 partial unique index와 참가자 Row Lock으로 하나만 허용한다.
 - 사용자 가이드 글은 PostgreSQL에 저장하고 로그인 사용자에게 게시 글만 제공한다. 초안·등록·수정·삭제는 관리자 RBAC와 감사 로그 경계를 따른다.
 - SSE는 프로세스 내 Fan-out으로 로비 변경을 전달하고 DB가 Source of Truth 역할을 수행
-- Scheduler는 미방문, 자동 퇴실, Session 정리, 개인정보 파기와 감사 로그 보존을 수행
+- Scheduler는 미방문, 자동 퇴실, Session·잠금 정리, 만료 사전등록 링크 폐기, 승인 지연 에스컬레이션, 개인정보 파기와 감사 로그 보존을 수행
+- Migration은 `migrations/<version>_<name>.sql` 파일 단위로 각자의 트랜잭션에서 한 번만 적용하고 `schema_migrations`에 기록한다. `GET /readyz`는 적용 버전과 바이너리가 기대하는 버전을 함께 반환하고 불일치 시 503을 반환한다.
+- 목록은 커서(keyset) 페이지네이션을 사용해 새 방문이 생겨도 다음 페이지가 밀리지 않으며, 로비 목록은 한도를 넘으면 잘렸음을 응답에 표시한다.
+- 지표는 프로세스 카운터와 DB Gauge를 합쳐 관리자 화면과 토큰 보호 `/metrics`로 제공한다.
+- Service Worker는 비상 대피 명단만 오프라인 캐시하고 방문자 데이터가 담긴 다른 API 응답은 캐시하지 않는다.
 - 영속 백업 단위는 PostgreSQL + 별도 보관한 `ENCRYPTION_KEY`

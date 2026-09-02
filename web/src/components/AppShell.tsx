@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AppBar, Avatar, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, TextField, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
+import { Alert, AppBar, Avatar, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, TextField, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
 import MenuRounded from "@mui/icons-material/MenuRounded";
 import HomeRounded from "@mui/icons-material/HomeRounded";
 import AddCircleOutlineRounded from "@mui/icons-material/AddCircleOutlineRounded";
@@ -21,6 +21,7 @@ import InfoOutlined from "@mui/icons-material/InfoOutlined";
 import EditOutlined from "@mui/icons-material/EditOutlined";
 import HourglassTopRounded from "@mui/icons-material/HourglassTopRounded";
 import MenuBookRounded from "@mui/icons-material/MenuBookRounded";
+import ChecklistRounded from "@mui/icons-material/ChecklistRounded";
 import NotificationsActiveRounded from "@mui/icons-material/NotificationsActiveRounded";
 import { Logo } from "./Logo";
 import { useAuth } from "../auth";
@@ -51,6 +52,9 @@ export function AppShell() {
   const [profileName, setProfileName] = useState(user?.displayName ?? "");
   const [profilePhone, setProfilePhone] = useState("");
   const [profileDepartment, setProfileDepartment] = useState(user?.departmentId ?? "");
+  const [delegateUserId, setDelegateUserId] = useState(user?.delegateUserId ?? "");
+  const [delegateUntil, setDelegateUntil] = useState("");
+  const [profileError, setProfileError] = useState("");
   const [reference, setReference] = useState<ReferenceData | null>(null);
   const lobby = user && ["lobby", "security", "admin", "super_admin"].includes(user.role);
   const admin = user && ["admin", "super_admin"].includes(user.role);
@@ -69,6 +73,7 @@ export function AppShell() {
       { label: "Lobby Dashboard", path: "/lobby", icon: <SpaceDashboardRounded /> },
       { label: "QR Scan", path: "/lobby/scan", icon: <QrCodeScannerRounded /> },
       { label: "현장 방문 등록", path: "/lobby/walk-in", icon: <PersonAddAltRounded /> },
+      { label: "비상 대피 명단", path: "/lobby/roster", icon: <ChecklistRounded /> },
     ] : [];
     const adminItems: Nav[] = admin ? [
       { label: "관리 Dashboard", path: "/admin/dashboard", icon: <AdminPanelSettingsRounded /> },
@@ -76,6 +81,7 @@ export function AppShell() {
       { label: "조직 · 사업장", path: "/admin/resources", icon: <DomainRounded /> },
       { label: "통계 · 알림", path: "/admin/statistics", icon: <BarChartRounded /> },
       { label: "문자 API · 발송 규칙", path: "/admin/notification-settings", icon: <NotificationsActiveRounded /> },
+      { label: "방문 유형 · 키오스크", path: "/admin/operations", icon: <ChecklistRounded /> },
       { label: "사용자 가이드 관리", path: "/admin/guides", icon: <MenuBookRounded /> },
     ] : security ? [{ label: "방문 · Watch List", path: "/admin/visits", icon: <GroupsRounded /> }] : [];
     if (auditor) adminItems.push({ label: "Audit Log", path: "/admin/audit", icon: <PolicyRounded /> });
@@ -84,12 +90,24 @@ export function AppShell() {
   }, [admin, auditor, lobby, security, user]);
   const activeLabel = groups.flatMap((g) => g.items).find((x) => x.path === location.pathname)?.label ?? (location.pathname.startsWith("/admin/") ? "관리자" : "VisitFlow");
   const openProfile = async () => {
-    setProfileAnchor(null); setProfileName(user?.displayName ?? ""); setProfileDepartment(user?.departmentId ?? ""); setProfilePhone(""); setProfileOpen(true);
+    setProfileAnchor(null); setProfileName(user?.displayName ?? ""); setProfileDepartment(user?.departmentId ?? ""); setProfilePhone("");
+    setDelegateUserId(user?.delegateUserId ?? "");
+    setDelegateUntil(user?.delegateUntil ? new Date(user.delegateUntil).toISOString().slice(0, 16) : "");
+    setProfileError(""); setProfileOpen(true);
     if (!reference) setReference(await api<ReferenceData>("/api/v1/reference-data"));
   };
   const saveProfile = async () => {
-    await patchJSON("/api/v1/profile", { displayName: profileName, phone: profilePhone, departmentId: profileDepartment });
-    setProfileOpen(false); await reload();
+    setProfileError("");
+    try {
+      await patchJSON("/api/v1/profile", {
+        displayName: profileName, phone: profilePhone, departmentId: profileDepartment,
+        delegateUserId: delegateUserId,
+        delegateUntil: delegateUserId && delegateUntil ? new Date(delegateUntil).toISOString() : "",
+      });
+      setProfileOpen(false); await reload();
+    } catch (e) {
+      setProfileError(e instanceof Error ? e.message : "프로필을 저장하지 못했습니다");
+    }
   };
   const drawer = (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
@@ -115,7 +133,11 @@ export function AppShell() {
         <MenuItem disabled><InfoOutlined fontSize="small" sx={{ mr: 1.5 }} /><Box><Typography variant="body2">{config?.serviceName ?? "VisitFlow"} v{version?.version ?? "dev"}</Typography><Typography variant="caption" color="text.secondary">commit {version?.commit?.slice(0, 12) ?? "unknown"}</Typography></Box></MenuItem>
         <Divider /><MenuItem onClick={() => void logout()}><LogoutRounded fontSize="small" sx={{ mr: 1.5 }} />로그아웃</MenuItem>
       </Menu>
-      <Dialog open={profileOpen} onClose={() => setProfileOpen(false)} fullWidth maxWidth="sm"><DialogTitle>프로필 · 도착 알림 연락처</DialogTitle><DialogContent><Stack spacing={2} mt={1}><TextField label="표시 이름" value={profileName} onChange={(e) => setProfileName(e.target.value)} /><TextField label="휴대전화" value={profilePhone} onChange={(e) => setProfilePhone(e.target.value)} placeholder="010-0000-0000" helperText="방문자 체크인 시 담당자 SMS 알림에 사용하며 암호화 저장됩니다. 비워 두면 기존 연락처가 삭제됩니다." /><TextField select label="소속 부서" value={profileDepartment} onChange={(e) => setProfileDepartment(e.target.value)}><MenuItem value="">미지정</MenuItem>{reference?.departments.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField></Stack></DialogContent><DialogActions><Button onClick={() => setProfileOpen(false)}>취소</Button><Button variant="contained" disabled={!profileName} onClick={() => void saveProfile()}>저장</Button></DialogActions></Dialog>
+      <Dialog open={profileOpen} onClose={() => setProfileOpen(false)} fullWidth maxWidth="sm"><DialogTitle>프로필 · 도착 알림 연락처</DialogTitle><DialogContent><Stack spacing={2} mt={1}><TextField label="표시 이름" value={profileName} onChange={(e) => setProfileName(e.target.value)} /><TextField label="휴대전화" value={profilePhone} onChange={(e) => setProfilePhone(e.target.value)} placeholder="010-0000-0000" helperText="방문자 체크인 시 담당자 SMS 알림에 사용하며 암호화 저장됩니다. 비워 두면 기존 연락처가 삭제됩니다." /><TextField select label="소속 부서" value={profileDepartment} onChange={(e) => setProfileDepartment(e.target.value)}><MenuItem value="">미지정</MenuItem>{reference?.departments.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
+      <Divider textAlign="left"><Typography variant="caption" color="text.secondary">부재 시 대리 담당자</Typography></Divider>
+      <TextField select label="대리 담당자" value={delegateUserId} onChange={(e) => setDelegateUserId(e.target.value)} helperText="지정 기간 동안 방문 승인과 도착 알림이 대리 담당자에게 전달됩니다."><MenuItem value="">지정 안 함</MenuItem>{(reference?.hosts ?? []).filter((x) => x.id !== user?.id).map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
+      {delegateUserId && <TextField type="datetime-local" label="대리 종료 시각" value={delegateUntil} onChange={(e) => setDelegateUntil(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />}
+      {profileError && <Alert severity="error">{profileError}</Alert>}</Stack></DialogContent><DialogActions><Button onClick={() => setProfileOpen(false)}>취소</Button><Button variant="contained" disabled={!profileName || (Boolean(delegateUserId) && !delegateUntil)} onClick={() => void saveProfile()}>저장</Button></DialogActions></Dialog>
     </Box>
   );
 }

@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"path"
 	"runtime/debug"
@@ -18,25 +20,38 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/hkjang/visitflow/internal/database"
 	"github.com/hkjang/visitflow/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Server struct {
-	db       *pgxpool.Pool
-	keys     *platform.Keyring
-	logger   *slog.Logger
-	webFS    fs.FS
-	version  string
-	commit   string
-	builtAt  string
-	eventsMu sync.RWMutex
-	events   map[chan string]struct{}
+	db            *pgxpool.Pool
+	keys          *platform.Keyring
+	logger        *slog.Logger
+	webFS         fs.FS
+	version       string
+	commit        string
+	builtAt       string
+	eventsMu      sync.RWMutex
+	events        map[chan string]struct{}
+	publicLimiter *rateLimiter
+	metrics       *serverMetrics
+
+	limitCacheMu      sync.Mutex
+	limitCacheValue   int
+	limitCacheExpires time.Time
 }
 
 func NewServer(db *pgxpool.Pool, keys *platform.Keyring, logger *slog.Logger, webFS fs.FS, version, commit, builtAt string) *Server {
-	return &Server{db: db, keys: keys, logger: logger, webFS: webFS, version: version, commit: commit, builtAt: builtAt, events: make(map[chan string]struct{})}
+	return &Server{
+		db: db, keys: keys, logger: logger, webFS: webFS,
+		version: version, commit: commit, builtAt: builtAt,
+		events:        make(map[chan string]struct{}),
+		publicLimiter: newRateLimiter(time.Minute),
+		metrics:       newServerMetrics(),
+	}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -46,17 +61,40 @@ func (s *Server) Routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	r.Get("/readyz", s.ready)
-	r.Get("/img/visitor/{qrcode_file_seq}.jpg", s.publicVisitorQRJPEG)
-	r.Head("/img/visitor/{qrcode_file_seq}.jpg", s.publicVisitorQRJPEG)
+	r.Get("/metrics", s.prometheusMetrics)
+	r.With(s.publicRateLimit("qr-image")).Get("/img/visitor/{qrcode_file_seq}.jpg", s.publicVisitorQRJPEG)
+	r.With(s.publicRateLimit("qr-image")).Head("/img/visitor/{qrcode_file_seq}.jpg", s.publicVisitorQRJPEG)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/version", s.versionInfo)
 		r.Get("/auth/config", s.authConfig)
-		r.Post("/auth/login", s.localLogin)
+		r.With(s.publicRateLimit("login")).Post("/auth/login", s.localLogin)
 		r.Get("/auth/oidc/start", s.oidcStart)
 		r.Get("/auth/oidc/callback", s.oidcCallback)
 		r.Get("/openapi.json", s.openAPI)
-		r.Get("/public/passes/{token}", s.publicPass)
-		r.Get("/public/passes/{token}/qr.png", s.publicPassQR)
+		r.Group(func(r chi.Router) {
+			r.Use(s.publicRateLimit("pass"))
+			r.Get("/public/passes/{token}", s.publicPass)
+			r.Get("/public/passes/{token}/qr.png", s.publicPassQR)
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(s.publicRateLimit("registration"))
+			r.Get("/public/registrations/{token}", s.publicRegistration)
+			r.Post("/public/registrations/{token}", s.submitPublicRegistration)
+		})
+		r.With(s.publicRateLimit("kiosk")).Post("/kiosk/enroll", s.enrollKiosk)
+		// Lobby endpoints authenticate with either a staff session or a kiosk
+		// device cookie, so an unattended tablet never needs a person's login.
+		r.Group(func(r chi.Router) {
+			r.Use(s.authenticateLobby, s.requireLobby)
+			r.Get("/lobby/today", s.lobbyToday)
+			r.Get("/lobby/current", s.lobbyCurrent)
+			r.Get("/lobby/roster", s.emergencyRoster)
+			r.Get("/lobby/stream", s.lobbyStream)
+			r.Post("/lobby/walk-ins", s.createWalkIn)
+			r.Post("/qr/verify", s.verifyQR)
+			r.Post("/checkins", s.checkIn)
+			r.Post("/checkouts", s.checkOut)
+		})
 		r.Group(func(r chi.Router) {
 			r.Use(s.authenticate)
 			r.Get("/auth/me", s.me)
@@ -75,6 +113,8 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/visits/{visitID}/reject", s.rejectVisit)
 			r.Post("/visits/{visitID}/notifications/resend", s.resendVisitNotification)
 			r.Post("/visitor-visits/{visitorVisitID}/qr/reissue", s.reissueQR)
+			r.Post("/visitor-visits/{visitorVisitID}/invitation", s.createRegistrationInvitation)
+			r.Delete("/visitor-visits/{visitorVisitID}/invitation", s.revokeRegistrationInvitation)
 			r.Get("/visit-templates", s.listVisitTemplates)
 			r.Post("/visit-templates", s.createVisitTemplate)
 			r.Get("/visit-templates/{templateID}", s.getVisitTemplate)
@@ -93,22 +133,14 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/api-keys/{keyID}/rotate", s.rotateAPIKey)
 			r.Delete("/api-keys/{keyID}", s.revokeAPIKey)
 			r.Group(func(r chi.Router) {
-				r.Use(s.requireLobby)
-				r.Get("/lobby/today", s.lobbyToday)
-				r.Get("/lobby/current", s.lobbyCurrent)
-				r.Get("/lobby/stream", s.lobbyStream)
-				r.Post("/lobby/walk-ins", s.createWalkIn)
-				r.Post("/qr/verify", s.verifyQR)
-				r.Post("/checkins", s.checkIn)
-				r.Post("/checkouts", s.checkOut)
-			})
-			r.Group(func(r chi.Router) {
 				r.Use(s.requireAudit)
 				r.Get("/admin/audit-logs", s.auditLogs)
+				r.Get("/admin/audit-logs.csv", s.exportAuditLogsCSV)
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(s.requireSecurity)
 				r.Get("/admin/visitors", s.listVisitors)
+				r.Get("/admin/visits.csv", s.exportVisitsCSV)
 				r.Get("/admin/watchlist", s.listWatchlist)
 				r.Post("/admin/watchlist", s.createWatchlist)
 				r.Delete("/admin/watchlist/{entryID}", s.deleteWatchlist)
@@ -116,8 +148,13 @@ func (s *Server) Routes() http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(s.requireAdmin)
 				r.Get("/admin/dashboard", s.adminDashboard)
+				r.Get("/admin/metrics", s.adminMetrics)
 				r.Get("/admin/statistics", s.statistics)
+				r.Get("/admin/statistics.csv", s.exportStatisticsCSV)
 				r.Get("/admin/notifications", s.listNotifications)
+				r.Post("/admin/notifications/retry-failed", s.retryFailedNotifications)
+				r.Post("/admin/notifications/{notificationID}/retry", s.retryNotification)
+				r.Post("/admin/notifications/{notificationID}/cancel", s.cancelNotification)
 				r.Get("/admin/notification-apis", s.listNotificationAPIs)
 				r.Post("/admin/notification-apis", s.createNotificationAPI)
 				r.Put("/admin/notification-apis/{apiID}", s.updateNotificationAPI)
@@ -131,6 +168,13 @@ func (s *Server) Routes() http.Handler {
 				r.Post("/admin/sites", s.upsertSite)
 				r.Post("/admin/lobbies", s.upsertLobby)
 				r.Post("/admin/organizations", s.upsertDepartment)
+				r.Get("/admin/visit-types", s.listVisitTypes)
+				r.Post("/admin/visit-types", s.upsertVisitType)
+				r.Put("/admin/visit-types/{visitTypeID}", s.upsertVisitType)
+				r.Delete("/admin/visit-types/{visitTypeID}", s.deleteVisitType)
+				r.Get("/admin/kiosk-devices", s.listKioskDevices)
+				r.Post("/admin/kiosk-devices", s.createKioskDevice)
+				r.Delete("/admin/kiosk-devices/{deviceID}", s.revokeKioskDevice)
 				r.Get("/admin/guides", s.listAdminGuides)
 				r.Post("/admin/guides", s.createGuide)
 				r.Put("/admin/guides/{guideID}", s.updateGuide)
@@ -146,22 +190,48 @@ func (s *Server) Routes() http.Handler {
 	return r
 }
 
+type cspNonceKey struct{}
+
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonceBytes := make([]byte, 16)
+		if _, err := rand.Read(nonceBytes); err != nil {
+			s.logger.Error("csp nonce generation failed", "error", err)
+		}
+		nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
-		next.ServeHTTP(w, r)
+		w.Header().Set("Content-Security-Policy", contentSecurityPolicy(nonce))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), cspNonceKey{}, nonce)))
 	})
+}
+
+// contentSecurityPolicy nonces the stylesheets Material UI injects at runtime
+// instead of allowing every inline style. Style attributes stay allowed because
+// MUI transitions and layout primitives set them per element.
+func contentSecurityPolicy(nonce string) string {
+	styleElem := "'self'"
+	if nonce != "" {
+		styleElem = "'self' 'nonce-" + nonce + "'"
+	}
+	return "default-src 'self'; img-src 'self' data: blob:; style-src " + styleElem +
+		"; style-src-elem " + styleElem + "; style-src-attr 'unsafe-inline'; script-src 'self'; connect-src 'self'; " +
+		"worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 }
 
 func (s *Server) accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds(), "request_id", middleware.GetReqID(r.Context()))
+		recorder := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.metrics.observeStatus(status)
+		s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", time.Since(start).Milliseconds(), "request_id", middleware.GetReqID(r.Context()))
 	})
 }
 
@@ -178,23 +248,46 @@ func (s *Server) recoverer(next http.Handler) http.Handler {
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	if err := s.db.Ping(ctx); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "데이터베이스 연결을 확인하세요")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	applied, err := database.SchemaVersion(ctx, s.db)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "schema_unavailable", "스키마 버전을 확인하지 못했습니다")
+		return
+	}
+	expected := database.ExpectedSchemaVersion()
+	status := "ready"
+	code := http.StatusOK
+	if applied < expected {
+		status, code = "migration_pending", http.StatusServiceUnavailable
+	}
+	var backlog, oldestSeconds int
+	_ = s.db.QueryRow(ctx, `SELECT count(*),COALESCE(EXTRACT(EPOCH FROM now()-min(next_attempt_at))::int,0)
+		FROM notifications WHERE status IN ('queued','failed') AND next_attempt_at<=now()`).Scan(&backlog, &oldestSeconds)
+	writeJSON(w, code, map[string]any{
+		"status": status, "schemaVersion": applied, "expectedSchemaVersion": expected,
+		"encryptionKey": "verified", "notificationBacklog": backlog, "notificationOldestSeconds": oldestSeconds,
+	})
 }
 
 func (s *Server) versionInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"name": "VisitFlow", "version": s.version, "commit": s.commit, "builtAt": s.builtAt})
 }
 
+func init() {
+	// Go's built-in table has no entry for .webmanifest, and a PWA manifest
+	// served as text/plain is ignored by browsers.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
+
 func (s *Server) spaHandler() http.Handler {
 	assets := http.FileServer(http.FS(s.webFS))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/img/") || r.URL.Path == "/mcp" {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/img/") || r.URL.Path == "/mcp" || r.URL.Path == "/metrics" {
 			http.NotFound(w, r)
 			return
 		}
@@ -211,9 +304,32 @@ func (s *Server) spaHandler() http.Handler {
 			writeError(w, http.StatusServiceUnavailable, "ui_unavailable", "UI 빌드가 포함되지 않았습니다")
 			return
 		}
+		nonce, _ := r.Context().Value(cspNonceKey{}).(string)
+		document, injected := injectCSPNonce(string(b), nonce)
+		if !injected {
+			// Without the meta tag the UI cannot nonce its runtime stylesheets,
+			// so fall back rather than serving an unstyled page.
+			w.Header().Set("Content-Security-Policy", strings.ReplaceAll(contentSecurityPolicy(""), "style-src 'self'", "style-src 'self' 'unsafe-inline'"))
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(b)
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(document))
 	})
+}
+
+// injectCSPNonce publishes the request nonce to the SPA, which hands it to the
+// Material UI style cache so every injected <style> carries it.
+func injectCSPNonce(document, nonce string) (string, bool) {
+	if nonce == "" {
+		return document, false
+	}
+	index := strings.Index(strings.ToLower(document), "<head>")
+	if index < 0 {
+		return document, false
+	}
+	insertAt := index + len("<head>")
+	meta := `<meta property="csp-nonce" content="` + nonce + `">`
+	return document[:insertAt] + meta + document[insertAt:], true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

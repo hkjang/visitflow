@@ -239,10 +239,12 @@ func (s *Server) dispatchClaimedNotification(parent context.Context, item notifi
 	resultCtx, cancelResult := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	var tag pgconn.CommandTag
 	if sendErr != nil {
+		s.metrics.notificationsFailed.Add(1)
 		tag, err = tx.Exec(resultCtx, `UPDATE notifications
 			SET status='failed',error=$2,next_attempt_at=now()+(LEAST(attempts,5)*interval '5 minutes'),claimed_at=NULL,claim_token=NULL
 			WHERE id=$1 AND status='sending' AND claim_token=$3`, item.id, truncateNotificationError(sendErr.Error(), 500), item.claimToken)
 	} else {
+		s.metrics.notificationsSent.Add(1)
 		tag, err = tx.Exec(resultCtx, `UPDATE notifications
 			SET status='sent',sent_at=now(),error=NULL,provider_message_id=NULLIF($2,''),claimed_at=NULL,claim_token=NULL
 			WHERE id=$1 AND status='sending' AND claim_token=$3`, item.id, messageID, item.claimToken)
@@ -312,6 +314,68 @@ func (s *Server) runVisitMaintenance(ctx context.Context) {
 		}
 	}
 	_, _ = s.db.Exec(ctx, `DELETE FROM sessions WHERE expires_at<now(); DELETE FROM oidc_states WHERE expires_at<now();`)
+	// Throttle rows outlive their lockout only to keep the failure window; drop
+	// them once both have passed so the table stays small.
+	_, _ = s.db.Exec(ctx, `DELETE FROM auth_throttle WHERE last_failure_at<now()-interval '1 day' AND (locked_until IS NULL OR locked_until<now())`)
+	_, _ = s.db.Exec(ctx, `UPDATE registration_invitations SET revoked_at=now() WHERE completed_at IS NULL AND revoked_at IS NULL AND expires_at<now()`)
+	s.publicLimiter.cleanup(time.Now())
+	if err := s.runApprovalEscalation(ctx); err != nil {
+		s.logger.Error("approval escalation failed", "error", err)
+	}
+}
+
+// runApprovalEscalation raises visits that have waited too long for a decision.
+// Each visit escalates once, so a stalled queue produces one notification per
+// visit rather than a repeating alarm every maintenance tick.
+func (s *Server) runApprovalEscalation(ctx context.Context) error {
+	hours, _ := strconv.Atoi(settingOr(s, ctx, "visit.approval_escalation_hours", "24"))
+	if hours < 1 || hours > 8760 {
+		return nil
+	}
+	type pendingVisit struct{ visitID, participantID string }
+	pending := []pendingVisit{}
+	rows, err := s.db.Query(ctx, `SELECT v.id,vv.id FROM visits v
+		JOIN LATERAL (SELECT id FROM visitor_visits WHERE visit_id=v.id ORDER BY is_primary DESC,created_at LIMIT 1) vv ON true
+		WHERE v.status='PENDING_APPROVAL' AND v.escalated_at IS NULL AND v.created_at<now()-($1::int*interval '1 hour')
+		ORDER BY v.created_at LIMIT 200`, hours)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var item pendingVisit
+		if err := rows.Scan(&item.visitID, &item.participantID); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range pending {
+		tx, beginErr := s.db.Begin(ctx)
+		if beginErr != nil {
+			return beginErr
+		}
+		tag, execErr := tx.Exec(ctx, `UPDATE visits SET escalated_at=now(),updated_at=now() WHERE id=$1 AND status='PENDING_APPROVAL' AND escalated_at IS NULL`, item.visitID)
+		if execErr == nil && tag.RowsAffected() == 1 {
+			execErr = s.queueNotificationEventTx(ctx, tx, item.visitID, item.participantID, "approval_escalated", time.Now())
+		}
+		if execErr != nil {
+			_ = tx.Rollback(ctx)
+			return execErr
+		}
+		if tag.RowsAffected() == 1 {
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return commitErr
+			}
+			s.audit(ctx, "", "visit.approval_escalated", "visit", item.visitID, "background", map[string]any{"afterHours": hours})
+			continue
+		}
+		_ = tx.Rollback(ctx)
+	}
+	return nil
 }
 
 type automaticCheckoutItem struct {

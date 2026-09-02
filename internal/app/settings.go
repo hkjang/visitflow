@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"sort"
@@ -12,6 +13,9 @@ import (
 )
 
 func (s *Server) getSetting(ctx context.Context, key string) (string, error) {
+	if s.db == nil {
+		return "", errors.New("database is not configured")
+	}
 	var value string
 	var secret bool
 	err := s.db.QueryRow(ctx, `SELECT value,secret FROM settings WHERE key=$1`, key).Scan(&value, &secret)
@@ -25,7 +29,8 @@ func (s *Server) getSetting(ctx context.Context, key string) (string, error) {
 }
 
 func (s *Server) listSettings(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT key,value,secret FROM settings ORDER BY key`)
+	// security.key_check is an internal canary, not an operator setting.
+	rows, err := s.db.Query(r.Context(), `SELECT key,value,secret FROM settings WHERE key<>'security.key_check' ORDER BY key`)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -75,6 +80,14 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if effective("oidc.enabled") == "true" && (effective("oidc.issuer_url") == "" || effective("oidc.client_id") == "" || effective("oidc.client_secret") == "") {
 		writeError(w, http.StatusBadRequest, "oidc_incomplete", "SSO 활성화에는 Issuer URL, Client ID, Client Secret이 필요합니다")
+		return
+	}
+	supported := map[string]bool{}
+	for _, locale := range strings.Fields(effective("general.supported_locales")) {
+		supported[normalizeLocale(locale)] = true
+	}
+	if defaultLocale := normalizeLocale(effective("general.default_locale")); defaultLocale != "" && len(supported) > 0 && !supported[defaultLocale] {
+		writeError(w, http.StatusBadRequest, "locale_not_supported", "기본 언어는 지원 언어 목록에 포함되어야 합니다")
 		return
 	}
 	maskDays, _ := strconv.Atoi(effective("privacy.mask_after_days"))
@@ -147,9 +160,13 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateSettingValue(key, value string) string {
+	if key == "security.key_check" {
+		return "암호화 키 검증 값은 변경할 수 없습니다"
+	}
 	booleans := map[string]bool{
 		"auth.local_enabled": true, "oidc.enabled": true, "oidc.auto_provision": true,
 		"visit.approval_enabled": true, "visit.single_use_qr": true, "visit.company_required": true,
+		"visit.self_registration_enabled": true,
 	}
 	if booleans[key] && value != "true" && value != "false" {
 		return key + " 값은 true 또는 false여야 합니다"
@@ -160,6 +177,9 @@ func validateSettingValue(key, value string) string {
 		"visit.early_checkin_minutes": {0, 1440}, "visit.late_grace_minutes": {0, 1440},
 		"visit.auto_checkout_hour": {0, 23}, "privacy.mask_after_days": {1, 3650},
 		"privacy.destroy_after_days": {2, 7300}, "privacy.audit_retention_days": {1, 7300},
+		"security.login_max_attempts": {1, 100}, "security.login_lockout_minutes": {1, 1440},
+		"security.public_rate_limit_per_minute": {1, 100000},
+		"visit.approval_escalation_hours":       {1, 8760}, "visit.self_registration_hours": {1, 720},
 	}
 	if bounds, ok := ranges[key]; ok {
 		n, err := strconv.Atoi(value)
@@ -172,6 +192,23 @@ func validateSettingValue(key, value string) string {
 		if err != nil || (n != 0 && (n < 30 || n > 60)) {
 			return "Dynamic QR 주기는 0(비활성) 또는 30~60초여야 합니다"
 		}
+	}
+	if key == "general.default_locale" && value != "" && normalizeLocale(value) == "" {
+		return "기본 언어는 ko, en, ja, zh 중 하나여야 합니다"
+	}
+	if key == "general.supported_locales" {
+		parts := strings.Fields(value)
+		if len(parts) == 0 {
+			return "지원 언어는 하나 이상 입력해야 합니다"
+		}
+		for _, locale := range parts {
+			if normalizeLocale(locale) == "" {
+				return "지원하지 않는 언어 코드입니다: " + locale
+			}
+		}
+	}
+	if key == "privacy.consent_policy_version" && (value == "" || len(value) > 32) {
+		return "동의 정책 버전은 1~32자로 입력하세요"
 	}
 	if key == "notification.provider" && value != "log" && value != "webhook" {
 		return "알림 Provider는 log 또는 webhook이어야 합니다"

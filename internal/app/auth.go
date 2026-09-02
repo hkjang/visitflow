@@ -59,13 +59,25 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	username := strings.TrimSpace(in.Username)
+	throttleKeys := loginThrottleKeys(clientIP(r), username)
+	if remaining := s.loginLock(r.Context(), throttleKeys); remaining > 0 {
+		s.metrics.loginLockouts.Add(1)
+		s.audit(r.Context(), "", "auth.login_locked", "user", "", r.RemoteAddr, map[string]string{"username": username})
+		w.Header().Set("Retry-After", strconv.Itoa(int(remaining.Seconds())+1))
+		writeError(w, http.StatusTooManyRequests, "login_locked",
+			fmt.Sprintf("로그인 시도가 많아 %d분 동안 잠겼습니다", int(remaining.Minutes())+1))
+		return
+	}
 	var hash string
-	u, err := scanUser(s.db.QueryRow(r.Context(), `SELECT id,username,display_name,COALESCE(email,''),employee_id,role,source,last_login_at FROM users WHERE lower(username)=lower($1) AND active=true`, strings.TrimSpace(in.Username)))
+	u, err := scanUser(s.db.QueryRow(r.Context(), `SELECT id,username,display_name,COALESCE(email,''),employee_id,role,source,last_login_at FROM users WHERE lower(username)=lower($1) AND active=true`, username))
 	if err == nil {
 		err = s.db.QueryRow(r.Context(), `SELECT COALESCE(password_hash,'') FROM users WHERE id=$1`, u.ID).Scan(&hash)
 	}
 	if err != nil || hash == "" || bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
-		s.audit(r.Context(), "", "auth.login_failed", "user", "", r.RemoteAddr, map[string]string{"source": "local", "username": strings.TrimSpace(in.Username)})
+		s.metrics.loginFailures.Add(1)
+		s.recordLoginFailure(r.Context(), throttleKeys)
+		s.audit(r.Context(), "", "auth.login_failed", "user", "", r.RemoteAddr, map[string]string{"source": "local", "username": username})
 		time.Sleep(250 * time.Millisecond)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "아이디 또는 비밀번호를 확인하세요")
 		return
@@ -74,8 +86,20 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "session_error", "로그인 세션을 만들지 못했습니다")
 		return
 	}
+	s.clearLoginFailures(r.Context(), throttleKeys)
 	s.audit(r.Context(), u.ID, "auth.login", "user", u.ID, r.RemoteAddr, map[string]string{"source": "local"})
 	writeJSON(w, http.StatusOK, u)
+}
+
+// loginThrottleKeys counts a failure against both the source address and the
+// account, so neither password spraying across accounts nor a targeted attack
+// from many addresses slips past a single counter.
+func loginThrottleKeys(ip, username string) []string {
+	keys := []string{"ip:" + ip}
+	if username != "" {
+		keys = append(keys, "user:"+strings.ToLower(username))
+	}
+	return keys
 }
 
 func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, u User) error {
@@ -107,11 +131,34 @@ func requestIsHTTPS(r *http.Request) bool {
 }
 
 func (s *Server) authenticate(next http.Handler) http.Handler {
+	return s.authenticated(next, false)
+}
+
+// authenticateLobby additionally accepts an enrolled kiosk device cookie. Only
+// the lobby route group uses it, so a device token can never reach personal,
+// admin or audit endpoints.
+func (s *Server) authenticateLobby(next http.Handler) http.Handler {
+	return s.authenticated(next, true)
+}
+
+func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var u User
 		var csrf string
 		var apiScopes []string
 		apiKeyAuth := false
+		if allowKiosk {
+			if device, found := s.kioskFromRequest(r); found {
+				if !kioskCSRFValid(r) {
+					writeError(w, http.StatusForbidden, "csrf_failed", "키오스크 보안 토큰이 유효하지 않습니다")
+					return
+				}
+				ctx := context.WithValue(r.Context(), userContextKey, device.user())
+				ctx = context.WithValue(ctx, kioskContextKey, device)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+		}
 		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 			if strings.HasPrefix(raw, "vf_") {
@@ -240,7 +287,8 @@ func (s *Server) loadUserScope(ctx context.Context, u *User) {
 	if u == nil || u.ID == "" {
 		return
 	}
-	_ = s.db.QueryRow(ctx, `SELECT department_id,site_scope FROM users WHERE id=$1`, u.ID).Scan(&u.DepartmentID, &u.SiteScope)
+	_ = s.db.QueryRow(ctx, `SELECT department_id,site_scope,delegate_user_id,delegate_until FROM users WHERE id=$1`, u.ID).
+		Scan(&u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil)
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {

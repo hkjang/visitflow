@@ -27,11 +27,21 @@ var (
 	errNotificationAPIDisabled  = errors.New("선택한 문자 API가 비활성화되었습니다")
 )
 
+// notificationChannels covers both messaging and the generic 'webhook' channel
+// used to drive gates, guest Wi-Fi and other systems from the same adapter.
+var notificationChannels = map[string]bool{"sms": true, "mms": true, "kakao": true, "webhook": true}
+
+var notificationEvents = map[string]bool{
+	"visit_confirmed": true, "visit_start": true, "checked_in": true,
+	"checked_out": true, "visit_cancelled": true, "approval_escalated": true,
+}
+
 var notificationTemplateKeys = map[string]bool{
 	"recipient": true, "message": true, "channel": true, "idempotencyKey": true, "notificationId": true,
 	"company": true, "visitorCompany": true, "visitor": true, "host": true, "start": true, "end": true,
 	"place": true, "lobby": true, "checkedIn": true, "checkedOut": true, "requestNo": true,
 	"passUrl": true, "qrcodeFileSeq": true, "qrcodePath": true, "qrcodeUrl": true, "visitId": true, "visitorVisitId": true,
+	"locale": true, "visitType": true, "badgeNo": true, "siteCode": true, "delegate": true,
 }
 
 type notificationAPIInput struct {
@@ -74,6 +84,7 @@ type notificationRuleInput struct {
 	OffsetMinutes int    `json:"offsetMinutes"`
 	TemplateKey   string `json:"templateKey"`
 	BodyTemplate  string `json:"bodyTemplate"`
+	Locale        string `json:"locale"`
 	Enabled       *bool  `json:"enabled"`
 }
 
@@ -88,6 +99,7 @@ type notificationRule struct {
 	OffsetMinutes int       `json:"offsetMinutes"`
 	TemplateKey   string    `json:"templateKey"`
 	BodyTemplate  string    `json:"bodyTemplate"`
+	Locale        string    `json:"locale"`
 	Enabled       bool      `json:"enabled"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
@@ -151,8 +163,8 @@ func validateNotificationAPIInput(in notificationAPIInput) string {
 	if in.Name == "" || len(in.Name) > 100 {
 		return "API 이름은 1~100자로 입력하세요"
 	}
-	if in.Channel != "sms" && in.Channel != "mms" && in.Channel != "kakao" {
-		return "채널은 sms, mms, kakao 중 하나여야 합니다"
+	if !notificationChannels[in.Channel] {
+		return "채널은 sms, mms, kakao, webhook 중 하나여야 합니다"
 	}
 	parsed, err := url.Parse(in.BaseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -220,22 +232,30 @@ func normalizeNotificationRuleInput(in *notificationRuleInput) {
 	in.APIConfigID = strings.TrimSpace(in.APIConfigID)
 	in.TemplateKey = strings.ToLower(strings.TrimSpace(in.TemplateKey))
 	in.BodyTemplate = strings.TrimSpace(in.BodyTemplate)
+	in.Locale = strings.ToLower(strings.TrimSpace(in.Locale))
 }
 
 func validateNotificationRuleInput(in notificationRuleInput) string {
 	if in.Name == "" || len(in.Name) > 100 {
 		return "규칙 이름은 1~100자로 입력하세요"
 	}
-	switch in.Event {
-	case "visit_confirmed", "visit_start", "checked_in", "checked_out", "visit_cancelled":
-	default:
+	if !notificationEvents[in.Event] {
 		return "지원하지 않는 발송 시점입니다"
 	}
-	if in.Audience != "visitor" && in.Audience != "host" {
-		return "수신 대상은 visitor 또는 host여야 합니다"
+	if in.Audience != "visitor" && in.Audience != "host" && in.Audience != "system" {
+		return "수신 대상은 visitor, host 또는 system이어야 합니다"
 	}
-	if in.Channel != "sms" && in.Channel != "mms" && in.Channel != "kakao" {
-		return "채널은 sms, mms, kakao 중 하나여야 합니다"
+	if !notificationChannels[in.Channel] {
+		return "채널은 sms, mms, kakao, webhook 중 하나여야 합니다"
+	}
+	if in.Audience == "system" && in.Channel != "webhook" {
+		return "system 대상 규칙은 webhook 채널을 사용해야 합니다"
+	}
+	if in.Audience == "system" && in.APIConfigID == "" {
+		return "system 대상 규칙에는 호출할 외부 API를 선택해야 합니다"
+	}
+	if in.Locale != "" && normalizeLocale(in.Locale) == "" {
+		return "지원하지 않는 언어 코드입니다"
 	}
 	if in.OffsetMinutes < -10080 || in.OffsetMinutes > 10080 || (in.Event != "visit_start" && in.OffsetMinutes < 0) {
 		return "방문 시작 전 예약만 음수 Offset을 사용할 수 있으며 범위는 ±10080분입니다"
@@ -584,7 +604,7 @@ func (s *Server) deleteNotificationAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listNotificationRules(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT nr.id,nr.name,nr.event,nr.audience,nr.channel,COALESCE(nr.api_config_id,''),COALESCE(na.name,''),nr.offset_minutes,nr.template_key,nr.body_template,nr.enabled,nr.created_at,nr.updated_at FROM notification_rules nr LEFT JOIN notification_api_configs na ON na.id=nr.api_config_id ORDER BY nr.event,nr.offset_minutes,nr.name`)
+	rows, err := s.db.Query(r.Context(), `SELECT nr.id,nr.name,nr.event,nr.audience,nr.channel,COALESCE(nr.api_config_id,''),COALESCE(na.name,''),nr.offset_minutes,nr.template_key,nr.body_template,nr.locale,nr.enabled,nr.created_at,nr.updated_at FROM notification_rules nr LEFT JOIN notification_api_configs na ON na.id=nr.api_config_id ORDER BY nr.event,nr.offset_minutes,nr.name`)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -593,7 +613,7 @@ func (s *Server) listNotificationRules(w http.ResponseWriter, r *http.Request) {
 	items := []notificationRule{}
 	for rows.Next() {
 		var item notificationRule
-		if err := rows.Scan(&item.ID, &item.Name, &item.Event, &item.Audience, &item.Channel, &item.APIConfigID, &item.APIConfigName, &item.OffsetMinutes, &item.TemplateKey, &item.BodyTemplate, &item.Enabled, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Event, &item.Audience, &item.Channel, &item.APIConfigID, &item.APIConfigName, &item.OffsetMinutes, &item.TemplateKey, &item.BodyTemplate, &item.Locale, &item.Enabled, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			notFoundOrServer(w, err)
 			return
 		}
@@ -652,7 +672,7 @@ func (s *Server) createNotificationRule(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_notification_rule", message)
 		return
 	}
-	_, err = tx.Exec(r.Context(), `INSERT INTO notification_rules(id,name,event,audience,channel,api_config_id,offset_minutes,template_key,body_template,enabled,created_by) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10,$11)`, id, in.Name, in.Event, in.Audience, in.Channel, in.APIConfigID, in.OffsetMinutes, in.TemplateKey, in.BodyTemplate, enabled, u.ID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO notification_rules(id,name,event,audience,channel,api_config_id,offset_minutes,template_key,body_template,locale,enabled,created_by) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10,$11,$12)`, id, in.Name, in.Event, in.Audience, in.Channel, in.APIConfigID, in.OffsetMinutes, in.TemplateKey, in.BodyTemplate, in.Locale, enabled, u.ID)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -690,16 +710,16 @@ func (s *Server) updateNotificationRule(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_notification_rule", message)
 		return
 	}
-	var oldEvent, oldAudience, oldChannel, oldAPIConfigID, oldTemplateKey, oldBodyTemplate string
+	var oldEvent, oldAudience, oldChannel, oldAPIConfigID, oldTemplateKey, oldBodyTemplate, oldLocale string
 	var oldOffsetMinutes int
 	var oldEnabled bool
-	if err = tx.QueryRow(r.Context(), `SELECT event,audience,channel,COALESCE(api_config_id,''),offset_minutes,template_key,body_template,enabled FROM notification_rules WHERE id=$1 FOR UPDATE`, id).
-		Scan(&oldEvent, &oldAudience, &oldChannel, &oldAPIConfigID, &oldOffsetMinutes, &oldTemplateKey, &oldBodyTemplate, &oldEnabled); err != nil {
+	if err = tx.QueryRow(r.Context(), `SELECT event,audience,channel,COALESCE(api_config_id,''),offset_minutes,template_key,body_template,locale,enabled FROM notification_rules WHERE id=$1 FOR UPDATE`, id).
+		Scan(&oldEvent, &oldAudience, &oldChannel, &oldAPIConfigID, &oldOffsetMinutes, &oldTemplateKey, &oldBodyTemplate, &oldLocale, &oldEnabled); err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
-	queuePolicyChanged := oldEvent != in.Event || oldAudience != in.Audience || oldChannel != in.Channel || oldAPIConfigID != in.APIConfigID || oldOffsetMinutes != in.OffsetMinutes || oldTemplateKey != in.TemplateKey || oldBodyTemplate != in.BodyTemplate || oldEnabled != enabled
-	tag, err := tx.Exec(r.Context(), `UPDATE notification_rules SET name=$2,event=$3,audience=$4,channel=$5,api_config_id=NULLIF($6,''),offset_minutes=$7,template_key=$8,body_template=$9,enabled=$10,updated_at=now() WHERE id=$1`, id, in.Name, in.Event, in.Audience, in.Channel, in.APIConfigID, in.OffsetMinutes, in.TemplateKey, in.BodyTemplate, enabled)
+	queuePolicyChanged := oldEvent != in.Event || oldAudience != in.Audience || oldChannel != in.Channel || oldAPIConfigID != in.APIConfigID || oldOffsetMinutes != in.OffsetMinutes || oldTemplateKey != in.TemplateKey || oldBodyTemplate != in.BodyTemplate || oldLocale != in.Locale || oldEnabled != enabled
+	tag, err := tx.Exec(r.Context(), `UPDATE notification_rules SET name=$2,event=$3,audience=$4,channel=$5,api_config_id=NULLIF($6,''),offset_minutes=$7,template_key=$8,body_template=$9,locale=$10,enabled=$11,updated_at=now() WHERE id=$1`, id, in.Name, in.Event, in.Audience, in.Channel, in.APIConfigID, in.OffsetMinutes, in.TemplateKey, in.BodyTemplate, in.Locale, enabled)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -814,24 +834,34 @@ func (s *Server) deleteNotificationRule(w http.ResponseWriter, r *http.Request) 
 type notificationEventData struct {
 	VisitID, VisitorVisitID, RequestNo, Visitor, VisitorPhone, VisitorCompany             string
 	Host, HostPhone, Company, Place, Lobby, PassURL, QRCodeFileSeq, QRCodePath, QRCodeURL string
+	Locale, VisitType, BadgeNo, SiteCode, Delegate                                        string
 	StartAt, EndAt                                                                        time.Time
 	Timezone                                                                              string
 }
 
 func (s *Server) notificationEventDataTx(ctx context.Context, tx pgx.Tx, visitID, visitorVisitID string) (notificationEventData, error) {
 	var data notificationEventData
-	var visitorNameEncrypted, visitorPhoneEncrypted, hostPhoneEncrypted, tokenEncrypted string
-	err := tx.QueryRow(ctx, `SELECT v.id,vv.id,v.request_no,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(h.phone_encrypted,''),COALESCE(sv.value,''),COALESCE(NULLIF(v.place_detail,''),s.name),COALESCE(l.name,''),v.start_at,v.end_at,s.timezone,COALESCE(q.token_encrypted,''),COALESCE(q.qrcode_file_seq,'')
+	var visitorNameEncrypted, visitorPhoneEncrypted, hostPhoneEncrypted, delegatePhoneEncrypted, tokenEncrypted string
+	err := tx.QueryRow(ctx, `SELECT v.id,vv.id,v.request_no,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(h.phone_encrypted,''),COALESCE(sv.value,''),COALESCE(NULLIF(v.place_detail,''),s.name),COALESCE(l.name,''),v.start_at,v.end_at,s.timezone,COALESCE(q.token_encrypted,''),COALESCE(q.qrcode_file_seq,''),
+		p.locale,COALESCE(vt.name,''),COALESCE(vv.badge_no,''),s.code,COALESCE(d.display_name,''),COALESCE(d.phone_encrypted,'')
 		FROM visits v JOIN visitor_visits vv ON vv.visit_id=v.id JOIN visitors p ON p.id=vv.visitor_id JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id
 		LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN settings sv ON sv.key='general.company_name'
+		LEFT JOIN visit_types vt ON vt.id=v.visit_type_id
+		LEFT JOIN users d ON d.id=h.delegate_user_id AND h.delegate_until>now() AND d.active
 		LEFT JOIN LATERAL (SELECT token_encrypted,qrcode_file_seq FROM qr_tokens WHERE visitor_visit_id=vv.id AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1) q ON true
-		WHERE v.id=$1 AND vv.id=$2`, visitID, visitorVisitID).Scan(&data.VisitID, &data.VisitorVisitID, &data.RequestNo, &visitorNameEncrypted, &visitorPhoneEncrypted, &data.VisitorCompany, &data.Host, &hostPhoneEncrypted, &data.Company, &data.Place, &data.Lobby, &data.StartAt, &data.EndAt, &data.Timezone, &tokenEncrypted, &data.QRCodeFileSeq)
+		WHERE v.id=$1 AND vv.id=$2`, visitID, visitorVisitID).Scan(&data.VisitID, &data.VisitorVisitID, &data.RequestNo, &visitorNameEncrypted, &visitorPhoneEncrypted, &data.VisitorCompany, &data.Host, &hostPhoneEncrypted, &data.Company, &data.Place, &data.Lobby, &data.StartAt, &data.EndAt, &data.Timezone, &tokenEncrypted, &data.QRCodeFileSeq,
+		&data.Locale, &data.VisitType, &data.BadgeNo, &data.SiteCode, &data.Delegate, &delegatePhoneEncrypted)
 	if err != nil {
 		return data, err
 	}
 	data.Visitor = s.decryptOptional(visitorNameEncrypted)
 	data.VisitorPhone = s.decryptOptional(visitorPhoneEncrypted)
 	data.HostPhone = s.decryptOptional(hostPhoneEncrypted)
+	// While a host has an active delegate, arrival notifications reach the
+	// colleague who is actually available to meet the visitor.
+	if delegatePhone := s.decryptOptional(delegatePhoneEncrypted); delegatePhone != "" {
+		data.HostPhone = delegatePhone
+	}
 	base := s.publicBaseURL(ctx, nil)
 	if tokenEncrypted != "" {
 		data.PassURL = strings.TrimRight(base, "/") + "/q/" + s.decryptOptional(tokenEncrypted)
@@ -854,6 +884,7 @@ func (data notificationEventData) variables(eventAt time.Time) map[string]string
 		"place": data.Place, "lobby": data.Lobby, "checkedIn": eventAt.In(location).Format("15:04"), "checkedOut": eventAt.In(location).Format("15:04"),
 		"requestNo": data.RequestNo, "passUrl": data.PassURL, "qrcodeFileSeq": data.QRCodeFileSeq, "qrcodePath": data.QRCodePath, "qrcodeUrl": data.QRCodeURL,
 		"visitId": data.VisitID, "visitorVisitId": data.VisitorVisitID,
+		"locale": data.Locale, "visitType": data.VisitType, "badgeNo": data.BadgeNo, "siteCode": data.SiteCode, "delegate": data.Delegate,
 	}
 }
 
@@ -870,17 +901,20 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 		return err
 	}
 	type queuedRule struct {
-		id, audience, channel, apiConfigID, templateKey, bodyTemplate string
-		offsetMinutes                                                 int
+		id, audience, channel, apiConfigID, templateKey, bodyTemplate, locale string
+		offsetMinutes                                                         int
 	}
 	rules := []queuedRule{}
-	rows, err := tx.Query(ctx, `SELECT id,audience,channel,COALESCE(api_config_id,''),offset_minutes,template_key,body_template FROM notification_rules WHERE enabled AND event=$1 ORDER BY created_at`, event)
+	// A rule with a locale only fires for visitors who chose that language, so
+	// one event can carry a Korean and an English template side by side.
+	rows, err := tx.Query(ctx, `SELECT id,audience,channel,COALESCE(api_config_id,''),offset_minutes,template_key,body_template,locale
+		FROM notification_rules WHERE enabled AND event=$1 AND (locale='' OR locale=$2) ORDER BY created_at`, event, data.Locale)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var rule queuedRule
-		if err := rows.Scan(&rule.id, &rule.audience, &rule.channel, &rule.apiConfigID, &rule.offsetMinutes, &rule.templateKey, &rule.bodyTemplate); err != nil {
+		if err := rows.Scan(&rule.id, &rule.audience, &rule.channel, &rule.apiConfigID, &rule.offsetMinutes, &rule.templateKey, &rule.bodyTemplate, &rule.locale); err != nil {
 			rows.Close()
 			return err
 		}
@@ -898,20 +932,17 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 		return err
 	}
 	for _, rule := range rules {
-		recipient := data.VisitorPhone
-		if rule.audience == "host" {
-			recipient = data.HostPhone
-		}
+		recipient := notificationRecipient(rule.audience, data)
 		if strings.TrimSpace(recipient) == "" {
 			continue
 		}
-		variables["recipient"] = normalizePhone(recipient)
+		variables["recipient"] = recipient
 		variables["channel"] = rule.channel
 		body, renderErr := renderNotificationTemplate(rule.bodyTemplate, variables)
 		if renderErr != nil {
 			return renderErr
 		}
-		recipientEncrypted, encryptErr := s.keys.Encrypt(normalizePhone(recipient))
+		recipientEncrypted, encryptErr := s.keys.Encrypt(recipient)
 		if encryptErr != nil {
 			return encryptErr
 		}
@@ -935,6 +966,20 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 		}
 	}
 	return nil
+}
+
+// notificationRecipient resolves what the adapter is addressed to. Messaging
+// audiences use a normalized phone number; a 'system' rule targets an external
+// system, so the participant id identifies the subject instead.
+func notificationRecipient(audience string, data notificationEventData) string {
+	switch audience {
+	case "host":
+		return normalizePhone(data.HostPhone)
+	case "system":
+		return data.VisitorVisitID
+	default:
+		return normalizePhone(data.VisitorPhone)
+	}
 }
 
 func (s *Server) cancelPendingVisitNotificationsTx(ctx context.Context, tx pgx.Tx, visitID string) error {
@@ -966,12 +1011,12 @@ func (s *Server) refreshVisitStartRuleNotificationsTx(ctx context.Context, tx pg
 
 func (s *Server) refreshVisitStartNotificationsScopedTx(ctx context.Context, tx pgx.Tx, visitID, participantScope, ruleScope string) error {
 	type pendingNotification struct {
-		id, participantID, bodyTemplate, audience, channel, apiConfigID, templateKey string
-		offsetMinutes                                                                int
-		enabled                                                                      bool
+		id, participantID, bodyTemplate, audience, channel, apiConfigID, templateKey, locale string
+		offsetMinutes                                                                        int
+		enabled                                                                              bool
 	}
 	items := []pendingNotification{}
-	rows, err := tx.Query(ctx, `SELECT n.id,COALESCE(n.visitor_visit_id,''),nr.body_template,nr.audience,nr.channel,COALESCE(nr.api_config_id,''),nr.offset_minutes,nr.template_key,nr.enabled
+	rows, err := tx.Query(ctx, `SELECT n.id,COALESCE(n.visitor_visit_id,''),nr.body_template,nr.audience,nr.channel,COALESCE(nr.api_config_id,''),nr.offset_minutes,nr.template_key,nr.locale,nr.enabled
 		FROM notifications n JOIN notification_rules nr ON nr.id=n.rule_id
 		WHERE n.visit_id=$1 AND ($2='' OR n.visitor_visit_id=$2) AND ($3='' OR n.rule_id=$3)
 		AND nr.event='visit_start' AND n.status IN ('queued','failed') FOR UPDATE OF n`, visitID, participantScope, ruleScope)
@@ -980,7 +1025,7 @@ func (s *Server) refreshVisitStartNotificationsScopedTx(ctx context.Context, tx 
 	}
 	for rows.Next() {
 		var item pendingNotification
-		if err := rows.Scan(&item.id, &item.participantID, &item.bodyTemplate, &item.audience, &item.channel, &item.apiConfigID, &item.offsetMinutes, &item.templateKey, &item.enabled); err != nil {
+		if err := rows.Scan(&item.id, &item.participantID, &item.bodyTemplate, &item.audience, &item.channel, &item.apiConfigID, &item.offsetMinutes, &item.templateKey, &item.locale, &item.enabled); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1023,11 +1068,13 @@ func (s *Server) refreshVisitStartNotificationsScopedTx(ctx context.Context, tx 
 			return dataErr
 		}
 		variables := data.variables(time.Now())
-		recipient := data.VisitorPhone
-		if item.audience == "host" {
-			recipient = data.HostPhone
+		if item.locale != "" && item.locale != data.Locale {
+			if err := cancelPendingNotificationTx(ctx, tx, item.id, "방문자 언어가 발송 규칙과 일치하지 않습니다"); err != nil {
+				return err
+			}
+			continue
 		}
-		recipient = normalizePhone(recipient)
+		recipient := notificationRecipient(item.audience, data)
 		if recipient == "" {
 			if err := cancelPendingNotificationTx(ctx, tx, item.id, "수신 번호가 없습니다"); err != nil {
 				return err

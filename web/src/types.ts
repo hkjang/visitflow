@@ -18,6 +18,8 @@ export interface User {
   role: Role;
   source: "local" | "oidc";
   lastLoginAt?: string;
+  delegateUserId?: string;
+  delegateUntil?: string;
 }
 
 export interface VersionInfo {
@@ -55,11 +57,29 @@ export interface Department {
   parentId?: string;
   color: string;
 }
+export interface VisitType {
+  id: string;
+  code: string;
+  name: string;
+  description?: string;
+  requiresNda: boolean;
+  requiresSafetyBriefing: boolean;
+  requiresVehicle: boolean;
+  requiresEquipment: boolean;
+  requiresApproval: boolean;
+  active: boolean;
+  sortOrder: number;
+}
+
 export interface ReferenceData {
   sites: Site[];
   lobbies: Lobby[];
   departments: Department[];
   hosts?: { id: string; name: string; email?: string; departmentId?: string }[];
+  visitTypes?: VisitType[];
+  locales?: string[];
+  defaultLocale?: string;
+  selfRegistrationEnabled?: boolean;
 }
 
 export interface FrequentVisitor {
@@ -124,6 +144,8 @@ export interface Visit {
   placeDetail?: string;
   status: VisitStatus;
   source: string;
+  visitTypeId?: string;
+  visitTypeName?: string;
   visitorCount: number;
   primaryVisitor: string;
   company?: string;
@@ -143,6 +165,36 @@ export interface LobbyVisitor {
   endAt: string;
   status: VisitStatus;
   checkedInAt?: string;
+}
+
+export interface KioskDevice {
+  id: string;
+  name: string;
+  siteId: string;
+  siteName: string;
+  lobbyId?: string;
+  lobbyName?: string;
+  prefix: string;
+  expiresAt?: string;
+  lastSeenAt?: string;
+  revokedAt?: string;
+  createdAt: string;
+  active: boolean;
+}
+
+export interface OperationalMetrics {
+  visitsToday: number;
+  visitorsCurrent: number;
+  pendingApproval: number;
+  activeSessions: number;
+  activeApiKeys: number;
+  lockedAccounts: number;
+  notifications: Record<string, number>;
+  queueBacklog: number;
+  queueOldestSeconds: number;
+  schemaVersion: number;
+  uptimeSeconds: number;
+  counters: Record<string, number>;
 }
 
 export interface GuidePost {

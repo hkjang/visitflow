@@ -91,6 +91,7 @@ func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 		"vehicle": "vehicle", "차량번호": "vehicle",
 		"equipment": "equipment", "반입장비": "equipment",
 		"consent": "consent", "개인정보동의": "consent", "동의": "consent",
+		"locale": "locale", "언어": "locale", "language": "locale",
 	}
 	for index, raw := range rows[0] {
 		key := strings.TrimPrefix(strings.TrimSpace(raw), "\ufeff")
@@ -137,7 +138,7 @@ func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 				equipment = append(equipment, item)
 			}
 		}
-		visitors = append(visitors, VisitorInput{Name: name, Phone: phone, Email: cell(row, "email"), Company: cell(row, "company"), Title: cell(row, "title"), Vehicle: cell(row, "vehicle"), Equipment: equipment, Consent: consent})
+		visitors = append(visitors, VisitorInput{Name: name, Phone: phone, Email: cell(row, "email"), Company: cell(row, "company"), Title: cell(row, "title"), Vehicle: cell(row, "vehicle"), Equipment: equipment, Locale: normalizeLocale(cell(row, "locale")), Consent: consent})
 	}
 	if len(visitors) == 0 {
 		return nil, nil, errors.New("가져올 방문자 데이터가 없습니다")
