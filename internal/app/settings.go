@@ -82,6 +82,10 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "oidc_incomplete", "SSO 활성화에는 Issuer URL, Client ID, Client Secret이 필요합니다")
 		return
 	}
+	if effective("notification.provider") == "webhook" && effective("notification.webhook_url") == "" {
+		writeError(w, http.StatusBadRequest, "webhook_url_required", "webhook Provider에는 Webhook URL이 필요합니다")
+		return
+	}
 	supported := map[string]bool{}
 	for _, locale := range strings.Fields(effective("general.supported_locales")) {
 		supported[normalizeLocale(locale)] = true

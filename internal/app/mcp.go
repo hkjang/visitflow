@@ -161,11 +161,13 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 			return nil, err
 		}
 		defer tx.Rollback(r.Context())
-		tag, err := tx.Exec(r.Context(), `UPDATE visits SET status='CANCELLED',cancelled_at=now(),updated_at=now() WHERE id=$1 AND (host_user_id=$2 OR $3) AND status IN ('PENDING_APPROVAL','APPROVED','SCHEDULED')`, id, u.ID, u.IsAdmin())
-		if err != nil || tag.RowsAffected() == 0 {
+		cancelled, err := s.cancelVisitTx(r.Context(), tx, id, u)
+		if err != nil {
+			return nil, err
+		}
+		if !cancelled {
 			return nil, errMCP("취소 가능한 방문이 아니거나 권한이 없습니다")
 		}
-		_, _ = tx.Exec(r.Context(), `UPDATE visitor_visits SET status='CANCELLED' WHERE visit_id=$1; UPDATE qr_tokens SET revoked_at=now() WHERE visitor_visit_id IN (SELECT id FROM visitor_visits WHERE visit_id=$1) AND revoked_at IS NULL`, id)
 		if err = tx.Commit(r.Context()); err != nil {
 			return nil, err
 		}

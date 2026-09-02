@@ -155,6 +155,13 @@ func (s *Server) createKioskDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_validity", "유효기간은 0(무기한)~3650일이어야 합니다")
 		return
 	}
+	if in.LobbyID != "" {
+		var matches bool
+		if err := s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM lobbies WHERE id=$1 AND site_id=$2)`, in.LobbyID, in.SiteID).Scan(&matches); err != nil || !matches {
+			writeError(w, http.StatusBadRequest, "lobby_site_mismatch", "선택한 로비가 해당 사업장에 속하지 않습니다")
+			return
+		}
+	}
 	random, err := platform.RandomToken(32)
 	if err != nil {
 		notFoundOrServer(w, err)

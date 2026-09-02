@@ -620,6 +620,13 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	if in.Active != nil {
 		afterActive = *in.Active
 	}
+	// Granting or touching the top role is reserved for super administrators;
+	// otherwise any admin could promote themselves out of reach of the others.
+	actor, _ := userFrom(r)
+	if actor.Role != RoleSuperAdmin && (beforeRole == RoleSuperAdmin || afterRole == RoleSuperAdmin) {
+		writeError(w, http.StatusForbidden, "super_admin_required", "최고 관리자 계정은 최고 관리자만 변경할 수 있습니다")
+		return
+	}
 	if beforeRole == RoleSuperAdmin && (afterRole != RoleSuperAdmin || !afterActive) {
 		var superAdmins int
 		if err := s.db.QueryRow(r.Context(), `SELECT count(*) FROM users WHERE role='super_admin' AND active`).Scan(&superAdmins); err != nil {

@@ -233,6 +233,10 @@ func normalizeNotificationRuleInput(in *notificationRuleInput) {
 	in.TemplateKey = strings.ToLower(strings.TrimSpace(in.TemplateKey))
 	in.BodyTemplate = strings.TrimSpace(in.BodyTemplate)
 	in.Locale = strings.ToLower(strings.TrimSpace(in.Locale))
+	// Store the base tag the visitor record uses ("ko-KR" would never match "ko").
+	if normalized := normalizeLocale(in.Locale); normalized != "" {
+		in.Locale = normalized
+	}
 }
 
 func validateNotificationRuleInput(in notificationRuleInput) string {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/hkjang/visitflow/internal/database"
 )
 
 func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +37,7 @@ func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 	if days < 1 || days > 366 {
 		days = 30
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT d::date,COALESCE(count(DISTINCT vv.id),0),COALESCE(count(DISTINCT vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')),0) FROM generate_series(CURRENT_DATE-($1::int-1),CURRENT_DATE,interval '1 day') d LEFT JOIN visits v ON v.start_at::date=d::date LEFT JOIN visitor_visits vv ON vv.visit_id=v.id GROUP BY d ORDER BY d`, days)
+	rows, err := s.db.Query(r.Context(), `SELECT d::date,COALESCE(count(DISTINCT vv.id),0),COALESCE(count(DISTINCT vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')),0) FROM generate_series(CURRENT_DATE-($1::int-1),CURRENT_DATE,interval '1 day') d LEFT JOIN visits v ON (v.start_at AT TIME ZONE (SELECT timezone FROM sites WHERE id=v.site_id))::date=d::date LEFT JOIN visitor_visits vv ON vv.visit_id=v.id GROUP BY d ORDER BY d`, days)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -71,7 +72,28 @@ func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {
 		limit = 200
 	}
 	action := strings.TrimSpace(r.URL.Query().Get("action"))
-	rows, err := s.db.Query(r.Context(), `SELECT a.id,COALESCE(u.display_name,'system'),a.action,a.resource_type,COALESCE(a.resource_id,''),COALESCE(a.ip_address,''),a.details,a.created_at FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_user_id WHERE ($1='' OR a.action ILIKE $1||'%%') ORDER BY a.created_at DESC LIMIT $2`, action, limit)
+	actor := strings.TrimSpace(r.URL.Query().Get("actor"))
+	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	var from, to *time.Time
+	if value := strings.TrimSpace(r.URL.Query().Get("from")); value != "" {
+		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			from = &parsed
+		}
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("to")); value != "" {
+		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+			to = &parsed
+		}
+	}
+	// Keyset on the bigserial id keeps paging stable while new rows arrive.
+	rows, err := s.db.Query(r.Context(), `SELECT a.id,COALESCE(u.display_name,'system'),a.action,a.resource_type,COALESCE(a.resource_id,''),COALESCE(a.ip_address,''),a.details,a.created_at
+		FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_user_id
+		WHERE ($1='' OR a.action ILIKE $1||'%')
+		AND ($3='' OR u.display_name ILIKE '%'||$3||'%' OR u.username ILIKE '%'||$3||'%')
+		AND ($4::bigint=0 OR a.id<$4)
+		AND ($5::timestamptz IS NULL OR a.created_at>=$5)
+		AND ($6::timestamptz IS NULL OR a.created_at<=$6)
+		ORDER BY a.id DESC LIMIT $2`, action, limit+1, actor, before, from, to)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -80,23 +102,34 @@ func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {
 	items := []map[string]any{}
 	for rows.Next() {
 		var id int64
-		var actor, act, resourceType, resourceID, ip string
+		var actorName, act, resourceType, resourceID, ip string
 		var details []byte
 		var created time.Time
-		if rows.Scan(&id, &actor, &act, &resourceType, &resourceID, &ip, &details, &created) == nil {
+		if rows.Scan(&id, &actorName, &act, &resourceType, &resourceID, &ip, &details, &created) == nil {
 			var safe any
 			_ = json.Unmarshal(details, &safe)
-			items = append(items, map[string]any{"id": id, "actor": actor, "action": act, "resourceType": resourceType, "resourceId": resourceID, "ipAddress": ip, "details": safe, "createdAt": created})
+			items = append(items, map[string]any{"id": id, "actor": actorName, "action": act, "resourceType": resourceType, "resourceId": resourceID, "ipAddress": ip, "details": safe, "createdAt": created})
 		}
 	}
-	writeJSON(w, 200, map[string]any{"items": items})
+	nextBefore := int64(0)
+	if len(items) > limit {
+		items = items[:limit]
+		nextBefore, _ = items[len(items)-1]["id"].(int64)
+	}
+	writeJSON(w, 200, map[string]any{"items": items, "hasMore": nextBefore > 0, "nextBefore": nextBefore})
 }
 
 func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 1000 {
+		limit = 300
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	rows, err := s.db.Query(r.Context(), `SELECT n.id,n.visit_id,n.channel,n.template_key,n.status,n.attempts,COALESCE(n.error,''),n.created_at,n.sent_at,n.recipient_encrypted,
 		COALESCE(na.name,'기존 Adapter'),COALESCE(nr.name,''),n.next_attempt_at
 		FROM notifications n LEFT JOIN notification_api_configs na ON na.id=n.api_config_id LEFT JOIN notification_rules nr ON nr.id=n.rule_id
-		ORDER BY n.created_at DESC LIMIT 300`)
+		WHERE ($1='' OR n.status=$1)
+		ORDER BY n.created_at DESC LIMIT $2`, status, limit)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -125,7 +158,18 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listVisitors(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),count(vv.id),max(v.start_at),p.masked_at,p.erased_at FROM visitors p LEFT JOIN visitor_visits vv ON vv.visitor_id=p.id LEFT JOIN visits v ON v.id=vv.visit_id GROUP BY p.id ORDER BY max(v.start_at) DESC NULLS LAST LIMIT 300`)
+	search := strings.TrimSpace(r.URL.Query().Get("q"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 1000 {
+		limit = 300
+	}
+	// Names and phones are encrypted; search matches their HMAC indexes exactly,
+	// while the company column supports a substring match.
+	rows, err := s.db.Query(r.Context(), `SELECT p.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),count(vv.id),max(v.start_at),p.masked_at,p.erased_at
+		FROM visitors p LEFT JOIN visitor_visits vv ON vv.visitor_id=p.id LEFT JOIN visits v ON v.id=vv.visit_id
+		WHERE ($1='' OR p.company ILIKE '%'||$1||'%' OR p.name_hash=$2 OR p.phone_hash=$3)
+		GROUP BY p.id ORDER BY max(v.start_at) DESC NULLS LAST LIMIT $4`,
+		search, s.keys.Digest("name:"+strings.ToLower(search)), s.keys.Digest("phone:"+normalizePhone(search)), limit)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -151,18 +195,27 @@ func (s *Server) listVisitors(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) upsertSite(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ID      string `json:"id"`
-		Code    string `json:"code"`
-		Name    string `json:"name"`
-		Address string `json:"address"`
-		MapURL  string `json:"mapUrl"`
-		Active  *bool  `json:"active"`
+		ID       string `json:"id"`
+		Code     string `json:"code"`
+		Name     string `json:"name"`
+		Address  string `json:"address"`
+		MapURL   string `json:"mapUrl"`
+		Timezone string `json:"timezone"`
+		Active   *bool  `json:"active"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
 	if strings.TrimSpace(in.Code) == "" || strings.TrimSpace(in.Name) == "" {
 		writeError(w, 400, "required_fields", "사업장 코드와 이름은 필수입니다")
+		return
+	}
+	in.Timezone = strings.TrimSpace(in.Timezone)
+	if in.Timezone == "" {
+		in.Timezone = "Asia/Seoul"
+	}
+	if _, err := time.LoadLocation(in.Timezone); err != nil || in.Timezone == "Local" {
+		writeError(w, 400, "invalid_timezone", "IANA 시간대 이름을 입력하세요. 예: Asia/Seoul")
 		return
 	}
 	if in.ID == "" {
@@ -172,7 +225,11 @@ func (s *Server) upsertSite(w http.ResponseWriter, r *http.Request) {
 	if in.Active != nil {
 		active = *in.Active
 	}
-	_, err := s.db.Exec(r.Context(), `INSERT INTO sites(id,code,name,address,map_url,active) VALUES($1,upper($2),$3,NULLIF($4,''),NULLIF($5,''),$6) ON CONFLICT(id) DO UPDATE SET code=EXCLUDED.code,name=EXCLUDED.name,address=EXCLUDED.address,map_url=EXCLUDED.map_url,active=EXCLUDED.active,updated_at=now()`, in.ID, strings.TrimSpace(in.Code), strings.TrimSpace(in.Name), strings.TrimSpace(in.Address), strings.TrimSpace(in.MapURL), active)
+	_, err := s.db.Exec(r.Context(), `INSERT INTO sites(id,code,name,address,map_url,timezone,active) VALUES($1,upper($2),$3,NULLIF($4,''),NULLIF($5,''),$6,$7) ON CONFLICT(id) DO UPDATE SET code=EXCLUDED.code,name=EXCLUDED.name,address=EXCLUDED.address,map_url=EXCLUDED.map_url,timezone=EXCLUDED.timezone,active=EXCLUDED.active,updated_at=now()`, in.ID, strings.TrimSpace(in.Code), strings.TrimSpace(in.Name), strings.TrimSpace(in.Address), strings.TrimSpace(in.MapURL), in.Timezone, active)
+	if database.IsConstraint(err, "sites_code_key") {
+		writeError(w, http.StatusConflict, "duplicate_code", "이미 사용 중인 사업장 코드입니다")
+		return
+	}
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -206,6 +263,14 @@ func (s *Server) upsertLobby(w http.ResponseWriter, r *http.Request) {
 		active = *in.Active
 	}
 	_, err := s.db.Exec(r.Context(), `INSERT INTO lobbies(id,site_id,code,name,instructions,active) VALUES($1,$2,upper($3),$4,NULLIF($5,''),$6) ON CONFLICT(id) DO UPDATE SET site_id=EXCLUDED.site_id,code=EXCLUDED.code,name=EXCLUDED.name,instructions=EXCLUDED.instructions,active=EXCLUDED.active,updated_at=now()`, in.ID, in.SiteID, strings.TrimSpace(in.Code), strings.TrimSpace(in.Name), strings.TrimSpace(in.Instructions), active)
+	if database.IsConstraint(err, "lobbies_site_id_code_key") {
+		writeError(w, http.StatusConflict, "duplicate_code", "같은 사업장에 이미 있는 로비 코드입니다")
+		return
+	}
+	if database.IsConstraint(err, "lobbies_site_id_fkey") {
+		writeError(w, http.StatusBadRequest, "unknown_site", "사업장을 찾을 수 없습니다")
+		return
+	}
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -234,6 +299,17 @@ func (s *Server) upsertDepartment(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Color == "" {
 		in.Color = "#2F6B5F"
+	}
+	if in.ParentID != "" {
+		if in.ParentID == in.ID {
+			writeError(w, 400, "invalid_parent", "상위 조직으로 자기 자신을 지정할 수 없습니다")
+			return
+		}
+		var exists bool
+		if err := s.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1)`, in.ParentID).Scan(&exists); err != nil || !exists {
+			writeError(w, 400, "invalid_parent", "상위 조직을 찾을 수 없습니다")
+			return
+		}
 	}
 	_, err := s.db.Exec(r.Context(), `INSERT INTO organizations(id,name,parent_id,color) VALUES($1,$2,NULLIF($3,''),$4) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,parent_id=EXCLUDED.parent_id,color=EXCLUDED.color,updated_at=now()`, in.ID, strings.TrimSpace(in.Name), in.ParentID, in.Color)
 	if err != nil {
@@ -282,6 +358,10 @@ func (s *Server) createWatchlist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "required_fields", "전화번호 또는 회사와 제한 사유가 필요합니다")
 		return
 	}
+	if in.EndsAt != nil && !in.EndsAt.After(time.Now()) {
+		writeError(w, 400, "invalid_period", "제한 종료일은 현재 이후여야 합니다")
+		return
+	}
 	nameEnc, _ := s.encryptOptional(in.Name)
 	reasonEnc, err := s.keys.Encrypt(strings.TrimSpace(in.Reason))
 	if err != nil {
@@ -306,8 +386,12 @@ func (s *Server) createWatchlist(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteWatchlist(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "entryID")
 	tag, err := s.db.Exec(r.Context(), `UPDATE watchlist_entries SET active=false WHERE id=$1 AND active`, id)
-	if err != nil || tag.RowsAffected() == 0 {
+	if err != nil {
 		notFoundOrServer(w, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "not_found", "활성 Watch List 항목이 없습니다")
 		return
 	}
 	u, _ := userFrom(r)

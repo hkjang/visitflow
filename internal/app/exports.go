@@ -135,7 +135,7 @@ func (s *Server) exportStatisticsCSV(w http.ResponseWriter, r *http.Request) {
 		COALESCE(count(DISTINCT vv.id) FILTER(WHERE vv.status='NO_SHOW'),0),
 		COALESCE(count(DISTINCT vv.id) FILTER(WHERE vv.status='CANCELLED'),0)
 		FROM generate_series(CURRENT_DATE-($1::int-1),CURRENT_DATE,interval '1 day') d
-		LEFT JOIN visits v ON v.start_at::date=d::date
+		LEFT JOIN visits v ON (v.start_at AT TIME ZONE (SELECT timezone FROM sites WHERE id=v.site_id))::date=d::date
 		LEFT JOIN visitor_visits vv ON vv.visit_id=v.id
 		GROUP BY d ORDER BY d`, days)
 	if err != nil {

@@ -836,6 +836,57 @@ func (s *Server) updateVisit(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// cancelVisitTx cancels a visit and everything attached to it: participant
+// status, active QR tokens, pending notifications, the timeline event and the
+// visit_cancelled rules. It reports false when the visit was not cancellable by
+// this actor so REST and MCP return the same 409 semantics.
+func (s *Server) cancelVisitTx(ctx context.Context, tx pgx.Tx, id string, u User) (bool, error) {
+	tag, err := tx.Exec(ctx, `UPDATE visits SET status='CANCELLED',cancelled_at=now(),updated_at=now()
+		WHERE id=$1 AND (host_user_id=$2 OR $3 OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=visits.host_user_id AND hu.delegate_user_id=$2 AND hu.delegate_until>now()))
+		AND status NOT IN ('CHECKED_OUT','CANCELLED','REJECTED')`, id, u.ID, u.IsAdmin() || u.Role == RoleSecurity)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	if _, err = tx.Exec(ctx, `UPDATE visitor_visits SET status='CANCELLED' WHERE visit_id=$1 AND status NOT IN ('CHECKED_OUT','CANCELLED')`, id); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE qr_tokens SET revoked_at=now() WHERE visitor_visit_id IN (SELECT id FROM visitor_visits WHERE visit_id=$1) AND revoked_at IS NULL`, id); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO visit_events(visit_id,event_type,actor_user_id) VALUES($1,'CANCELLED',NULLIF($2,''))`, id, u.ID); err != nil {
+		return false, err
+	}
+	if err = s.cancelPendingVisitNotificationsTx(ctx, tx, id); err != nil {
+		return false, err
+	}
+	participantIDs := []string{}
+	rows, err := tx.Query(ctx, `SELECT id FROM visitor_visits WHERE visit_id=$1 ORDER BY created_at`, id)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		var participantID string
+		if err := rows.Scan(&participantID); err != nil {
+			rows.Close()
+			return false, err
+		}
+		participantIDs = append(participantIDs, participantID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, participantID := range participantIDs {
+		if err := s.queueNotificationEventTx(ctx, tx, id, participantID, "visit_cancelled", time.Now()); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 func (s *Server) cancelVisit(w http.ResponseWriter, r *http.Request) {
 	u, _ := userFrom(r)
 	id := chi.URLParam(r, "visitID")
@@ -845,48 +896,12 @@ func (s *Server) cancelVisit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	tag, err := tx.Exec(r.Context(), `UPDATE visits SET status='CANCELLED',cancelled_at=now(),updated_at=now()
-		WHERE id=$1 AND (host_user_id=$2 OR $3 OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=visits.host_user_id AND hu.delegate_user_id=$2 AND hu.delegate_until>now()))
-		AND status NOT IN ('CHECKED_OUT','CANCELLED','REJECTED')`, id, u.ID, u.IsAdmin() || u.Role == RoleSecurity)
-	if err == nil && tag.RowsAffected() > 0 {
-		_, err = tx.Exec(r.Context(), `UPDATE visitor_visits SET status='CANCELLED' WHERE visit_id=$1 AND status NOT IN ('CHECKED_OUT','CANCELLED')`, id)
+	cancelled, err := s.cancelVisitTx(r.Context(), tx, id, u)
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
 	}
-	if err == nil && tag.RowsAffected() > 0 {
-		_, err = tx.Exec(r.Context(), `UPDATE qr_tokens SET revoked_at=now() WHERE visitor_visit_id IN (SELECT id FROM visitor_visits WHERE visit_id=$1) AND revoked_at IS NULL`, id)
-	}
-	if err == nil && tag.RowsAffected() > 0 {
-		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,event_type,actor_user_id) VALUES($1,'CANCELLED',NULLIF($2,''))`, id, u.ID)
-	}
-	if err == nil && tag.RowsAffected() > 0 {
-		err = s.cancelPendingVisitNotificationsTx(r.Context(), tx, id)
-	}
-	if err == nil && tag.RowsAffected() > 0 {
-		participantIDs := []string{}
-		rows, queryErr := tx.Query(r.Context(), `SELECT id FROM visitor_visits WHERE visit_id=$1 ORDER BY created_at`, id)
-		if queryErr != nil {
-			err = queryErr
-		} else {
-			for rows.Next() {
-				var participantID string
-				if scanErr := rows.Scan(&participantID); scanErr != nil {
-					err = scanErr
-					break
-				}
-				participantIDs = append(participantIDs, participantID)
-			}
-			if rows.Err() != nil {
-				err = rows.Err()
-			}
-			rows.Close()
-			for _, participantID := range participantIDs {
-				if err != nil {
-					break
-				}
-				err = s.queueNotificationEventTx(r.Context(), tx, id, participantID, "visit_cancelled", time.Now())
-			}
-		}
-	}
-	if err != nil || tag.RowsAffected() == 0 {
+	if !cancelled {
 		writeError(w, 409, "cannot_cancel", "취소할 수 없는 방문 상태이거나 권한이 없습니다")
 		return
 	}

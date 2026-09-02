@@ -36,7 +36,7 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `GET|POST /api/v1/frequent-visitors`, `PUT|DELETE /api/v1/frequent-visitors/{id}`
 - `GET /api/v1/guides`, `GET /api/v1/guides/{id}`
 - `GET|HEAD /img/visitor/{qrcode_file_seq}.jpg` 외부 MMS Gateway용 QR JPEG
-- `GET /api/v1/admin/statistics|audit-logs|notifications|visitors|metrics`
+- `GET /api/v1/admin/statistics|audit-logs|notifications|visitors|metrics` — 감사 로그는 `action`·`actor`·`from`·`to`·`before`(keyset), 방문자는 `q`, 알림은 `status`로 필터링한다.
 - `GET /api/v1/admin/audit-logs.csv|visits.csv|statistics.csv` UTF-8 BOM CSV 내보내기
 - `POST /api/v1/admin/notifications/retry-failed`, `POST /api/v1/admin/notifications/{id}/retry|cancel`
 - `GET|POST /api/v1/admin/visit-types`, `PUT|DELETE /api/v1/admin/visit-types/{id}`

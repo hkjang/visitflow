@@ -555,6 +555,102 @@ func TestKioskCheckInRecordsDeviceLobby(t *testing.T) {
 	}
 }
 
+func TestCancelRevokesQRAndPendingNotifications(t *testing.T) {
+	env := newTestEnv(t)
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+	visitID := fmt.Sprint(created["id"])
+	token := passTokenFrom(t, created)
+	env.json(http.MethodPost, "/api/v1/visits/"+visitID+"/cancel", map[string]any{}, http.StatusNoContent)
+	if verify := env.do(http.MethodPost, "/api/v1/qr/verify", map[string]string{"token": token}); verify.Code != http.StatusConflict {
+		t.Fatalf("QR of a cancelled visit still verifies: %d %s", verify.Code, verify.Body.String())
+	}
+	var pending int
+	if err := env.server.db.QueryRow(context.Background(), `SELECT count(*) FROM notifications WHERE visit_id=$1 AND status IN ('queued','failed','sending') AND rule_id NOT IN (SELECT id FROM notification_rules WHERE event='visit_cancelled')`, visitID).Scan(&pending); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if pending != 0 {
+		t.Fatalf("%d pre-visit notifications remain queued after cancellation", pending)
+	}
+	if again := env.do(http.MethodPost, "/api/v1/visits/"+visitID+"/cancel", map[string]any{}); again.Code != http.StatusConflict {
+		t.Fatalf("cancelling twice returned %d", again.Code)
+	}
+}
+
+func TestAdminMasterDataValidation(t *testing.T) {
+	env := newTestEnv(t)
+	// Duplicate site code is a conflict, not a server error.
+	if dup := env.do(http.MethodPost, "/api/v1/admin/sites", map[string]any{"code": "HQ", "name": "중복 본사"}); dup.Code != http.StatusConflict {
+		t.Fatalf("duplicate site code returned %d: %s", dup.Code, dup.Body.String())
+	}
+	if bad := env.do(http.MethodPost, "/api/v1/admin/sites", map[string]any{"code": "LAB", "name": "연구소", "timezone": "Mars/Olympus"}); bad.Code != http.StatusBadRequest {
+		t.Fatalf("invalid timezone returned %d", bad.Code)
+	}
+	site := env.json(http.MethodPost, "/api/v1/admin/sites", map[string]any{"code": "LAB", "name": "연구소", "timezone": "Asia/Tokyo"}, http.StatusOK)
+	var timezone string
+	if err := env.server.db.QueryRow(context.Background(), `SELECT timezone FROM sites WHERE id=$1`, fmt.Sprint(site["id"])).Scan(&timezone); err != nil || timezone != "Asia/Tokyo" {
+		t.Fatalf("site timezone not stored: %q %v", timezone, err)
+	}
+	// Disabling a watch list entry that does not exist is a 404, not a 500.
+	if missing := env.do(http.MethodDelete, "/api/v1/admin/watchlist/does-not-exist", nil); missing.Code != http.StatusNotFound {
+		t.Fatalf("missing watch list entry returned %d", missing.Code)
+	}
+	if self := env.do(http.MethodPost, "/api/v1/admin/organizations", map[string]any{"id": "org-1", "name": "순환", "parentId": "org-1"}); self.Code != http.StatusBadRequest {
+		t.Fatalf("self-parented organization returned %d", self.Code)
+	}
+}
+
+func TestOnlySuperAdminManagesSuperAdmins(t *testing.T) {
+	env := newTestEnv(t)
+	adminID := env.createLocalUser("ops-admin", RoleAdmin, "")
+	targetID := env.createLocalUser("someone", RoleUser, "")
+	ops := &testEnv{server: env.server, handler: env.handler, t: t}
+	ops.login("ops-admin", testAdminPassword)
+	if escalate := ops.do(http.MethodPatch, "/api/v1/admin/users/"+targetID, map[string]any{"role": RoleSuperAdmin}); escalate.Code != http.StatusForbidden {
+		t.Fatalf("an admin granted super_admin: %d", escalate.Code)
+	}
+	if selfEscalate := ops.do(http.MethodPatch, "/api/v1/admin/users/"+adminID, map[string]any{"role": RoleSuperAdmin}); selfEscalate.Code != http.StatusForbidden {
+		t.Fatalf("an admin promoted themselves: %d", selfEscalate.Code)
+	}
+	ops.json(http.MethodPatch, "/api/v1/admin/users/"+targetID, map[string]any{"role": RoleLobby, "siteScope": []string{env.siteID()}}, http.StatusNoContent)
+	env.json(http.MethodPatch, "/api/v1/admin/users/"+targetID, map[string]any{"role": RoleSuperAdmin}, http.StatusNoContent)
+}
+
+func TestAuditLogPagingAndVisitorSearch(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	for index := 0; index < 3; index++ {
+		env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{"visitors": []map[string]any{{"name": fmt.Sprintf("검색%d", index), "phone": fmt.Sprintf("010-9999-000%d", index), "company": "찾기상사", "consent": true}}}), http.StatusCreated)
+	}
+	first := env.json(http.MethodGet, "/api/v1/admin/audit-logs?limit=2", nil, http.StatusOK)
+	if first["hasMore"] != true {
+		t.Fatalf("audit paging did not report more rows: %v", first)
+	}
+	second := env.json(http.MethodGet, fmt.Sprintf("/api/v1/admin/audit-logs?limit=2&before=%v", first["nextBefore"]), nil, http.StatusOK)
+	firstItems, _ := first["items"].([]any)
+	secondItems, _ := second["items"].([]any)
+	if len(secondItems) == 0 || fmt.Sprint(secondItems[0].(map[string]any)["id"]) == fmt.Sprint(firstItems[0].(map[string]any)["id"]) {
+		t.Fatalf("audit paging repeated or returned nothing: %v", second)
+	}
+	filtered := env.json(http.MethodGet, "/api/v1/admin/audit-logs?action=visit.create", nil, http.StatusOK)
+	for _, item := range filtered["items"].([]any) {
+		if fmt.Sprint(item.(map[string]any)["action"]) != "visit.create" {
+			t.Fatalf("action filter leaked %v", item)
+		}
+	}
+	byName := env.json(http.MethodGet, "/api/v1/admin/visitors?q="+url.QueryEscape("검색1"), nil, http.StatusOK)
+	if items, _ := byName["items"].([]any); len(items) != 1 {
+		t.Fatalf("visitor search by name returned %d rows", len(items))
+	}
+	byPhone := env.json(http.MethodGet, "/api/v1/admin/visitors?q="+url.QueryEscape("010-9999-0002"), nil, http.StatusOK)
+	if items, _ := byPhone["items"].([]any); len(items) != 1 {
+		t.Fatalf("visitor search by phone returned %d rows", len(items))
+	}
+	byCompany := env.json(http.MethodGet, "/api/v1/admin/visitors?q="+url.QueryEscape("찾기"), nil, http.StatusOK)
+	if items, _ := byCompany["items"].([]any); len(items) != 3 {
+		t.Fatalf("visitor search by company returned %d rows", len(items))
+	}
+}
+
 func TestFailedNotificationCanBeRetried(t *testing.T) {
 	env := newTestEnv(t)
 	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
