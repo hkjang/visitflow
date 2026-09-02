@@ -221,6 +221,15 @@ func contentSecurityPolicy(nonce string) string {
 		"worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 }
 
+// fallbackContentSecurityPolicy is used when the nonce could not be published
+// to the page. Both style directives must allow inline sources here, because
+// style-src-elem overrides style-src for <style> elements.
+func fallbackContentSecurityPolicy() string {
+	policy := contentSecurityPolicy("")
+	policy = strings.Replace(policy, "style-src 'self';", "style-src 'self' 'unsafe-inline';", 1)
+	return strings.Replace(policy, "style-src-elem 'self';", "style-src-elem 'self' 'unsafe-inline';", 1)
+}
+
 func (s *Server) accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -309,7 +318,7 @@ func (s *Server) spaHandler() http.Handler {
 		if !injected {
 			// Without the meta tag the UI cannot nonce its runtime stylesheets,
 			// so fall back rather than serving an unstyled page.
-			w.Header().Set("Content-Security-Policy", strings.ReplaceAll(contentSecurityPolicy(""), "style-src 'self'", "style-src 'self' 'unsafe-inline'"))
+			w.Header().Set("Content-Security-Policy", fallbackContentSecurityPolicy())
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")

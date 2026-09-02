@@ -117,9 +117,18 @@ func (s *Server) loginLock(ctx context.Context, keys []string) time.Duration {
 	return remaining
 }
 
+// ipLockoutMultiplier widens the per-address threshold. Many users share one
+// egress address behind NAT or a proxy, so the address counter only catches
+// spraying attacks while the account counter protects individual logins.
+const ipLockoutMultiplier = 10
+
 func (s *Server) recordLoginFailure(ctx context.Context, keys []string) {
 	maxAttempts, lockoutMinutes := s.throttlePolicy(ctx)
 	for _, key := range keys {
+		threshold := maxAttempts
+		if strings.HasPrefix(key, "ip:") {
+			threshold = maxAttempts * ipLockoutMultiplier
+		}
 		_, err := s.db.Exec(ctx, `INSERT INTO auth_throttle(key,failures,first_failure_at,last_failure_at)
 			VALUES($1,1,now(),now())
 			ON CONFLICT (key) DO UPDATE SET
@@ -128,7 +137,7 @@ func (s *Server) recordLoginFailure(ctx context.Context, keys []string) {
 				last_failure_at=now(),
 				locked_until=CASE
 					WHEN (CASE WHEN auth_throttle.last_failure_at<now()-($2::int*interval '1 minute') THEN 1 ELSE auth_throttle.failures+1 END)>=$3
-					THEN now()+($2::int*interval '1 minute') ELSE auth_throttle.locked_until END`, key, lockoutMinutes, maxAttempts)
+					THEN now()+($2::int*interval '1 minute') ELSE auth_throttle.locked_until END`, key, lockoutMinutes, threshold)
 		if err != nil {
 			s.logger.Error("login throttle update failed", "error", err)
 		}

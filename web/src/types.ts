@@ -20,6 +20,7 @@ export interface User {
   lastLoginAt?: string;
   delegateUserId?: string;
   delegateUntil?: string;
+  approvalDelegate?: boolean;
 }
 
 export interface VersionInfo {

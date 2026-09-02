@@ -27,6 +27,9 @@ type User struct {
 	// DelegateUntil is in the future.
 	DelegateUserID *string    `json:"delegateUserId,omitempty"`
 	DelegateUntil  *time.Time `json:"delegateUntil,omitempty"`
+	// ApprovalDelegate is true while a department manager has delegated to this
+	// user, which grants approval rights for that manager's department.
+	ApprovalDelegate bool `json:"approvalDelegate,omitempty"`
 }
 
 // HasActiveDelegate reports whether approvals and notifications should route to
@@ -40,7 +43,7 @@ func (u User) CanManageLobby() bool {
 	return u.Role == RoleLobby || u.Role == RoleSecurity || u.IsAdmin()
 }
 func (u User) CanApprove() bool {
-	return u.Role == RoleDeptManager || u.Role == RoleSecurity || u.IsAdmin()
+	return u.Role == RoleDeptManager || u.Role == RoleSecurity || u.IsAdmin() || u.ApprovalDelegate
 }
 func (u User) CanAudit() bool {
 	return u.Role == RoleAuditor || u.Role == RoleSecurity || u.IsAdmin()

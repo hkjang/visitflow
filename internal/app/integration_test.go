@@ -20,7 +20,13 @@ import (
 	"github.com/hkjang/visitflow/internal/database"
 	"github.com/hkjang/visitflow/internal/platform"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 )
+
+func bcryptHash(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), 4)
+	return string(hash), err
+}
 
 // The integration suite exercises the flows that carry the product's security
 // promises — single-use QR, approval gating, consent capture, throttling — end
@@ -442,6 +448,110 @@ func TestKioskDeviceCanCheckVisitorsIn(t *testing.T) {
 	revoked := kiosk.do(http.MethodGet, "/api/v1/lobby/current", nil)
 	if revoked.Code != http.StatusUnauthorized {
 		t.Fatalf("a revoked kiosk device still had access: %d", revoked.Code)
+	}
+}
+
+// createLocalUser inserts a password user with the given role and department so
+// role- and delegation-dependent flows can be exercised end to end.
+func (e *testEnv) createLocalUser(username, role, departmentID string) string {
+	e.t.Helper()
+	hash, err := bcryptHash(testAdminPassword)
+	if err != nil {
+		e.t.Fatalf("hash: %v", err)
+	}
+	id := newID()
+	if _, err := e.server.db.Exec(context.Background(), `INSERT INTO users(id,username,password_hash,display_name,role,source,department_id) VALUES($1,$2,$3,$2,$4,'local',NULLIF($5,''))`,
+		id, username, hash, role, departmentID); err != nil {
+		e.t.Fatalf("create user %s: %v", username, err)
+	}
+	return id
+}
+
+func TestDelegateOfDepartmentManagerCanApprove(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	department := env.json(http.MethodPost, "/api/v1/admin/organizations", map[string]string{"name": "연구소"}, http.StatusOK)
+	departmentID := fmt.Sprint(department["id"])
+	managerID := env.createLocalUser("manager", RoleDeptManager, departmentID)
+	env.createLocalUser("deputy", RoleUser, "")
+	hostID := env.createLocalUser("host", RoleUser, departmentID)
+
+	// Turn the approval workflow on and file a visit in the manager's department.
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"visit.approval_enabled": "true"}}, http.StatusOK)
+	hostEnv := &testEnv{server: env.server, handler: env.handler, t: t}
+	hostEnv.login("host", testAdminPassword)
+	created := hostEnv.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, nil), http.StatusCreated)
+	visitID := fmt.Sprint(created["id"])
+	if created["status"] != "PENDING_APPROVAL" {
+		t.Fatalf("visit did not enter approval: %v", created)
+	}
+	_ = hostID
+
+	// Before any delegation the deputy is a plain user without approval rights.
+	deputy := &testEnv{server: env.server, handler: env.handler, t: t}
+	deputy.login("deputy", testAdminPassword)
+	if denied := deputy.do(http.MethodPost, "/api/v1/visits/"+visitID+"/approve", map[string]string{"reason": "x"}); denied.Code != http.StatusForbidden {
+		t.Fatalf("undelegated user approved a visit: %d", denied.Code)
+	}
+
+	// The manager delegates to the deputy for a day.
+	manager := &testEnv{server: env.server, handler: env.handler, t: t}
+	manager.login("manager", testAdminPassword)
+	deputyID := ""
+	if err := env.server.db.QueryRow(context.Background(), `SELECT id FROM users WHERE username='deputy'`).Scan(&deputyID); err != nil {
+		t.Fatalf("deputy id: %v", err)
+	}
+	manager.json(http.MethodPatch, "/api/v1/profile", map[string]any{"displayName": "manager", "delegateUserId": deputyID, "delegateUntil": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)}, http.StatusNoContent)
+	_ = managerID
+
+	deputy.login("deputy", testAdminPassword)
+	me := deputy.json(http.MethodGet, "/api/v1/auth/me", nil, http.StatusOK)
+	if user, _ := me["user"].(map[string]any); user["approvalDelegate"] != true {
+		t.Fatalf("delegate flag missing from /auth/me: %v", me["user"])
+	}
+	pending := deputy.json(http.MethodGet, "/api/v1/visits?status=PENDING_APPROVAL", nil, http.StatusOK)
+	if items, _ := pending["items"].([]any); len(items) != 1 {
+		t.Fatalf("delegate does not see the department's pending visit: %v", pending)
+	}
+	deputy.json(http.MethodPost, "/api/v1/visits/"+visitID+"/approve", map[string]string{"reason": "대리 승인"}, http.StatusNoContent)
+	var status string
+	if err := env.server.db.QueryRow(context.Background(), `SELECT status FROM visits WHERE id=$1`, visitID).Scan(&status); err != nil || status != "SCHEDULED" {
+		t.Fatalf("visit status after delegate approval: %s %v", status, err)
+	}
+}
+
+func TestWalkInWithoutHostIsRejected(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	device := env.json(http.MethodPost, "/api/v1/admin/kiosk-devices", map[string]any{"name": "kiosk", "siteId": siteID, "validDays": 1}, http.StatusCreated)
+	kiosk := &testEnv{server: env.server, handler: env.handler, t: t}
+	enrolled := kiosk.json(http.MethodPost, "/api/v1/kiosk/enroll", map[string]string{"token": fmt.Sprint(device["token"])}, http.StatusOK)
+	kiosk.csrf = fmt.Sprint(enrolled["csrfToken"])
+	response := kiosk.do(http.MethodPost, "/api/v1/lobby/walk-ins", visitBody(siteID, nil))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("walk-in without a host returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestKioskCheckInRecordsDeviceLobby(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	reference := env.json(http.MethodGet, "/api/v1/reference-data", nil, http.StatusOK)
+	lobbies, _ := reference["lobbies"].([]any)
+	lobbyID := fmt.Sprint(lobbies[0].(map[string]any)["id"])
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, nil), http.StatusCreated)
+	token := passTokenFrom(t, created)
+	device := env.json(http.MethodPost, "/api/v1/admin/kiosk-devices", map[string]any{"name": "kiosk", "siteId": siteID, "lobbyId": lobbyID, "validDays": 1}, http.StatusCreated)
+	kiosk := &testEnv{server: env.server, handler: env.handler, t: t}
+	enrolled := kiosk.json(http.MethodPost, "/api/v1/kiosk/enroll", map[string]string{"token": fmt.Sprint(device["token"])}, http.StatusOK)
+	kiosk.csrf = fmt.Sprint(enrolled["csrfToken"])
+	kiosk.json(http.MethodPost, "/api/v1/checkins", map[string]string{"token": token, "method": "kiosk"}, http.StatusCreated)
+	var recorded string
+	if err := env.server.db.QueryRow(context.Background(), `SELECT COALESCE(lobby_id,'') FROM visit_events WHERE event_type='CHECKED_IN' ORDER BY created_at DESC LIMIT 1`).Scan(&recorded); err != nil {
+		t.Fatalf("read event: %v", err)
+	}
+	if recorded != lobbyID {
+		t.Fatalf("check-in event recorded lobby %q, want the kiosk's lobby %q", recorded, lobbyID)
 	}
 }
 

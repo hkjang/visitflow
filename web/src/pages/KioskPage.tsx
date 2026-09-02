@@ -6,7 +6,7 @@ import QrCodeScannerRounded from "@mui/icons-material/QrCodeScannerRounded";
 import VideocamRounded from "@mui/icons-material/VideocamRounded";
 import StopCircleOutlined from "@mui/icons-material/StopCircleOutlined";
 import { useSearchParams } from "react-router-dom";
-import { api, postJSON, setCSRF } from "../api";
+import { api, postJSON, setKioskCSRF } from "../api";
 import { Logo } from "../components/Logo";
 
 type VerifyResult = { visitor: string; company?: string; host: string; department?: string; site: string; lobby?: string; startAt: string; endAt: string };
@@ -40,7 +40,7 @@ export function KioskPage() {
     setBusy(true);
     try {
       const result = await postJSON<{ device: { name: string }; csrfToken: string }>("/api/v1/kiosk/enroll", { token: value.trim() });
-      setCSRF(result.csrfToken);
+      setKioskCSRF(result.csrfToken);
       setDevice(result.device.name);
       setEnrolled(true);
       setStatus({ tone: "success", text: `${result.device.name} 기기로 등록했습니다.` });
@@ -60,7 +60,7 @@ export function KioskPage() {
       return;
     }
     const csrf = readKioskCSRF();
-    if (csrf) setCSRF(csrf);
+    if (csrf) setKioskCSRF(csrf);
   }, [enroll, params, setParams]);
 
   const refresh = useCallback(async () => {

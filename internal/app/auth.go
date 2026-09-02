@@ -287,8 +287,10 @@ func (s *Server) loadUserScope(ctx context.Context, u *User) {
 	if u == nil || u.ID == "" {
 		return
 	}
-	_ = s.db.QueryRow(ctx, `SELECT department_id,site_scope,delegate_user_id,delegate_until FROM users WHERE id=$1`, u.ID).
-		Scan(&u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil)
+	_ = s.db.QueryRow(ctx, `SELECT department_id,site_scope,delegate_user_id,delegate_until,
+		EXISTS(SELECT 1 FROM users m WHERE m.delegate_user_id=users.id AND m.delegate_until>now() AND m.active AND m.role='dept_manager')
+		FROM users WHERE id=$1`, u.ID).
+		Scan(&u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil, &u.ApprovalDelegate)
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {

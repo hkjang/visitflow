@@ -141,12 +141,15 @@ func (s *Server) referenceData(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
+	// Department and delegation are pointers so a client that omits them keeps
+	// the stored values; only an explicit empty string clears a field. Phone is
+	// intentionally replaced wholesale because the UI documents that behaviour.
 	var in struct {
-		DisplayName    string `json:"displayName"`
-		Phone          string `json:"phone"`
-		DepartmentID   string `json:"departmentId"`
-		DelegateUserID string `json:"delegateUserId"`
-		DelegateUntil  string `json:"delegateUntil"`
+		DisplayName    string  `json:"displayName"`
+		Phone          string  `json:"phone"`
+		DepartmentID   *string `json:"departmentId"`
+		DelegateUserID *string `json:"delegateUserId"`
+		DelegateUntil  string  `json:"delegateUntil"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -157,7 +160,14 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	delegateID := strings.TrimSpace(in.DelegateUserID)
+	departmentSet, department := in.DepartmentID != nil, ""
+	if departmentSet {
+		department = strings.TrimSpace(*in.DepartmentID)
+	}
+	delegateSet, delegateID := in.DelegateUserID != nil, ""
+	if delegateSet {
+		delegateID = strings.TrimSpace(*in.DelegateUserID)
+	}
 	var delegateUntil *time.Time
 	if delegateID != "" {
 		if delegateID == u.ID {
@@ -180,15 +190,18 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		delegateUntil = &parsed
 	}
-	_, err = s.db.Exec(r.Context(), `UPDATE users SET display_name=COALESCE(NULLIF($2,''),display_name),phone_encrypted=NULLIF($3,''),department_id=NULLIF($4,''),
-		delegate_user_id=NULLIF($5,''),delegate_until=$6,updated_at=now() WHERE id=$1`, u.ID, strings.TrimSpace(in.DisplayName), phone, in.DepartmentID, delegateID, delegateUntil)
+	_, err = s.db.Exec(r.Context(), `UPDATE users SET display_name=COALESCE(NULLIF($2,''),display_name),phone_encrypted=NULLIF($3,''),
+		department_id=CASE WHEN $4 THEN NULLIF($5,'') ELSE department_id END,
+		delegate_user_id=CASE WHEN $6 THEN NULLIF($7,'') ELSE delegate_user_id END,
+		delegate_until=CASE WHEN $6 THEN $8 ELSE delegate_until END,
+		updated_at=now() WHERE id=$1`, u.ID, strings.TrimSpace(in.DisplayName), phone, departmentSet, department, delegateSet, delegateID, delegateUntil)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
 	s.audit(r.Context(), u.ID, "profile.update", "user", u.ID, r.RemoteAddr, map[string]any{
-		"departmentChanged": in.DepartmentID != "", "phoneConfigured": in.Phone != "",
-		"delegateUserId": delegateID, "delegateUntil": delegateUntil,
+		"departmentChanged": departmentSet, "phoneConfigured": in.Phone != "",
+		"delegateChanged": delegateSet, "delegateUserId": delegateID, "delegateUntil": delegateUntil,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -302,9 +315,10 @@ func (s *Server) queryVisits(ctx context.Context, u User, q visitQuery) ([]Visit
 		AND ($3='' OR v.id=$3 OR v.request_no ILIKE '%%'||$3||'%%' OR p.company ILIKE '%%'||$3||'%%' OR h.display_name ILIKE '%%'||$3||'%%' OR p.name_hash=$9 OR p.phone_hash=$10)
 		AND ($5 IN ('admin','super_admin','security','auditor')
 		 OR ($5='lobby' AND (cardinality($7::text[])=0 OR v.site_id=ANY($7::text[])))
-		 OR ($5='dept_manager' AND (v.department_id=NULLIF($6,'') OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=v.host_user_id AND hu.delegate_user_id=$4 AND hu.delegate_until>now())))
+		 OR ($5='dept_manager' AND v.department_id=NULLIF($6,''))
 		 OR v.host_user_id=$4
-		 OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=v.host_user_id AND hu.delegate_user_id=$4 AND hu.delegate_until>now()))
+		 OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=v.host_user_id AND hu.delegate_user_id=$4 AND hu.delegate_until>now() AND hu.active)
+		 OR EXISTS(SELECT 1 FROM users m WHERE m.delegate_user_id=$4 AND m.delegate_until>now() AND m.active AND m.role='dept_manager' AND m.department_id=v.department_id))
 		AND ($11=false OR (v.start_at,v.id)<($12::timestamptz,$13))
 		GROUP BY v.id,h.display_name,o.name,s.name,l.name,vt.name ORDER BY v.start_at DESC,v.id DESC LIMIT $8`,
 		q.Status, q.Period, search, u.ID, u.Role, dept, u.SiteScope, q.Limit+1,
@@ -405,6 +419,13 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 	hostID := actor.ID
 	if in.HostUserID != "" && (actor.CanManageLobby() || actor.IsAdmin()) {
 		hostID = in.HostUserID
+	}
+	if hostID == "" {
+		return nil, visitError{400, "host_required", "방문 담당자를 지정해야 합니다"}
+	}
+	var hostActive bool
+	if err := s.db.QueryRow(ctx, `SELECT active FROM users WHERE id=$1`, hostID).Scan(&hostActive); err != nil || !hostActive {
+		return nil, visitError{400, "invalid_host", "방문 담당자를 찾을 수 없거나 비활성 사용자입니다"}
 	}
 	if in.DepartmentID == "" {
 		var d *string
@@ -563,6 +584,19 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 		result["walkIn"] = true
 	}
 	return result, nil
+}
+
+// actsForHost reports whether u is the host or the host's active delegate.
+func (s *Server) actsForHost(ctx context.Context, u User, hostID string) bool {
+	if u.ID == "" {
+		return false
+	}
+	if u.ID == hostID {
+		return true
+	}
+	var delegated bool
+	_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND delegate_user_id=$2 AND delegate_until>now())`, hostID, u.ID).Scan(&delegated)
+	return delegated
 }
 
 func requestRemote(r *http.Request) string {
@@ -811,7 +845,9 @@ func (s *Server) cancelVisit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	tag, err := tx.Exec(r.Context(), `UPDATE visits SET status='CANCELLED',cancelled_at=now(),updated_at=now() WHERE id=$1 AND (host_user_id=$2 OR $3) AND status NOT IN ('CHECKED_OUT','CANCELLED','REJECTED')`, id, u.ID, u.IsAdmin() || u.Role == RoleSecurity)
+	tag, err := tx.Exec(r.Context(), `UPDATE visits SET status='CANCELLED',cancelled_at=now(),updated_at=now()
+		WHERE id=$1 AND (host_user_id=$2 OR $3 OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=visits.host_user_id AND hu.delegate_user_id=$2 AND hu.delegate_until>now()))
+		AND status NOT IN ('CHECKED_OUT','CANCELLED','REJECTED')`, id, u.ID, u.IsAdmin() || u.Role == RoleSecurity)
 	if err == nil && tag.RowsAffected() > 0 {
 		_, err = tx.Exec(r.Context(), `UPDATE visitor_visits SET status='CANCELLED' WHERE visit_id=$1 AND status NOT IN ('CHECKED_OUT','CANCELLED')`, id)
 	}
@@ -901,8 +937,11 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 	}
 	var startAt, endAt time.Time
 	tag, err := tx.Exec(r.Context(), `UPDATE visits SET status=$2,approval_reason=NULLIF($3,''),approved_by=$4,approved_at=now(),updated_at=now()
-		WHERE id=$1 AND status='PENDING_APPROVAL' AND ($5<>'dept_manager' OR department_id=NULLIF($6,'')
-			OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=visits.host_user_id AND hu.delegate_user_id=$4 AND hu.delegate_until>now()))`, id, status, in.Reason, u.ID, u.Role, departmentID)
+		WHERE id=$1 AND status='PENDING_APPROVAL' AND (
+			$5 IN ('security','admin','super_admin')
+			OR ($5='dept_manager' AND department_id=NULLIF($6,''))
+			OR EXISTS(SELECT 1 FROM users m WHERE m.delegate_user_id=$4 AND m.delegate_until>now() AND m.active AND m.role='dept_manager' AND m.department_id=visits.department_id)
+		)`, id, status, in.Reason, u.ID, u.Role, departmentID)
 	if err == nil && tag.RowsAffected() > 0 {
 		err = tx.QueryRow(r.Context(), `SELECT start_at,end_at FROM visits WHERE id=$1`, id).Scan(&startAt, &endAt)
 	}
@@ -996,7 +1035,7 @@ func (s *Server) reissueQR(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	if hostID != u.ID && !u.CanManageLobby() && !u.IsAdmin() {
+	if !s.actsForHost(r.Context(), u, hostID) && !u.CanManageLobby() && !u.IsAdmin() {
 		writeError(w, 403, "reissue_forbidden", "QR을 재발급할 수 없습니다")
 		return
 	}
@@ -1062,7 +1101,7 @@ func (s *Server) resendVisitNotification(w http.ResponseWriter, r *http.Request)
 		notFoundOrServer(w, err)
 		return
 	}
-	if hostID != u.ID && !u.CanManageLobby() && !u.IsAdmin() {
+	if !s.actsForHost(r.Context(), u, hostID) && !u.CanManageLobby() && !u.IsAdmin() {
 		writeError(w, 403, "forbidden", "재발송 권한이 없습니다")
 		return
 	}
@@ -1381,6 +1420,11 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
+	// An unattended kiosk knows which lobby it stands in; record that lobby
+	// unless the request names one explicitly.
+	if device, ok := kioskFrom(r); ok && in.LobbyID == "" {
+		in.LobbyID = device.LobbyID
+	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		notFoundOrServer(w, err)

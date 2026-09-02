@@ -71,7 +71,14 @@ self.addEventListener("fetch", (event) => {
   // Never cache passes, QR images or any other visitor data.
   if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/img/") || url.pathname === "/metrics") return;
 
-  if (request.mode === "navigate" || url.pathname.startsWith("/assets/") || url.pathname === "/manifest.webmanifest" || url.pathname.endsWith(".svg") || url.pathname.endsWith(".png")) {
+  if (request.mode === "navigate") {
+    // Pass, self-registration and kiosk enrolment URLs carry tokens; keep them
+    // out of Cache Storage. The staff shell is what must open offline.
+    const tokenBearing = url.search !== "" || url.pathname.startsWith("/q/") || url.pathname.startsWith("/r/") || url.pathname.startsWith("/kiosk");
+    if (!tokenBearing) event.respondWith(shellFirstNetwork(request));
+    return;
+  }
+  if (url.pathname.startsWith("/assets/") || url.pathname === "/manifest.webmanifest" || url.pathname.endsWith(".svg") || url.pathname.endsWith(".png")) {
     event.respondWith(shellFirstNetwork(request));
   }
 });

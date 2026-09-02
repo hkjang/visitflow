@@ -37,6 +37,8 @@ const menuScrollbar = {
   "&::-webkit-scrollbar-thumb": { backgroundColor: "#8BAEA5", borderRadius: 12, border: "2px solid transparent", backgroundClip: "padding-box" },
   "&::-webkit-scrollbar-thumb:hover": { backgroundColor: "#5F8F83" },
 } as const;
+// datetime-local fields take local wall-clock time; an ISO string is UTC.
+const toLocalInput = (date: Date) => new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 const roleNames: Record<string, string> = { user: "방문 요청자", lobby: "로비 담당자", dept_manager: "부서 관리자", security: "보안 담당자", auditor: "감사 담당자", admin: "서비스 관리자", super_admin: "최고 관리자" };
 type Nav = { label: string; path: string; icon: React.ReactNode };
 
@@ -68,7 +70,7 @@ export function AppShell() {
       { label: "방문 템플릿", path: "/templates", icon: <BookmarkBorderRounded /> },
       { label: "사용자 가이드", path: "/guides", icon: <MenuBookRounded /> },
     ];
-    if (user && ["dept_manager", "security", "admin", "super_admin"].includes(user.role)) personal.push({ label: "방문 승인", path: "/approvals", icon: <HourglassTopRounded /> });
+    if (user && (["dept_manager", "security", "admin", "super_admin"].includes(user.role) || user.approvalDelegate)) personal.push({ label: "방문 승인", path: "/approvals", icon: <HourglassTopRounded /> });
     const lobbyItems: Nav[] = lobby ? [
       { label: "Lobby Dashboard", path: "/lobby", icon: <SpaceDashboardRounded /> },
       { label: "QR Scan", path: "/lobby/scan", icon: <QrCodeScannerRounded /> },
@@ -92,7 +94,7 @@ export function AppShell() {
   const openProfile = async () => {
     setProfileAnchor(null); setProfileName(user?.displayName ?? ""); setProfileDepartment(user?.departmentId ?? ""); setProfilePhone("");
     setDelegateUserId(user?.delegateUserId ?? "");
-    setDelegateUntil(user?.delegateUntil ? new Date(user.delegateUntil).toISOString().slice(0, 16) : "");
+    setDelegateUntil(user?.delegateUntil ? toLocalInput(new Date(user.delegateUntil)) : "");
     setProfileError(""); setProfileOpen(true);
     if (!reference) setReference(await api<ReferenceData>("/api/v1/reference-data"));
   };

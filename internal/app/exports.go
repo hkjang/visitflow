@@ -23,11 +23,28 @@ func exportFilename(prefix string) string {
 	return fmt.Sprintf("%s-%s.csv", prefix, time.Now().Format("20060102-1504"))
 }
 
+// formatTime renders with an explicit offset: the service container usually
+// runs in UTC, and a bare wall-clock time would be misread by the operator.
 func formatTime(value *time.Time) string {
 	if value == nil {
 		return ""
 	}
-	return value.Local().Format("2006-01-02 15:04:05")
+	return value.Format(time.RFC3339)
+}
+
+// formatSiteTime renders in the site's own timezone for human reading.
+func formatSiteTime(value *time.Time, location *time.Location) string {
+	if value == nil {
+		return ""
+	}
+	return value.In(location).Format("2006-01-02 15:04")
+}
+
+func siteLocation(name string) *time.Location {
+	if location, err := time.LoadLocation(name); err == nil {
+		return location
+	}
+	return time.UTC
 }
 
 func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +84,7 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 	if days < 1 || days > 3650 {
 		days = 90
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT v.request_no,v.start_at,v.end_at,si.name,COALESCE(l.name,''),COALESCE(vt.name,''),h.display_name,COALESCE(o.name,''),
+	rows, err := s.db.Query(r.Context(), `SELECT v.request_no,v.start_at,v.end_at,si.name,si.timezone,COALESCE(l.name,''),COALESCE(vt.name,''),h.display_name,COALESCE(o.name,''),
 		v.purpose,COALESCE(v.place_detail,''),v.status,vv.status,p.name_encrypted,COALESCE(p.company,''),p.masked_at,vv.checked_in_at,vv.checked_out_at,COALESCE(vv.badge_no,'')
 		FROM visits v
 		JOIN visitor_visits vv ON vv.visit_id=v.id
@@ -85,21 +102,22 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	writer := csvWriter(w, exportFilename("visitflow-visits"))
-	_ = writer.Write([]string{"requestNo", "startAt", "endAt", "site", "lobby", "visitType", "host", "department", "purpose", "placeDetail", "visitStatus", "visitorStatus", "visitor", "company", "checkedInAt", "checkedOutAt", "badgeNo"})
+	_ = writer.Write([]string{"requestNo", "startAt", "endAt", "timezone", "site", "lobby", "visitType", "host", "department", "purpose", "placeDetail", "visitStatus", "visitorStatus", "visitor", "company", "checkedInAt", "checkedOutAt", "badgeNo"})
 	count := 0
 	for rows.Next() {
-		var requestNo, site, lobby, visitType, host, department, purpose, place, visitStatus, participantStatus, nameEnc, company, badge string
+		var requestNo, site, timezone, lobby, visitType, host, department, purpose, place, visitStatus, participantStatus, nameEnc, company, badge string
 		var startAt, endAt time.Time
 		var maskedAt, checkedIn, checkedOut *time.Time
-		if rows.Scan(&requestNo, &startAt, &endAt, &site, &lobby, &visitType, &host, &department, &purpose, &place, &visitStatus, &participantStatus, &nameEnc, &company, &maskedAt, &checkedIn, &checkedOut, &badge) != nil {
+		if rows.Scan(&requestNo, &startAt, &endAt, &site, &timezone, &lobby, &visitType, &host, &department, &purpose, &place, &visitStatus, &participantStatus, &nameEnc, &company, &maskedAt, &checkedIn, &checkedOut, &badge) != nil {
 			continue
 		}
 		visitor := s.decryptOptional(nameEnc)
 		if maskedAt != nil {
 			visitor = maskName(visitor)
 		}
-		_ = writer.Write([]string{requestNo, formatTime(&startAt), formatTime(&endAt), site, lobby, visitType, host, department, purpose, place,
-			visitStatus, participantStatus, visitor, company, formatTime(checkedIn), formatTime(checkedOut), badge})
+		location := siteLocation(timezone)
+		_ = writer.Write([]string{requestNo, formatSiteTime(&startAt, location), formatSiteTime(&endAt, location), timezone, site, lobby, visitType, host, department, purpose, place,
+			visitStatus, participantStatus, visitor, company, formatSiteTime(checkedIn, location), formatSiteTime(checkedOut, location), badge})
 		count++
 	}
 	writer.Flush()

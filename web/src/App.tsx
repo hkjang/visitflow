@@ -35,7 +35,7 @@ function AdminGuard({ children, audit = false, security = false }: { children: R
 }
 function ApprovalGuard({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
-  return user && ["dept_manager", "security", "admin", "super_admin"].includes(user.role) ? children : <Navigate to="/" replace />;
+  return user && (["dept_manager", "security", "admin", "super_admin"].includes(user.role) || user.approvalDelegate) ? children : <Navigate to="/" replace />;
 }
 export default function App() {
   const { loading } = useAuth();

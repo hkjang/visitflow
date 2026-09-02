@@ -1,6 +1,13 @@
 let csrfToken = "";
+// The kiosk keeps its own token: the AuthProvider clears the session token
+// whenever /auth/me fails, which is exactly what happens on an unattended
+// kiosk that never signs a person in.
+let kioskCsrfToken = "";
 export const setCSRF = (value: string) => {
   csrfToken = value;
+};
+export const setKioskCSRF = (value: string) => {
+  kioskCsrfToken = value;
 };
 
 type APIErrorShape = { error?: { code?: string; message?: string } };
@@ -18,8 +25,9 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData))
     headers.set("Content-Type", "application/json");
-  if (csrfToken && !["GET", "HEAD"].includes(init.method ?? "GET"))
-    headers.set("X-CSRF-Token", csrfToken);
+  const token = csrfToken || kioskCsrfToken;
+  if (token && !["GET", "HEAD"].includes(init.method ?? "GET"))
+    headers.set("X-CSRF-Token", token);
   const response = await fetch(path, {
     ...init,
     headers,

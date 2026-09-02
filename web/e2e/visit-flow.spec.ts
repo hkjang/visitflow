@@ -74,6 +74,32 @@ test.describe("visitor lifecycle", () => {
     await expect(page.getByText(visitor).first()).toBeVisible();
   });
 
+  // The kiosk never signs a person in, so its CSRF token must survive the app's
+  // failed /auth/me probe; this drives the full enrol → scan → check-in path.
+  test("enrols a kiosk tablet and checks a visitor in without a login", async ({ page, context }) => {
+    await login(page);
+    const visitor = `키오스크${Date.now() % 100000}`;
+    const passUrl = await createVisit(page, visitor);
+    const enrolled = await page.evaluate(async () => {
+      const me = await fetch("/api/v1/auth/me").then((r) => r.json());
+      const reference = await fetch("/api/v1/reference-data").then((r) => r.json());
+      const response = await fetch("/api/v1/admin/kiosk-devices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": me.csrfToken },
+        body: JSON.stringify({ name: "E2E 키오스크", siteId: reference.sites[0].id, validDays: 1 }),
+      });
+      return response.json() as Promise<{ enrollPath: string }>;
+    });
+    const kiosk = await context.newPage();
+    await kiosk.context().clearCookies();
+    await kiosk.goto(enrolled.enrollPath);
+    await expect(kiosk.getByRole("heading", { name: "방문증 QR을 스캔해 주세요" })).toBeVisible();
+    const field = kiosk.getByLabel(/^QR URL 또는 Token/);
+    await field.fill(passUrl);
+    await field.press("Enter");
+    await expect(kiosk.getByRole("alert")).toContainText("체크인되었습니다");
+  });
+
   test("prints the emergency roster with the current headcount", async ({ page }) => {
     await login(page);
     await page.goto("/lobby/roster");

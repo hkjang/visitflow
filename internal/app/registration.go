@@ -69,7 +69,7 @@ func (s *Server) createRegistrationInvitation(w http.ResponseWriter, r *http.Req
 		notFoundOrServer(w, err)
 		return
 	}
-	if hostID != u.ID && !u.CanManageLobby() && !u.IsAdmin() {
+	if !s.actsForHost(r.Context(), u, hostID) && !u.CanManageLobby() && !u.IsAdmin() {
 		writeError(w, http.StatusForbidden, "forbidden", "사전등록 링크를 만들 권한이 없습니다")
 		return
 	}
@@ -124,7 +124,7 @@ func (s *Server) revokeRegistrationInvitation(w http.ResponseWriter, r *http.Req
 		notFoundOrServer(w, err)
 		return
 	}
-	if hostID != u.ID && !u.CanManageLobby() && !u.IsAdmin() {
+	if !s.actsForHost(r.Context(), u, hostID) && !u.CanManageLobby() && !u.IsAdmin() {
 		writeError(w, http.StatusForbidden, "forbidden", "사전등록 링크를 폐기할 권한이 없습니다")
 		return
 	}
