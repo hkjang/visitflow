@@ -63,7 +63,7 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 	throttleKeys := loginThrottleKeys(clientIP(r), username)
 	if remaining := s.loginLock(r.Context(), throttleKeys); remaining > 0 {
 		s.metrics.loginLockouts.Add(1)
-		s.audit(r.Context(), "", "auth.login_locked", "user", "", r.RemoteAddr, map[string]string{"username": username})
+		s.audit(r.Context(), "", "auth.login_locked", "user", "", clientIP(r), map[string]string{"username": username})
 		w.Header().Set("Retry-After", strconv.Itoa(int(remaining.Seconds())+1))
 		writeError(w, http.StatusTooManyRequests, "login_locked",
 			fmt.Sprintf("로그인 시도가 많아 %d분 동안 잠겼습니다", int(remaining.Minutes())+1))
@@ -77,7 +77,7 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil || hash == "" || bcrypt.CompareHashAndPassword([]byte(hash), []byte(in.Password)) != nil {
 		s.metrics.loginFailures.Add(1)
 		s.recordLoginFailure(r.Context(), throttleKeys)
-		s.audit(r.Context(), "", "auth.login_failed", "user", "", r.RemoteAddr, map[string]string{"source": "local", "username": username})
+		s.audit(r.Context(), "", "auth.login_failed", "user", "", clientIP(r), map[string]string{"source": "local", "username": username})
 		time.Sleep(250 * time.Millisecond)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "아이디 또는 비밀번호를 확인하세요")
 		return
@@ -87,7 +87,7 @@ func (s *Server) localLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clearLoginFailures(r.Context(), throttleKeys)
-	s.audit(r.Context(), u.ID, "auth.login", "user", u.ID, r.RemoteAddr, map[string]string{"source": "local"})
+	s.audit(r.Context(), u.ID, "auth.login", "user", u.ID, clientIP(r), map[string]string{"source": "local"})
 	writeJSON(w, http.StatusOK, u)
 }
 
@@ -118,7 +118,7 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, u User) er
 		}
 	}
 	expires := time.Now().Add(time.Duration(hours) * time.Hour)
-	if _, err := s.db.Exec(r.Context(), `INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at,ip_address,user_agent) VALUES($1,$2,$3,$4,$5,$6)`, s.keys.Digest(raw), u.ID, csrf, expires, r.RemoteAddr, r.UserAgent()); err != nil {
+	if _, err := s.db.Exec(r.Context(), `INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at,ip_address,user_agent) VALUES($1,$2,$3,$4,$5,$6)`, s.keys.Digest(raw), u.ID, csrf, expires, clientIP(r), r.UserAgent()); err != nil {
 		return err
 	}
 	_, _ = s.db.Exec(r.Context(), `UPDATE users SET last_login_at=now() WHERE id=$1`, u.ID)
@@ -376,7 +376,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "auth.password_change", "user", u.ID, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "auth.password_change", "user", u.ID, clientIP(r), nil)
 	_, _ = s.db.Exec(r.Context(), `DELETE FROM sessions WHERE user_id=$1 AND token_hash<>$2`, u.ID, currentSessionDigest(r, s.keys))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -505,7 +505,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "session_error", "로그인 세션을 만들지 못했습니다")
 		return
 	}
-	s.audit(r.Context(), u.ID, "auth.login", "user", u.ID, r.RemoteAddr, map[string]string{"source": "oidc"})
+	s.audit(r.Context(), u.ID, "auth.login", "user", u.ID, clientIP(r), map[string]string{"source": "oidc"})
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
@@ -692,7 +692,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "user.update", "user", id, r.RemoteAddr, map[string]any{
+	s.audit(r.Context(), u.ID, "user.update", "user", id, clientIP(r), map[string]any{
 		"before": map[string]any{"role": beforeRole, "active": beforeActive, "departmentId": beforeDepartment, "siteScope": beforeSites, "roleOverride": beforeRoleOverride},
 		"after":  map[string]any{"role": afterRole, "active": afterActive, "departmentId": in.DepartmentID, "siteScope": sites, "roleOverride": roleOverride},
 	})

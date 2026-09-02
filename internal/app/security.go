@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -74,18 +73,6 @@ func (s *Server) verifyKeyAgainstExistingData(ctx context.Context) error {
 		return nil
 	}
 	return nil
-}
-
-func clientIP(r *http.Request) string {
-	remote := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(remote); err == nil {
-		remote = host
-	}
-	remote = strings.TrimSpace(remote)
-	if remote == "" {
-		return "unknown"
-	}
-	return remote
 }
 
 func (s *Server) throttlePolicy(ctx context.Context) (maxAttempts, lockoutMinutes int) {

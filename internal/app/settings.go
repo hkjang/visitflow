@@ -61,6 +61,12 @@ func (s *Server) invalidateSettings() {
 	s.settingsMu.Lock()
 	s.settingsCache = nil
 	s.settingsMu.Unlock()
+	// The trusted proxy list decides which address a request is attributed to,
+	// so a correction must take effect on the next request rather than after the
+	// cache window.
+	s.proxyCacheMu.Lock()
+	s.proxyCacheExpires = time.Time{}
+	s.proxyCacheMu.Unlock()
 }
 
 func (s *Server) listSettings(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +205,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.invalidateSettings()
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "settings.update", "settings", "", r.RemoteAddr, map[string]any{"changes": changes})
+	s.audit(r.Context(), u.ID, "settings.update", "settings", "", clientIP(r), map[string]any{"changes": changes})
 	writeJSON(w, http.StatusOK, map[string]any{"updated": updated})
 }
 
@@ -236,6 +242,11 @@ func validateSettingValue(key, value string) string {
 		n, err := strconv.Atoi(value)
 		if err != nil || (n != 0 && (n < 30 || n > 60)) {
 			return "Dynamic QR 주기는 0(비활성) 또는 30~60초여야 합니다"
+		}
+	}
+	if key == "security.trusted_proxies" && value != "" {
+		if _, invalid := parseTrustedProxies(value); len(invalid) > 0 {
+			return "신뢰할 Proxy 주소 형식을 확인하세요: " + strings.Join(invalid, ", ")
 		}
 	}
 	if key == "general.default_locale" && value != "" && normalizeLocale(value) == "" {
@@ -309,7 +320,7 @@ func (s *Server) exportSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "settings.export", "settings", "", r.RemoteAddr, map[string]any{"count": len(values)})
+	s.audit(r.Context(), u.ID, "settings.export", "settings", "", clientIP(r), map[string]any{"count": len(values)})
 	w.Header().Set("Content-Disposition", `attachment; filename="visitflow-settings.json"`)
 	writeJSON(w, http.StatusOK, map[string]any{"format": "visitflow-settings/1", "exportedAt": time.Now(), "version": s.version, "settings": values})
 }

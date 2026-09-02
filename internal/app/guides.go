@@ -150,7 +150,7 @@ func (s *Server) createGuide(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "guide.create", "guide_post", id, r.RemoteAddr, map[string]any{"title": in.Title, "category": in.Category, "published": in.Published, "pinned": in.Pinned})
+	s.audit(r.Context(), u.ID, "guide.create", "guide_post", id, clientIP(r), map[string]any{"title": in.Title, "category": in.Category, "published": in.Published, "pinned": in.Pinned})
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -176,7 +176,7 @@ func (s *Server) updateGuide(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "가이드 글을 찾을 수 없습니다")
 		return
 	}
-	s.audit(r.Context(), u.ID, "guide.update", "guide_post", id, r.RemoteAddr, map[string]any{
+	s.audit(r.Context(), u.ID, "guide.update", "guide_post", id, clientIP(r), map[string]any{
 		"title": in.Title, "category": in.Category, "published": in.Published, "pinned": in.Pinned,
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -192,6 +192,6 @@ func (s *Server) deleteGuide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "guide.delete", "guide_post", id, r.RemoteAddr, map[string]any{"title": title, "category": category, "published": published})
+	s.audit(r.Context(), u.ID, "guide.delete", "guide_post", id, clientIP(r), map[string]any{"title": title, "category": category, "published": published})
 	w.WriteHeader(http.StatusNoContent)
 }

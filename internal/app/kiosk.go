@@ -109,7 +109,7 @@ func (s *Server) enrollKiosk(w http.ResponseWriter, r *http.Request) {
 	expires := time.Now().AddDate(1, 0, 0)
 	http.SetCookie(w, &http.Cookie{Name: kioskCookie, Value: token, Path: "/", HttpOnly: true, Secure: requestIsHTTPS(r), SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: int(time.Until(expires).Seconds())})
 	http.SetCookie(w, &http.Cookie{Name: kioskCSRFCookie, Value: csrf, Path: "/", HttpOnly: false, Secure: requestIsHTTPS(r), SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: int(time.Until(expires).Seconds())})
-	s.audit(r.Context(), "", "kiosk.enroll", "kiosk_device", device.ID, r.RemoteAddr, map[string]string{"name": device.Name})
+	s.audit(r.Context(), "", "kiosk.enroll", "kiosk_device", device.ID, clientIP(r), map[string]string{"name": device.Name})
 	writeJSON(w, http.StatusOK, map[string]any{"device": device, "csrfToken": csrf})
 }
 
@@ -181,7 +181,7 @@ func (s *Server) createKioskDevice(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "kiosk.create", "kiosk_device", id, r.RemoteAddr, map[string]any{"name": in.Name, "siteId": in.SiteID, "validDays": in.ValidDays})
+	s.audit(r.Context(), u.ID, "kiosk.create", "kiosk_device", id, clientIP(r), map[string]any{"name": in.Name, "siteId": in.SiteID, "validDays": in.ValidDays})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": id, "name": in.Name, "token": token, "expiresAt": expiresAt,
 		"enrollPath": "/kiosk?token=" + token,
@@ -200,7 +200,7 @@ func (s *Server) revokeKioskDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "kiosk.revoke", "kiosk_device", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "kiosk.revoke", "kiosk_device", id, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -245,6 +245,6 @@ func (s *Server) emergencyRoster(w http.ResponseWriter, r *http.Request) {
 	if device, ok := kioskFrom(r); ok {
 		details["kioskDevice"] = device.Name
 	}
-	s.audit(r.Context(), actor, "roster.view", "visitor_visit", "", r.RemoteAddr, details)
+	s.audit(r.Context(), actor, "roster.view", "visitor_visit", "", clientIP(r), details)
 	writeJSON(w, http.StatusOK, map[string]any{"generatedAt": time.Now(), "count": len(items), "items": items})
 }

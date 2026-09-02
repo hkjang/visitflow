@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/netip"
 	"path"
 	"runtime/debug"
 	"strings"
@@ -43,6 +44,10 @@ type Server struct {
 	limitCacheValue   int
 	limitCacheExpires time.Time
 
+	proxyCacheMu      sync.Mutex
+	proxyCacheValue   []netip.Prefix
+	proxyCacheExpires time.Time
+
 	settingsMu    sync.RWMutex
 	settingsCache map[string]cachedSetting
 }
@@ -59,7 +64,7 @@ func NewServer(db *pgxpool.Pool, keys *platform.Keyring, logger *slog.Logger, we
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, s.recoverer, s.securityHeaders, s.accessLog,
+	r.Use(middleware.RequestID, s.resolveClientIP, s.recoverer, s.securityHeaders, s.accessLog,
 		middleware.Compress(5, "application/json", "text/html", "text/css", "text/plain", "text/csv", "application/javascript", "text/javascript", "image/svg+xml", "application/manifest+json"))
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

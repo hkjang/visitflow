@@ -240,7 +240,7 @@ func (s *Server) listVisitors(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "visitor.list", "visitor", "", r.RemoteAddr, map[string]int{"count": len(items)})
+	s.audit(r.Context(), u.ID, "visitor.list", "visitor", "", clientIP(r), map[string]int{"count": len(items)})
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 
@@ -286,7 +286,7 @@ func (s *Server) upsertSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "site.upsert", "site", in.ID, r.RemoteAddr, map[string]string{"code": in.Code, "name": in.Name})
+	s.audit(r.Context(), u.ID, "site.upsert", "site", in.ID, clientIP(r), map[string]string{"code": in.Code, "name": in.Name})
 	writeJSON(w, 200, map[string]string{"id": in.ID})
 }
 
@@ -327,7 +327,7 @@ func (s *Server) upsertLobby(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "lobby.upsert", "lobby", in.ID, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "lobby.upsert", "lobby", in.ID, clientIP(r), nil)
 	writeJSON(w, 200, map[string]string{"id": in.ID})
 }
 
@@ -368,7 +368,7 @@ func (s *Server) upsertDepartment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "department.upsert", "organization", in.ID, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "department.upsert", "organization", in.ID, clientIP(r), nil)
 	writeJSON(w, 200, map[string]string{"id": in.ID})
 }
 
@@ -390,7 +390,7 @@ func (s *Server) listWatchlist(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "watchlist.view", "watchlist", "", r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "watchlist.view", "watchlist", "", clientIP(r), nil)
 	writeJSON(w, 200, map[string]any{"items": items})
 }
 
@@ -430,7 +430,7 @@ func (s *Server) createWatchlist(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	s.audit(r.Context(), u.ID, "watchlist.create", "watchlist", id, r.RemoteAddr, map[string]any{"company": in.Company, "phoneConfigured": len(phoneHash) > 0})
+	s.audit(r.Context(), u.ID, "watchlist.create", "watchlist", id, clientIP(r), map[string]any{"company": in.Company, "phoneConfigured": len(phoneHash) > 0})
 	writeJSON(w, 201, map[string]string{"id": id})
 }
 
@@ -446,6 +446,6 @@ func (s *Server) deleteWatchlist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "watchlist.disable", "watchlist", id, r.RemoteAddr, nil)
+	s.audit(r.Context(), u.ID, "watchlist.disable", "watchlist", id, clientIP(r), nil)
 	w.WriteHeader(http.StatusNoContent)
 }

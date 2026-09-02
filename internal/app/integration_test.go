@@ -145,6 +145,19 @@ func (e *testEnv) do(method, path string, body any) *httptest.ResponseRecorder {
 	return response
 }
 
+// doForwarded sends a request that claims a different origin address, which is
+// what an attacker does to spread throttled attempts over many counters.
+func (e *testEnv) doForwarded(method, path, forwardedFor string) *httptest.ResponseRecorder {
+	e.t.Helper()
+	request := httptest.NewRequest(method, path, nil)
+	request.RemoteAddr = "10.0.0.1:5000"
+	request.Header.Set("X-Forwarded-For", forwardedFor)
+	request.Header.Set("X-Real-IP", forwardedFor)
+	response := httptest.NewRecorder()
+	e.handler.ServeHTTP(response, request)
+	return response
+}
+
 func (e *testEnv) json(method, path string, body any, wantStatus int) map[string]any {
 	e.t.Helper()
 	response := e.do(method, path, body)
@@ -288,6 +301,30 @@ func TestLoginThrottleLocksAfterRepeatedFailures(t *testing.T) {
 	}
 	if locked.Header().Get("Retry-After") == "" {
 		t.Fatal("lockout response is missing Retry-After")
+	}
+}
+
+// The public limiter only protects the pass and QR routes if a caller cannot
+// pick its own counter key, so a forged X-Forwarded-For must not reset it while
+// no reverse proxy is trusted.
+func TestPublicRateLimitIgnoresForgedForwardedAddresses(t *testing.T) {
+	env := newTestEnv(t)
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE settings SET value='2' WHERE key='security.public_rate_limit_per_minute'`); err != nil {
+		t.Fatalf("configure limit: %v", err)
+	}
+	env.server.invalidateSettings()
+	env.server.limitCacheMu.Lock()
+	env.server.limitCacheExpires = time.Time{}
+	env.server.limitCacheMu.Unlock()
+	public := &testEnv{server: env.server, handler: env.handler, t: t}
+	for attempt := 0; attempt < 2; attempt++ {
+		if response := public.doForwarded(http.MethodGet, "/api/v1/public/passes/vfq_missing", fmt.Sprintf("203.0.113.%d", attempt+1)); response.Code != http.StatusNotFound {
+			t.Fatalf("attempt %d returned %d, want 404", attempt+1, response.Code)
+		}
+	}
+	limited := public.doForwarded(http.MethodGet, "/api/v1/public/passes/vfq_missing", "203.0.113.99")
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("a caller bypassed the public rate limit by changing X-Forwarded-For: %d", limited.Code)
 	}
 }
 

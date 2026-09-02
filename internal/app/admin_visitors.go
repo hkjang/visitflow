@@ -55,7 +55,7 @@ func (s *Server) visitorDetail(w http.ResponseWriter, r *http.Request) {
 		rows.Close()
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "visitor.view", "visitor", id, r.RemoteAddr, map[string]any{"visits": len(visits)})
+	s.audit(r.Context(), u.ID, "visitor.view", "visitor", id, clientIP(r), map[string]any{"visits": len(visits)})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "name": name, "phone": maskPhone(s.decryptOptional(phoneEnc)), "email": email, "company": company, "title": title, "vehicle": vehicle,
 		"locale": locale, "maskedAt": maskedAt, "erasedAt": erasedAt, "createdAt": createdAt, "visits": visits, "consents": consents,
@@ -124,6 +124,6 @@ func (s *Server) eraseVisitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "privacy.erase_request", "visitor", id, r.RemoteAddr, map[string]any{"reason": in.Reason, "frequentVisitorsRemoved": frequent.RowsAffected()})
+	s.audit(r.Context(), u.ID, "privacy.erase_request", "visitor", id, clientIP(r), map[string]any{"reason": in.Reason, "frequentVisitorsRemoved": frequent.RowsAffected()})
 	writeJSON(w, http.StatusOK, map[string]any{"erased": true, "frequentVisitorsRemoved": frequent.RowsAffected()})
 }
