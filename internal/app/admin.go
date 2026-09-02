@@ -195,6 +195,8 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 			recipient := maskPhone(s.decryptOptional(recipientEnc))
 			if channel == "webhook" {
 				recipient = "외부 시스템"
+			} else if channel == "email" {
+				recipient = maskEmail(s.decryptOptional(recipientEnc))
 			}
 			items = append(items, map[string]any{"id": id, "visitId": visitID, "channel": channel, "templateKey": key, "status": status, "attempts": attempts, "error": errorText, "recipient": recipient, "apiConfigName": apiName, "ruleName": ruleName, "createdAt": created, "sentAt": sent, "nextAttemptAt": nextAttempt})
 		}

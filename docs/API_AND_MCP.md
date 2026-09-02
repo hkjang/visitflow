@@ -44,6 +44,9 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `POST /api/v1/admin/users` 로컬 사용자 생성, `POST /api/v1/admin/users/{id}/password-reset|sessions/revoke`
 - `GET /api/v1/admin/visitors/{id}`, `POST /api/v1/admin/visitors/{id}/erase` 방문자 이력 조회·삭제 요청 처리
 - `POST /api/v1/admin/notification-apis/{id}/test` 문자 API 테스트 발송
+- `POST /api/v1/settings/smtp/test` SMTP 테스트 메일
+- `POST /api/v1/auth/password-reset/request`, `GET|POST /api/v1/auth/password-reset/{token}` 로컬 계정 메일 재설정(인증 불필요, 항상 202)
+- `GET|PUT /api/v1/profile/notifications` 내 메일 알림 이벤트 선택
 - `GET /api/v1/settings/export` 비밀값 제외 설정 JSON(`PUT /settings`에 그대로 사용 가능)
 - `GET|POST /api/v1/admin/visit-types`, `PUT|DELETE /api/v1/admin/visit-types/{id}`
 - `GET|POST /api/v1/admin/kiosk-devices`, `DELETE /api/v1/admin/kiosk-devices/{id}`

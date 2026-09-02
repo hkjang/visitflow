@@ -24,6 +24,7 @@ const GuidePage = lazy(() => import("./pages/GuidePage").then((m) => ({ default:
 const NotificationSettingsPage = lazy(() => import("./pages/NotificationSettingsPage").then((m) => ({ default: m.NotificationSettingsPage })));
 const SelfRegistrationPage = lazy(() => import("./pages/SelfRegistrationPage").then((m) => ({ default: m.SelfRegistrationPage })));
 const KioskPage = lazy(() => import("./pages/KioskPage").then((m) => ({ default: m.KioskPage })));
+const ResetPasswordPage = lazy(() => import("./pages/ResetPasswordPage").then((m) => ({ default: m.ResetPasswordPage })));
 const RosterPage = lazy(() => import("./pages/RosterPage").then((m) => ({ default: m.RosterPage })));
 
 const Spinner = () => <Box sx={{ minHeight: "60vh", display: "grid", placeItems: "center" }}><CircularProgress /></Box>;
@@ -57,6 +58,7 @@ export default function App() {
       <Route path="/q/:token" element={<MobilePassPage />} />
       <Route path="/r/:token" element={<SelfRegistrationPage />} />
       <Route path="/kiosk" element={<KioskPage />} />
+      <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
       <Route element={<Protected />}>
         <Route index element={<PersonalDashboardPage />} />
         <Route path="visits/new" element={<VisitFormPage />} />

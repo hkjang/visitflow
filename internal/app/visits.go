@@ -547,6 +547,11 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 			if err = s.recordConsentTx(ctx, tx, visitorID, visitID, vvID, participantConsent); err != nil {
 				return nil, err
 			}
+			if status == "PENDING_APPROVAL" && visitorIndex == 0 {
+				if err = s.queueApproverMailTx(ctx, tx, visitID, vvID, time.Now()); err != nil {
+					return nil, err
+				}
+			}
 			if status == "SCHEDULED" {
 				raw, _, issueErr := s.issueQRTx(ctx, tx, vvID, scheduled.StartAt, scheduled.EndAt, "")
 				if issueErr != nil {

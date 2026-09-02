@@ -41,7 +41,7 @@ func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 	oidcEnabled, _ := s.getSetting(r.Context(), "oidc.enabled")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"serviceName": serviceName, "companyName": companyName,
-		"localEnabled": local == "true", "oidcEnabled": oidcEnabled == "true",
+		"localEnabled": local == "true", "oidcEnabled": oidcEnabled == "true", "passwordResetEnabled": s.passwordResetAvailable(r.Context()),
 		"version": map[string]string{"version": s.version, "commit": s.commit, "builtAt": s.builtAt},
 	})
 }

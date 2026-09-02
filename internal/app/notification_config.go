@@ -929,6 +929,10 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 		return err
 	}
 	rows.Close()
+	// Personal e-mail alerts run beside the administrator's messaging rules.
+	if err := s.queueHostMailTx(ctx, tx, data, event, eventAt); err != nil {
+		return err
+	}
 	variables := data.variables(eventAt)
 	metadataJSON, _ := json.Marshal(variables)
 	metadataEncrypted, err := s.keys.Encrypt(string(metadataJSON))

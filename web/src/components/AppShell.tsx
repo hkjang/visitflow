@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Alert, AppBar, Avatar, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Drawer, FormControlLabel, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, TextField, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
+import { Alert, AppBar, Avatar, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Drawer, FormControlLabel, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, Switch, TextField, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
 import MenuRounded from "@mui/icons-material/MenuRounded";
 import HomeRounded from "@mui/icons-material/HomeRounded";
 import AddCircleOutlineRounded from "@mui/icons-material/AddCircleOutlineRounded";
@@ -25,7 +25,7 @@ import ChecklistRounded from "@mui/icons-material/ChecklistRounded";
 import NotificationsActiveRounded from "@mui/icons-material/NotificationsActiveRounded";
 import { Logo } from "./Logo";
 import { useAuth } from "../auth";
-import { api, patchJSON, postJSON } from "../api";
+import { api, patchJSON, postJSON, putJSON } from "../api";
 import type { ReferenceData } from "../types";
 
 const drawerWidth = 264;
@@ -58,6 +58,9 @@ export function AppShell() {
   const [delegateUserId, setDelegateUserId] = useState(user?.delegateUserId ?? "");
   const [delegateUntil, setDelegateUntil] = useState("");
   const [profileError, setProfileError] = useState("");
+  type MailPrefs = { emailEnabled: boolean; events: Record<string, boolean>; availableEvents: string[]; email: string; hasEmail: boolean; smtpEnabled: boolean; canApprove: boolean };
+  const [mailPrefs, setMailPrefs] = useState<MailPrefs | null>(null);
+  const mailEventLabels: Record<string, string> = { checked_in: "방문자 도착(입실)", checked_out: "방문자 퇴실", visit_confirmed: "방문 확정·승인 완료", visit_rejected: "방문 반려", visit_cancelled: "방문 취소", approval_pending: "내 부서 승인 대기 발생", approval_escalated: "승인 지연 에스컬레이션" };
   const [currentPassword, setCurrentPassword] = useState(""); const [newPassword, setNewPassword] = useState(""); const [passwordNotice, setPasswordNotice] = useState("");
   const changePassword = async () => {
     setProfileError(""); setPasswordNotice("");
@@ -105,6 +108,11 @@ export function AppShell() {
     setDelegateUntil(user?.delegateUntil ? toLocalInput(new Date(user.delegateUntil)) : "");
     setProfileError(""); setProfileOpen(true);
     if (!reference) setReference(await api<ReferenceData>("/api/v1/reference-data"));
+    api<MailPrefs>("/api/v1/profile/notifications").then(setMailPrefs).catch(() => setMailPrefs(null));
+  };
+  const saveMailPrefs = async (next: MailPrefs) => {
+    setMailPrefs(next);
+    try { await putJSON("/api/v1/profile/notifications", { emailEnabled: next.emailEnabled, events: next.events }); } catch (e) { setProfileError(e instanceof Error ? e.message : "메일 알림 설정을 저장하지 못했습니다"); }
   };
   const saveProfile = async () => {
     setProfileError("");
@@ -150,6 +158,7 @@ export function AppShell() {
       <Divider textAlign="left"><Typography variant="caption" color="text.secondary">부재 시 대리 담당자</Typography></Divider>
       <TextField select label="대리 담당자" value={delegateUserId} onChange={(e) => setDelegateUserId(e.target.value)} helperText="지정 기간 동안 방문 승인과 도착 알림이 대리 담당자에게 전달됩니다."><MenuItem value="">지정 안 함</MenuItem>{(reference?.hosts ?? []).filter((x) => x.id !== user?.id).map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
       {delegateUserId && <TextField type="datetime-local" label="대리 종료 시각" value={delegateUntil} onChange={(e) => setDelegateUntil(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />}
+      {mailPrefs && <><Divider textAlign="left"><Typography variant="caption" color="text.secondary">메일 알림</Typography></Divider>{!mailPrefs.smtpEnabled && <Alert severity="info" icon={false}>관리자가 SMTP를 켜면 아래 선택에 따라 메일이 발송됩니다.</Alert>}{!mailPrefs.hasEmail && <Alert severity="warning" icon={false}>계정에 이메일이 없어 메일 알림을 받을 수 없습니다. 관리자에게 이메일 등록을 요청하세요.</Alert>}<FormControlLabel control={<Switch checked={mailPrefs.emailEnabled} onChange={(e) => void saveMailPrefs({ ...mailPrefs, emailEnabled: e.target.checked })} />} label={`메일 알림 받기${mailPrefs.email && mailPrefs.email !== "***" ? ` (${mailPrefs.email})` : ""}`} /><Box sx={{ pl: 1, display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" } }}>{mailPrefs.availableEvents.filter((event) => mailPrefs.canApprove || !event.startsWith("approval_")).map((event) => <FormControlLabel key={event} disabled={!mailPrefs.emailEnabled} control={<Checkbox size="small" checked={Boolean(mailPrefs.events[event])} onChange={(e) => void saveMailPrefs({ ...mailPrefs, events: { ...mailPrefs.events, [event]: e.target.checked } })} />} label={<Typography variant="body2">{mailEventLabels[event] ?? event}</Typography>} />)}</Box></>}
       {user?.source === "local" && <><Divider textAlign="left"><Typography variant="caption" color="text.secondary">비밀번호 변경</Typography></Divider><Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}><TextField fullWidth type="password" label="현재 비밀번호" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /><TextField fullWidth type="password" label="새 비밀번호 (12자 이상)" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /><Button variant="outlined" disabled={!currentPassword || newPassword.length < 12} onClick={() => void changePassword()} sx={{ whiteSpace: "nowrap" }}>변경</Button></Stack>{passwordNotice && <Alert severity="success">{passwordNotice}</Alert>}</>}
       {profileError && <Alert severity="error">{profileError}</Alert>}</Stack></DialogContent><DialogActions><Button onClick={() => setProfileOpen(false)}>취소</Button><Button variant="contained" disabled={!profileName || (Boolean(delegateUserId) && !delegateUntil)} onClick={() => void saveProfile()}>저장</Button></DialogActions></Dialog>
     </Box>

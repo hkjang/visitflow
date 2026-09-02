@@ -35,6 +35,7 @@ export interface AuthConfig {
   companyName: string;
   localEnabled: boolean;
   oidcEnabled: boolean;
+  passwordResetEnabled?: boolean;
   version: VersionInfo;
 }
 

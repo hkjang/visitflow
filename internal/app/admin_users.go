@@ -114,9 +114,47 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "userID")
 	actor, _ := userFrom(r)
-	var role, source string
-	if err := s.db.QueryRow(r.Context(), `SELECT role,source FROM users WHERE id=$1`, id).Scan(&role, &source); err != nil {
+	var in struct {
+		ViaEmail bool `json:"viaEmail"`
+	}
+	if r.ContentLength > 0 && !decodeJSON(w, r, &in) {
+		return
+	}
+	var role, source, email string
+	if err := s.db.QueryRow(r.Context(), `SELECT role,source,COALESCE(email,'') FROM users WHERE id=$1`, id).Scan(&role, &source, &email); err != nil {
 		notFoundOrServer(w, err)
+		return
+	}
+	if in.ViaEmail {
+		// The user sets their own password from a mailed link; nobody sees a
+		// temporary secret.
+		if source != "local" {
+			writeError(w, http.StatusBadRequest, "oidc_user", "SSO 사용자의 비밀번호는 Keycloak에서 초기화하세요")
+			return
+		}
+		if role == RoleSuperAdmin && actor.Role != RoleSuperAdmin {
+			writeError(w, http.StatusForbidden, "super_admin_required", "최고 관리자 계정은 최고 관리자만 초기화할 수 있습니다")
+			return
+		}
+		if _, enabled := s.smtpConfig(r.Context()); !enabled {
+			writeError(w, http.StatusConflict, "smtp_disabled", "SMTP가 비활성화되어 있어 메일로 보낼 수 없습니다")
+			return
+		}
+		if email == "" {
+			writeError(w, http.StatusConflict, "email_missing", "사용자에게 등록된 이메일이 없습니다")
+			return
+		}
+		sent, err := s.issuePasswordReset(r.Context(), r, id, actor.ID)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "mail_failed", "재설정 메일을 보내지 못했습니다: "+err.Error())
+			return
+		}
+		if _, err := s.db.Exec(r.Context(), `DELETE FROM sessions WHERE user_id=$1`, id); err != nil {
+			notFoundOrServer(w, err)
+			return
+		}
+		s.audit(r.Context(), actor.ID, "user.password_reset_mail", "user", id, r.RemoteAddr, map[string]any{"sent": sent})
+		writeJSON(w, http.StatusOK, map[string]any{"emailSent": sent, "to": maskEmail(email)})
 		return
 	}
 	if source != "local" {

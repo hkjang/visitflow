@@ -74,7 +74,7 @@ self.addEventListener("fetch", (event) => {
   if (request.mode === "navigate") {
     // Pass, self-registration and kiosk enrolment URLs carry tokens; keep them
     // out of Cache Storage. The staff shell is what must open offline.
-    const tokenBearing = url.search !== "" || url.pathname.startsWith("/q/") || url.pathname.startsWith("/r/") || url.pathname.startsWith("/kiosk");
+    const tokenBearing = url.search !== "" || url.pathname.startsWith("/q/") || url.pathname.startsWith("/r/") || url.pathname.startsWith("/kiosk") || url.pathname.startsWith("/reset-password/");
     if (!tokenBearing) event.respondWith(shellFirstNetwork(request));
     return;
   }

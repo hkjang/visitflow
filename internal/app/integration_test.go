@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -936,6 +937,127 @@ func TestStatisticsBreakdowns(t *testing.T) {
 		if items, _ := stats[key].([]any); len(items) == 0 {
 			t.Fatalf("%s breakdown is empty: %v", key, stats[key])
 		}
+	}
+}
+
+func (e *testEnv) enableSMTP(t *testing.T, server *fakeSMTP) {
+	t.Helper()
+	e.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{
+		"smtp.enabled": "true", "smtp.host": "127.0.0.1", "smtp.port": fmt.Sprint(server.port()), "smtp.security": "none",
+		"smtp.username": "relay", "smtp.password": "relay-secret", "smtp.from": "VisitFlow <visitflow@test.local>",
+	}}, http.StatusOK)
+}
+
+func TestSMTPTestSendUsesConfiguredRelay(t *testing.T) {
+	env := newTestEnv(t)
+	relay := startFakeSMTP(t)
+	if disabled := env.do(http.MethodPost, "/api/v1/settings/smtp/test", map[string]string{"to": "ops@test.local"}); disabled.Code != http.StatusBadRequest {
+		t.Fatalf("test without a configured relay returned %d", disabled.Code)
+	}
+	env.enableSMTP(t, relay)
+	result := env.json(http.MethodPost, "/api/v1/settings/smtp/test", map[string]string{"to": "ops@test.local"}, http.StatusOK)
+	if result["ok"] != true {
+		t.Fatalf("smtp test failed: %v", result)
+	}
+	message := relay.last()
+	if !strings.Contains(message, "To: ops@test.local") || !strings.Contains(message, "SMTP") {
+		t.Fatalf("relay received unexpected message: %q", message)
+	}
+	relay.mu.Lock()
+	auths := relay.auths
+	relay.mu.Unlock()
+	if len(auths) == 0 || !strings.Contains(auths[0], "cmVsYXk=") {
+		t.Fatalf("LOGIN authentication was not performed: %v", auths)
+	}
+}
+
+func TestPasswordResetByMail(t *testing.T) {
+	env := newTestEnv(t)
+	relay := startFakeSMTP(t)
+	public := &testEnv{server: env.server, handler: env.handler, t: t}
+	if off := public.do(http.MethodPost, "/api/v1/auth/password-reset/request", map[string]string{"identifier": "someone"}); off.Code != http.StatusNotFound {
+		t.Fatalf("reset offered while SMTP is disabled: %d", off.Code)
+	}
+	env.enableSMTP(t, relay)
+	env.json(http.MethodPost, "/api/v1/admin/users", map[string]any{"username": "hong", "displayName": "홍길동", "email": "hong@test.local", "role": RoleUser, "password": "initial-password-123"}, http.StatusCreated)
+
+	// Unknown identifiers get the same answer and no mail.
+	public.json(http.MethodPost, "/api/v1/auth/password-reset/request", map[string]string{"identifier": "nobody@test.local"}, http.StatusAccepted)
+	if relay.count() != 0 {
+		t.Fatal("a mail was sent for an unknown account")
+	}
+	public.json(http.MethodPost, "/api/v1/auth/password-reset/request", map[string]string{"identifier": "HONG@test.local"}, http.StatusAccepted)
+	if relay.count() != 1 {
+		t.Fatalf("expected one reset mail, got %d", relay.count())
+	}
+	match := regexp.MustCompile(`/reset-password/(vfp_[A-Za-z0-9_-]+)`).FindStringSubmatch(relay.last())
+	if match == nil {
+		t.Fatalf("mail lacks a reset link: %q", relay.last())
+	}
+	token := match[1]
+	check := public.json(http.MethodGet, "/api/v1/auth/password-reset/"+token, nil, http.StatusOK)
+	if check["valid"] != true {
+		t.Fatalf("token not valid: %v", check)
+	}
+	if weak := public.do(http.MethodPost, "/api/v1/auth/password-reset/"+token, map[string]string{"newPassword": "short"}); weak.Code != http.StatusBadRequest {
+		t.Fatalf("weak password accepted: %d", weak.Code)
+	}
+	public.json(http.MethodPost, "/api/v1/auth/password-reset/"+token, map[string]string{"newPassword": "reset-password-456789"}, http.StatusNoContent)
+	if reused := public.do(http.MethodPost, "/api/v1/auth/password-reset/"+token, map[string]string{"newPassword": "another-password-4567"}); reused.Code != http.StatusNotFound {
+		t.Fatalf("token reusable after completion: %d", reused.Code)
+	}
+	hong := &testEnv{server: env.server, handler: env.handler, t: t}
+	hong.login("hong", "reset-password-456789")
+	if old := hong.do(http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "hong", "password": "initial-password-123"}); old.Code != http.StatusUnauthorized {
+		t.Fatalf("old password still works: %d", old.Code)
+	}
+
+	// The administrator can trigger the same mail instead of reading out a temporary password.
+	var hongID string
+	if err := env.server.db.QueryRow(context.Background(), `SELECT id FROM users WHERE username='hong'`).Scan(&hongID); err != nil {
+		t.Fatalf("id: %v", err)
+	}
+	admin := env.json(http.MethodPost, "/api/v1/admin/users/"+hongID+"/password-reset", map[string]any{"viaEmail": true}, http.StatusOK)
+	if admin["emailSent"] != true || relay.count() != 2 {
+		t.Fatalf("admin mail reset did not send: %v (%d mails)", admin, relay.count())
+	}
+	if stale := hong.do(http.MethodGet, "/api/v1/auth/me", nil); stale.Code != http.StatusUnauthorized {
+		t.Fatalf("session survived admin-initiated reset: %d", stale.Code)
+	}
+}
+
+func TestPersonalMailAlertsFollowPreferences(t *testing.T) {
+	env := newTestEnv(t)
+	relay := startFakeSMTP(t)
+	env.enableSMTP(t, relay)
+	env.json(http.MethodPatch, "/api/v1/profile", map[string]any{"displayName": "admin"}, http.StatusNoContent)
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE users SET email='admin@test.local' WHERE username='admin'`); err != nil {
+		t.Fatalf("email: %v", err)
+	}
+	prefs := env.json(http.MethodGet, "/api/v1/profile/notifications", nil, http.StatusOK)
+	if prefs["smtpEnabled"] != true || prefs["hasEmail"] != true {
+		t.Fatalf("preferences endpoint state: %v", prefs)
+	}
+	// Opt out of arrival mails, keep confirmations.
+	env.json(http.MethodPut, "/api/v1/profile/notifications", map[string]any{"emailEnabled": true, "events": map[string]bool{"checked_in": false, "visit_confirmed": true}}, http.StatusOK)
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+	token := passTokenFrom(t, created)
+	env.json(http.MethodPost, "/api/v1/checkins", map[string]string{"token": token}, http.StatusCreated)
+	var confirmed, arrived int
+	if err := env.server.db.QueryRow(context.Background(), `SELECT count(*) FILTER(WHERE template_key='mail_visit_confirmed'),count(*) FILTER(WHERE template_key='mail_checked_in') FROM notifications WHERE channel='email'`).Scan(&confirmed, &arrived); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if confirmed != 1 || arrived != 0 {
+		t.Fatalf("queued mails: confirmed=%d arrived=%d, want 1/0", confirmed, arrived)
+	}
+	// The delivery worker sends the queued mail through the relay.
+	env.server.processNotifications(context.Background())
+	if relay.count() != 1 || !strings.Contains(relay.last(), "To: admin@test.local") {
+		t.Fatalf("worker did not deliver the mail: %d messages, last %q", relay.count(), relay.last())
+	}
+	var status string
+	if err := env.server.db.QueryRow(context.Background(), `SELECT status FROM notifications WHERE channel='email'`).Scan(&status); err != nil || status != "sent" {
+		t.Fatalf("mail notification status %q %v", status, err)
 	}
 }
 

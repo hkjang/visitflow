@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"sort"
 	"strconv"
@@ -116,6 +117,10 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "oidc_incomplete", "SSO 활성화에는 Issuer URL, Client ID, Client Secret이 필요합니다")
 		return
 	}
+	if effective("smtp.enabled") == "true" && (effective("smtp.host") == "" || effective("smtp.from") == "") {
+		writeError(w, http.StatusBadRequest, "smtp_incomplete", "SMTP를 켜려면 서버 주소와 발신자 주소가 필요합니다")
+		return
+	}
 	if effective("notification.provider") == "webhook" && effective("notification.webhook_url") == "" {
 		writeError(w, http.StatusBadRequest, "webhook_url_required", "webhook Provider에는 Webhook URL이 필요합니다")
 		return
@@ -205,7 +210,7 @@ func validateSettingValue(key, value string) string {
 	booleans := map[string]bool{
 		"auth.local_enabled": true, "oidc.enabled": true, "oidc.auto_provision": true,
 		"visit.approval_enabled": true, "visit.single_use_qr": true, "visit.company_required": true,
-		"visit.self_registration_enabled": true,
+		"visit.self_registration_enabled": true, "smtp.enabled": true, "smtp.skip_tls_verify": true, "auth.password_reset_enabled": true,
 	}
 	if booleans[key] && value != "true" && value != "false" {
 		return key + " 값은 true 또는 false여야 합니다"
@@ -219,6 +224,7 @@ func validateSettingValue(key, value string) string {
 		"security.login_max_attempts": {1, 100}, "security.login_lockout_minutes": {1, 1440},
 		"security.public_rate_limit_per_minute": {1, 100000},
 		"visit.approval_escalation_hours":       {1, 8760}, "visit.self_registration_hours": {1, 720},
+		"smtp.port": {1, 65535}, "auth.password_reset_minutes": {5, 1440},
 	}
 	if bounds, ok := ranges[key]; ok {
 		n, err := strconv.Atoi(value)
@@ -244,6 +250,14 @@ func validateSettingValue(key, value string) string {
 			if normalizeLocale(locale) == "" {
 				return "지원하지 않는 언어 코드입니다: " + locale
 			}
+		}
+	}
+	if key == "smtp.security" && value != "starttls" && value != "tls" && value != "none" {
+		return "SMTP 보안 방식은 starttls, tls, none 중 하나여야 합니다"
+	}
+	if key == "smtp.from" && value != "" {
+		if _, err := mail.ParseAddress(value); err != nil {
+			return "발신자 주소 형식을 확인하세요. 예: VisitFlow <visitflow@company.intra>"
 		}
 	}
 	if key == "privacy.consent_policy_version" && (value == "" || len(value) > 32) {

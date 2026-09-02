@@ -25,6 +25,7 @@ VisitFlow는 Go API와 React/Material UI를 하나의 Docker 이미지에 포함
 - 로비 서비스: 웹/모바일 카메라, USB QR 스캐너, 현장 방문, 실시간 SSE, 체크인/퇴실
 - 무인 키오스크: 기기 토큰으로 등록한 태블릿이 로비 API만 사용하는 전용 모드
 - 비상 대피 명단: 현재 체류자 인쇄용 명단과 네트워크 단절 시에도 열리는 오프라인 캐시
+- 사내 SMTP: 관리자 설정·테스트 발송, 담당자별 메일 알림 개인화(도착·승인·반려·취소·승인 대기), 로컬 계정 메일 비밀번호 재설정
 - 메시지 연동: SMS·MMS·카카오별 Base URL/Path/Method/Header/Parameter와 발송 이벤트·예약 시점·수신 대상·호출 API를 관리자 화면에서 관리
 - 외부 MMS용 QR 이미지: `GET /img/visitor/{qrcode_file_seq}.jpg`로 서버 검증 QR을 JPEG 형식으로 제공
 - 사용자 가이드 게시판: 관리자는 초안·게시·상단 고정 글을 관리하고 모든 로그인 사용자는 게시된 안내를 열람
@@ -55,7 +56,7 @@ React 19 + TypeScript + Material UI 7을 사용한다. 방문자 운영 화면�
 PostgreSQL 14+ 데이터베이스를 준비한 뒤 GitHub Release의 이미지 하나만 내부망으로 반입한다.
 
 ```bash
-docker load < visitflow-v2.5.0.tar.gz
+docker load < visitflow-v2.6.0.tar.gz
 
 export POSTGRES_DSN='postgres://visitflow:password@postgres.intra:5432/visitflow?sslmode=require'
 export BOOTSTRAP_ADMIN='admin'
@@ -130,6 +131,6 @@ VISITFLOW_BASE_URL=http://127.0.0.1:8080 npm run test:e2e
 `v*.*.*` 태그를 push하면 GitHub Actions가 `linux/amd64` 단일 서비스 이미지 `visitflow:vX.Y.Z`를 빌드한다. `docker save | gzip`으로 만든 `visitflow-vX.Y.Z.tar.gz`만 Release 자산으로 첨부하며 런타임에는 레지스트리나 인터넷이 필요 없다. 아카이브에는 Compose가 바로 사용할 수 있는 `visitflow:latest` 별칭도 포함된다.
 
 ```bash
-./scripts/release-image.sh 2.5.0
-gzip -t visitflow-v2.5.0.tar.gz
+./scripts/release-image.sh 2.6.0
+gzip -t visitflow-v2.6.0.tar.gz
 ```

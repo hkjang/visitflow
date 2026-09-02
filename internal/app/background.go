@@ -104,6 +104,22 @@ func (s *Server) processClaimedNotification(ctx context.Context, item notificati
 		return
 	}
 
+	if item.channel == "email" {
+		metadata, metadataErr := parseNotificationMetadata(s, item.metadataEncrypted)
+		if metadataErr != nil {
+			s.failNotification(ctx, item.id, item.claimToken, "메일 metadata를 복호화하지 못했습니다")
+			return
+		}
+		if _, enabled := s.smtpConfig(ctx); !enabled {
+			s.cancelClaimedNotification(ctx, item.id, item.claimToken, "SMTP가 비활성화되어 메일 발송을 취소했습니다")
+			return
+		}
+		s.dispatchClaimedNotification(ctx, item, func() (string, error) {
+			return "", s.sendQueuedMail(ctx, recipient, body, metadata)
+		})
+		return
+	}
+
 	if item.apiConfigID != "" {
 		metadata, metadataErr := parseNotificationMetadata(s, item.metadataEncrypted)
 		if metadataErr != nil {
@@ -318,6 +334,7 @@ func (s *Server) runVisitMaintenance(ctx context.Context) {
 	// them once both have passed so the table stays small.
 	_, _ = s.db.Exec(ctx, `DELETE FROM auth_throttle WHERE last_failure_at<now()-interval '1 day' AND (locked_until IS NULL OR locked_until<now())`)
 	_, _ = s.db.Exec(ctx, `UPDATE registration_invitations SET revoked_at=now() WHERE completed_at IS NULL AND revoked_at IS NULL AND expires_at<now()`)
+	_, _ = s.db.Exec(ctx, `DELETE FROM password_resets WHERE expires_at<now()-interval '1 day'`)
 	s.publicLimiter.cleanup(time.Now())
 	if err := s.runApprovalEscalation(ctx); err != nil {
 		s.logger.Error("approval escalation failed", "error", err)
