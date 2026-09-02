@@ -41,6 +41,10 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `GET /api/v1/admin/statistics|audit-logs|notifications|visitors|metrics` — 감사 로그는 `action`·`actor`·`from`·`to`·`before`(keyset), 방문자는 `q`, 알림은 `status`로 필터링한다.
 - `GET /api/v1/admin/audit-logs.csv|visits.csv|statistics.csv` UTF-8 BOM CSV 내보내기
 - `POST /api/v1/admin/notifications/retry-failed`, `POST /api/v1/admin/notifications/{id}/retry|cancel`
+- `POST /api/v1/admin/users` 로컬 사용자 생성, `POST /api/v1/admin/users/{id}/password-reset|sessions/revoke`
+- `GET /api/v1/admin/visitors/{id}`, `POST /api/v1/admin/visitors/{id}/erase` 방문자 이력 조회·삭제 요청 처리
+- `POST /api/v1/admin/notification-apis/{id}/test` 문자 API 테스트 발송
+- `GET /api/v1/settings/export` 비밀값 제외 설정 JSON(`PUT /settings`에 그대로 사용 가능)
 - `GET|POST /api/v1/admin/visit-types`, `PUT|DELETE /api/v1/admin/visit-types/{id}`
 - `GET|POST /api/v1/admin/kiosk-devices`, `DELETE /api/v1/admin/kiosk-devices/{id}`
 - `GET|POST /api/v1/admin/notification-apis|notification-rules` 및 항목별 `PUT|DELETE`
@@ -48,6 +52,8 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `GET|PUT /api/v1/settings`
 - `GET|POST /api/v1/api-keys`
 - `PATCH /api/v1/api-keys/{keyID}` 키 이름·Scope 변경
+
+임시 비밀번호 상태(`mustChangePassword`)인 세션은 `/auth/me`, `/auth/password`, `/auth/logout` 외 모든 요청에 `403 password_change_required`를 받는다.
 
 공개 엔드포인트(로그인, 모바일 방문증, QR 이미지, 셀프 사전등록)에는 IP 단위 분당 요청 한도가 적용되며 초과 시 `429`와 `Retry-After`를 반환한다. 로그인은 추가로 IP·계정별 실패 잠금이 적용된다.
 

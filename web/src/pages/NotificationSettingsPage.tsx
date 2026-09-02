@@ -113,6 +113,9 @@ export function NotificationSettingsPage() {
       setError(e instanceof Error ? e.message : "발송 규칙을 저장하지 못했습니다.");
     } finally { setSaving(false); }
   };
+  const [testTarget, setTestTarget] = useState<NotificationAPI | null>(null); const [testRecipient, setTestRecipient] = useState(""); const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null); const [testing, setTesting] = useState(false);
+  // Prove the gateway contract with a real call before a visit depends on it.
+  const runTest = async () => { if (!testTarget) return; setTesting(true); setTestResult(null); try { setTestResult(await postJSON<Record<string, unknown>>(`/api/v1/admin/notification-apis/${testTarget.id}/test`, { recipient: testRecipient })); } catch (e) { setTestResult({ ok: false, error: e instanceof Error ? e.message : "테스트 요청 실패" }); } finally { setTesting(false); } };
   const remove = async (kind: "api" | "rule", id: string) => {
     if (!window.confirm("이 항목을 삭제할까요?")) return;
     try {
@@ -137,7 +140,7 @@ export function NotificationSettingsPage() {
           <Button variant="contained" startIcon={<AddRounded />} onClick={() => { setError(""); setAPIForm(emptyAPI()); }}>API 추가</Button>
         </Stack>
         <TableContainer component={Paper} variant="outlined"><Table size="small"><TableHead><TableRow><TableCell>이름</TableCell><TableCell>채널</TableCell><TableCell>호출 주소</TableCell><TableCell>방식</TableCell><TableCell>상태</TableCell><TableCell align="right">관리</TableCell></TableRow></TableHead><TableBody>
-          {apis.map((item) => <TableRow key={item.id}><TableCell><Typography fontWeight={750} variant="body2">{item.name}</Typography></TableCell><TableCell><Chip size="small" label={channelLabels[item.channel]} /></TableCell><TableCell sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>{item.baseUrl}{item.path}</TableCell><TableCell>{item.method} · {item.requestFormat}</TableCell><TableCell><Chip size="small" color={item.enabled ? "success" : "default"} label={item.enabled ? "사용" : "중지"} /></TableCell><TableCell align="right"><Button size="small" startIcon={<EditOutlined />} onClick={() => editAPI(item)}>수정</Button><Button size="small" color="error" startIcon={<DeleteOutlineRounded />} onClick={() => void remove("api", item.id)}>삭제</Button></TableCell></TableRow>)}
+          {apis.map((item) => <TableRow key={item.id}><TableCell><Typography fontWeight={750} variant="body2">{item.name}</Typography></TableCell><TableCell><Chip size="small" label={channelLabels[item.channel]} /></TableCell><TableCell sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>{item.baseUrl}{item.path}</TableCell><TableCell>{item.method} · {item.requestFormat}</TableCell><TableCell><Chip size="small" color={item.enabled ? "success" : "default"} label={item.enabled ? "사용" : "중지"} /></TableCell><TableCell align="right"><Button size="small" onClick={() => { setTestTarget(item); setTestRecipient(""); setTestResult(null); }}>테스트 발송</Button><Button size="small" startIcon={<EditOutlined />} onClick={() => editAPI(item)}>수정</Button><Button size="small" color="error" startIcon={<DeleteOutlineRounded />} onClick={() => void remove("api", item.id)}>삭제</Button></TableCell></TableRow>)}
           {apis.length === 0 && <TableRow><TableCell colSpan={6} align="center" sx={{ py: 4, color: "text.secondary" }}>등록된 API가 없습니다. 기존 log/webhook Adapter만 사용됩니다.</TableCell></TableRow>}
         </TableBody></Table></TableContainer>
       </CardContent>
@@ -170,6 +173,7 @@ export function NotificationSettingsPage() {
       </Stack>}</DialogContent><DialogActions><Button onClick={() => setAPIForm(null)}>취소</Button><Button variant="contained" disabled={saving || !apiForm?.name || !apiForm?.baseUrl} onClick={() => void saveAPI()}>{saving ? "저장 중…" : "저장"}</Button></DialogActions>
     </Dialog>
 
+    <Dialog open={Boolean(testTarget)} onClose={() => setTestTarget(null)} fullWidth maxWidth="sm"><DialogTitle>테스트 발송 · {testTarget?.name}</DialogTitle><DialogContent dividers><Stack spacing={2} mt={1}><Alert severity="info">실제 API를 즉시 호출합니다. 테스트 값(방문자 "테스트 방문자", 방문번호 VF-TEST)이 템플릿에 채워지고 결과는 감사 로그에 남습니다.</Alert>{testTarget?.channel !== "webhook" && <TextField label="수신 휴대전화" value={testRecipient} onChange={(e) => setTestRecipient(e.target.value)} placeholder="010-0000-0000" />}{testResult && <Alert severity={testResult.ok ? "success" : "error"}>{testResult.ok ? `성공 · ${String(testResult.durationMs)}ms${testResult.providerMessageId ? ` · 메시지 ID ${String(testResult.providerMessageId)}` : ""}` : `실패 · ${String(testResult.error)}`}{testResult.enabled === false && " · 이 API는 현재 중지 상태입니다"}</Alert>}</Stack></DialogContent><DialogActions><Button onClick={() => setTestTarget(null)}>닫기</Button><Button variant="contained" disabled={testing || (testTarget?.channel !== "webhook" && !testRecipient)} onClick={() => void runTest()}>{testing ? "발송 중…" : "발송"}</Button></DialogActions></Dialog>
     <Dialog open={Boolean(ruleForm)} onClose={() => setRuleForm(null)} fullWidth maxWidth="md">
       <DialogTitle>{ruleForm?.id ? "발송 규칙 수정" : "발송 규칙 추가"}</DialogTitle><DialogContent dividers>{ruleForm && <Stack spacing={2} mt={1}>
         {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}

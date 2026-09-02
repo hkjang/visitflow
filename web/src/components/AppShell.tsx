@@ -25,7 +25,7 @@ import ChecklistRounded from "@mui/icons-material/ChecklistRounded";
 import NotificationsActiveRounded from "@mui/icons-material/NotificationsActiveRounded";
 import { Logo } from "./Logo";
 import { useAuth } from "../auth";
-import { api, patchJSON } from "../api";
+import { api, patchJSON, postJSON } from "../api";
 import type { ReferenceData } from "../types";
 
 const drawerWidth = 264;
@@ -58,6 +58,12 @@ export function AppShell() {
   const [delegateUserId, setDelegateUserId] = useState(user?.delegateUserId ?? "");
   const [delegateUntil, setDelegateUntil] = useState("");
   const [profileError, setProfileError] = useState("");
+  const [currentPassword, setCurrentPassword] = useState(""); const [newPassword, setNewPassword] = useState(""); const [passwordNotice, setPasswordNotice] = useState("");
+  const changePassword = async () => {
+    setProfileError(""); setPasswordNotice("");
+    try { await postJSON("/api/v1/auth/password", { currentPassword, newPassword }); } catch (e) { setProfileError(e instanceof Error ? e.message : "비밀번호를 변경하지 못했습니다"); return; }
+    setCurrentPassword(""); setNewPassword(""); setPasswordNotice("비밀번호를 변경했습니다. 다른 기기의 세션은 종료되었습니다.");
+  };
   const [reference, setReference] = useState<ReferenceData | null>(null);
   const lobby = user && ["lobby", "security", "admin", "super_admin"].includes(user.role);
   const admin = user && ["admin", "super_admin"].includes(user.role);
@@ -144,6 +150,7 @@ export function AppShell() {
       <Divider textAlign="left"><Typography variant="caption" color="text.secondary">부재 시 대리 담당자</Typography></Divider>
       <TextField select label="대리 담당자" value={delegateUserId} onChange={(e) => setDelegateUserId(e.target.value)} helperText="지정 기간 동안 방문 승인과 도착 알림이 대리 담당자에게 전달됩니다."><MenuItem value="">지정 안 함</MenuItem>{(reference?.hosts ?? []).filter((x) => x.id !== user?.id).map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
       {delegateUserId && <TextField type="datetime-local" label="대리 종료 시각" value={delegateUntil} onChange={(e) => setDelegateUntil(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />}
+      {user?.source === "local" && <><Divider textAlign="left"><Typography variant="caption" color="text.secondary">비밀번호 변경</Typography></Divider><Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}><TextField fullWidth type="password" label="현재 비밀번호" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /><TextField fullWidth type="password" label="새 비밀번호 (12자 이상)" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /><Button variant="outlined" disabled={!currentPassword || newPassword.length < 12} onClick={() => void changePassword()} sx={{ whiteSpace: "nowrap" }}>변경</Button></Stack>{passwordNotice && <Alert severity="success">{passwordNotice}</Alert>}</>}
       {profileError && <Alert severity="error">{profileError}</Alert>}</Stack></DialogContent><DialogActions><Button onClick={() => setProfileOpen(false)}>취소</Button><Button variant="contained" disabled={!profileName || (Boolean(delegateUserId) && !delegateUntil)} onClick={() => void saveProfile()}>저장</Button></DialogActions></Dialog>
     </Box>
   );

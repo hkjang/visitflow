@@ -21,6 +21,7 @@ export interface User {
   delegateUserId?: string;
   delegateUntil?: string;
   approvalDelegate?: boolean;
+  mustChangePassword?: boolean;
 }
 
 export interface VersionInfo {

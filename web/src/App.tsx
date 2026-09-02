@@ -3,6 +3,7 @@ import { CircularProgress, Box } from "@mui/material";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import { AppShell } from "./components/AppShell";
+import { PasswordChangeGate } from "./components/PasswordChangeGate";
 import { LoginPage } from "./pages/LoginPage";
 import { PersonalDashboardPage } from "./pages/PersonalDashboardPage";
 
@@ -29,7 +30,9 @@ const Spinner = () => <Box sx={{ minHeight: "60vh", display: "grid", placeItems:
 
 function Protected() {
   const { user } = useAuth();
-  return user ? <AppShell /> : <Navigate to="/login" replace />;
+  if (!user) return <Navigate to="/login" replace />;
+  // A temporary password only unlocks the change-password dialog.
+  return user.mustChangePassword ? <PasswordChangeGate /> : <AppShell />;
 }
 function LobbyGuard({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();

@@ -212,13 +212,19 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 			// Session, CSRF token and the user's scope come back in a single query.
 			err = s.db.QueryRow(r.Context(), `SELECT u.id,u.username,u.display_name,COALESCE(u.email,''),u.employee_id,u.role,u.source,u.last_login_at,
 				s.csrf_token,u.department_id,u.site_scope,u.delegate_user_id,u.delegate_until,
-				EXISTS(SELECT 1 FROM users m WHERE m.delegate_user_id=u.id AND m.delegate_until>now() AND m.active AND m.role='dept_manager')
+				EXISTS(SELECT 1 FROM users m WHERE m.delegate_user_id=u.id AND m.delegate_until>now() AND m.active AND m.role='dept_manager'),
+				u.must_change_password
 				FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active=true`, s.keys.Digest(cookie.Value)).
 				Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.EmployeeID, &u.Role, &u.Source, &u.LastLoginAt,
-					&csrf, &u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil, &u.ApprovalDelegate)
+					&csrf, &u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil, &u.ApprovalDelegate, &u.MustChangePassword)
 			if err != nil {
 				http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
 				writeError(w, http.StatusUnauthorized, "session_expired", "세션이 만료되었습니다")
+				return
+			}
+			// A temporary password only opens the door to replacing itself.
+			if u.MustChangePassword && !passwordChangeAllowedPath(r.URL.Path) {
+				writeError(w, http.StatusForbidden, "password_change_required", "임시 비밀번호를 새 비밀번호로 변경해야 계속 사용할 수 있습니다")
 				return
 			}
 			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && r.URL.Path != "/api/v1/auth/logout" {
@@ -235,6 +241,14 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 		ctx = context.WithValue(ctx, apiKeyAuthContextKey, apiKeyAuth)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func passwordChangeAllowedPath(path string) bool {
+	switch path {
+	case "/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout":
+		return true
+	}
+	return false
 }
 
 func containsString(values []string, want string) bool {
@@ -357,7 +371,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
-	_, err = s.db.Exec(r.Context(), `UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1`, u.ID, string(newHash))
+	_, err = s.db.Exec(r.Context(), `UPDATE users SET password_hash=$2,must_change_password=false,updated_at=now() WHERE id=$1`, u.ID, string(newHash))
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -586,7 +600,8 @@ func (s *Server) testOIDC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT id,username,display_name,COALESCE(email,''),employee_id,role,source,last_login_at,active,department_id,site_scope,role_override FROM users ORDER BY display_name`)
+	rows, err := s.db.Query(r.Context(), `SELECT id,username,display_name,COALESCE(email,''),employee_id,role,source,last_login_at,active,department_id,site_scope,role_override,must_change_password,
+		(SELECT count(*) FROM sessions se WHERE se.user_id=users.id AND se.expires_at>now()) FROM users ORDER BY display_name`)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -595,9 +610,10 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	users := []map[string]any{}
 	for rows.Next() {
 		var u User
-		var active, roleOverride bool
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.EmployeeID, &u.Role, &u.Source, &u.LastLoginAt, &active, &u.DepartmentID, &u.SiteScope, &roleOverride); err == nil {
-			users = append(users, map[string]any{"id": u.ID, "username": u.Username, "displayName": u.DisplayName, "email": u.Email, "employeeId": u.EmployeeID, "role": u.Role, "source": u.Source, "lastLoginAt": u.LastLoginAt, "active": active, "departmentId": u.DepartmentID, "siteScope": u.SiteScope, "roleOverride": roleOverride})
+		var active, roleOverride, mustChange bool
+		var activeSessions int
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.EmployeeID, &u.Role, &u.Source, &u.LastLoginAt, &active, &u.DepartmentID, &u.SiteScope, &roleOverride, &mustChange, &activeSessions); err == nil {
+			users = append(users, map[string]any{"id": u.ID, "username": u.Username, "displayName": u.DisplayName, "email": u.Email, "employeeId": u.EmployeeID, "role": u.Role, "source": u.Source, "lastLoginAt": u.LastLoginAt, "active": active, "departmentId": u.DepartmentID, "siteScope": u.SiteScope, "roleOverride": roleOverride, "mustChangePassword": mustChange, "activeSessions": activeSessions})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": users})

@@ -804,6 +804,141 @@ func TestSettingsCacheInvalidatesOnUpdate(t *testing.T) {
 	}
 }
 
+func TestAdminCreatesLocalUserWithForcedPasswordChange(t *testing.T) {
+	env := newTestEnv(t)
+	created := env.json(http.MethodPost, "/api/v1/admin/users", map[string]any{"username": "newbie", "displayName": "신입", "role": RoleUser}, http.StatusCreated)
+	temporary := fmt.Sprint(created["temporaryPassword"])
+	if len(temporary) < 12 {
+		t.Fatalf("temporary password missing or weak: %q", temporary)
+	}
+	if dup := env.do(http.MethodPost, "/api/v1/admin/users", map[string]any{"username": "newbie", "displayName": "중복"}); dup.Code != http.StatusConflict {
+		t.Fatalf("duplicate username returned %d", dup.Code)
+	}
+	if escalate := env.do(http.MethodPost, "/api/v1/admin/users", map[string]any{"username": "bad user", "displayName": "x"}); escalate.Code != http.StatusBadRequest {
+		t.Fatalf("invalid username accepted: %d", escalate.Code)
+	}
+
+	newbie := &testEnv{server: env.server, handler: env.handler, t: t}
+	newbie.login("newbie", temporary)
+	me := newbie.json(http.MethodGet, "/api/v1/auth/me", nil, http.StatusOK)
+	if user := me["user"].(map[string]any); user["mustChangePassword"] != true {
+		t.Fatalf("temporary password did not flag a forced change: %v", user)
+	}
+	if blocked := newbie.do(http.MethodGet, "/api/v1/visits", nil); blocked.Code != http.StatusForbidden {
+		t.Fatalf("temporary password granted access before the change: %d", blocked.Code)
+	}
+	newbie.json(http.MethodPost, "/api/v1/auth/password", map[string]string{"currentPassword": temporary, "newPassword": "brand-new-password-1"}, http.StatusNoContent)
+	newbie.json(http.MethodGet, "/api/v1/visits", nil, http.StatusOK)
+
+	// A reset hands out a fresh temporary password and ends the open session.
+	userID := fmt.Sprint(created["id"])
+	reset := env.json(http.MethodPost, "/api/v1/admin/users/"+userID+"/password-reset", map[string]any{}, http.StatusOK)
+	if fmt.Sprint(reset["revokedSessions"]) != "1" {
+		t.Fatalf("reset did not revoke the open session: %v", reset)
+	}
+	if stale := newbie.do(http.MethodGet, "/api/v1/auth/me", nil); stale.Code != http.StatusUnauthorized {
+		t.Fatalf("old session survived the reset: %d", stale.Code)
+	}
+	newbie.login("newbie", fmt.Sprint(reset["temporaryPassword"]))
+	revoked := env.json(http.MethodPost, "/api/v1/admin/users/"+userID+"/sessions/revoke", map[string]any{}, http.StatusOK)
+	if fmt.Sprint(revoked["revokedSessions"]) != "1" {
+		t.Fatalf("session revoke count %v", revoked)
+	}
+}
+
+func TestVisitorEraseRequest(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, nil), http.StatusCreated)
+	visitID := fmt.Sprint(created["id"])
+	detail := env.json(http.MethodGet, "/api/v1/visits/"+visitID, nil, http.StatusOK)
+	visitorID := fmt.Sprint(detail["visitors"].([]any)[0].(map[string]any)["visitorId"])
+	if open := env.do(http.MethodPost, "/api/v1/admin/visitors/"+visitorID+"/erase", map[string]string{"reason": "요청"}); open.Code != http.StatusConflict {
+		t.Fatalf("erasure with an open visit returned %d", open.Code)
+	}
+	env.json(http.MethodPost, "/api/v1/visits/"+visitID+"/cancel", map[string]any{}, http.StatusNoContent)
+	profile := env.json(http.MethodGet, "/api/v1/admin/visitors/"+visitorID, nil, http.StatusOK)
+	if profile["name"] != "김방문" || len(profile["visits"].([]any)) != 1 || len(profile["consents"].([]any)) != 1 {
+		t.Fatalf("visitor detail incomplete: %v", profile)
+	}
+	env.json(http.MethodPost, "/api/v1/admin/visitors/"+visitorID+"/erase", map[string]string{"reason": "본인 삭제 요청 (메일 2026-09-02)"}, http.StatusOK)
+	erased := env.json(http.MethodGet, "/api/v1/admin/visitors/"+visitorID, nil, http.StatusOK)
+	if erased["erasedAt"] == nil || erased["name"] == "김방문" {
+		t.Fatalf("visitor was not anonymised: %v", erased)
+	}
+	// The same phone now creates a fresh identity rather than reviving the erased one.
+	again := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, nil), http.StatusCreated)
+	againDetail := env.json(http.MethodGet, "/api/v1/visits/"+fmt.Sprint(again["id"]), nil, http.StatusOK)
+	if fmt.Sprint(againDetail["visitors"].([]any)[0].(map[string]any)["visitorId"]) == visitorID {
+		t.Fatal("a new visit re-linked to the erased visitor record")
+	}
+}
+
+func TestNotificationAPITestSendAndSettingsExport(t *testing.T) {
+	env := newTestEnv(t)
+	received := make(chan map[string]any, 1)
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		received <- body
+		writeJSON(w, http.StatusOK, map[string]string{"messageId": "gw-1"})
+	}))
+	defer gateway.Close()
+	api := env.json(http.MethodPost, "/api/v1/admin/notification-apis", map[string]any{
+		"name": "테스트 게이트웨이", "channel": "sms", "baseUrl": gateway.URL, "path": "/send", "method": "POST", "requestFormat": "json",
+		"parameters": map[string]string{"to": "{{recipient}}", "text": "{{message}}", "key": "{{idempotencyKey}}"},
+	}, http.StatusCreated)
+	result := env.json(http.MethodPost, "/api/v1/admin/notification-apis/"+fmt.Sprint(api["id"])+"/test", map[string]string{"recipient": "010-7777-8888"}, http.StatusOK)
+	if result["ok"] != true || result["providerMessageId"] != "gw-1" {
+		t.Fatalf("test send did not succeed: %v", result)
+	}
+	select {
+	case body := <-received:
+		if body["to"] != "01077778888" || body["key"] == "" {
+			t.Fatalf("gateway received %v", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("gateway was not called")
+	}
+	if missing := env.do(http.MethodPost, "/api/v1/admin/notification-apis/"+fmt.Sprint(api["id"])+"/test", map[string]string{}); missing.Code != http.StatusBadRequest {
+		t.Fatalf("test without a recipient returned %d", missing.Code)
+	}
+
+	export := env.json(http.MethodGet, "/api/v1/settings/export", nil, http.StatusOK)
+	settings := export["settings"].(map[string]any)
+	if _, leaked := settings["oidc.client_secret"]; leaked {
+		t.Fatal("export contains a secret setting")
+	}
+	if _, leaked := settings["security.key_check"]; leaked {
+		t.Fatal("export contains the key canary")
+	}
+	if settings["general.service_name"] != "VisitFlow" {
+		t.Fatalf("export missing plain settings: %v", settings["general.service_name"])
+	}
+	// The export round-trips through the ordinary settings update.
+	settings["general.company_name"] = "이관된 회사"
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": settings}, http.StatusOK)
+	if value, _ := env.server.getSetting(context.Background(), "general.company_name"); value != "이관된 회사" {
+		t.Fatalf("imported settings not applied: %q", value)
+	}
+}
+
+func TestStatisticsBreakdowns(t *testing.T) {
+	env := newTestEnv(t)
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+	env.json(http.MethodPost, "/api/v1/checkins", map[string]string{"token": passTokenFrom(t, created)}, http.StatusCreated)
+	stats := env.json(http.MethodGet, "/api/v1/admin/statistics?days=7", nil, http.StatusOK)
+	summary := stats["summary"].(map[string]any)
+	if fmt.Sprint(summary["participants"]) != "1" || fmt.Sprint(summary["checkedIn"]) != "1" {
+		t.Fatalf("summary counts wrong: %v", summary)
+	}
+	for _, key := range []string{"bySite", "byVisitType", "byHour", "bySource"} {
+		if items, _ := stats[key].([]any); len(items) == 0 {
+			t.Fatalf("%s breakdown is empty: %v", key, stats[key])
+		}
+	}
+}
+
 func TestFailedNotificationCanBeRetried(t *testing.T) {
 	env := newTestEnv(t)
 	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)

@@ -4,10 +4,57 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 )
+
+// testNotificationAPI sends one synchronous message through a configured API so
+// an administrator can prove the integration before a real visit depends on it.
+func (s *Server) testNotificationAPI(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "apiID")
+	var in struct {
+		Recipient string `json:"recipient"`
+		Message   string `json:"message"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	recipient := normalizePhone(in.Recipient)
+	config, err := s.loadNotificationAPI(r.Context(), id)
+	if err != nil && !errors.Is(err, errNotificationAPIDisabled) {
+		writeError(w, http.StatusNotFound, "not_found", "문자 API 설정을 찾을 수 없습니다")
+		return
+	}
+	if config.Channel != "webhook" && len(recipient) < 7 {
+		writeError(w, http.StatusBadRequest, "recipient_required", "테스트 수신 번호를 입력하세요")
+		return
+	}
+	if config.Channel == "webhook" && recipient == "" {
+		recipient = "test-" + newID()
+	}
+	message := strings.TrimSpace(in.Message)
+	if message == "" {
+		message = "[VisitFlow] 문자 API 연결 테스트 " + time.Now().Format("2006-01-02 15:04")
+	}
+	if !notificationValuesUseIdempotency(config.Headers, config.Parameters) {
+		writeError(w, http.StatusBadRequest, "idempotency_required", "API에 {{idempotencyKey}} 또는 {{notificationId}} 변수가 필요합니다")
+		return
+	}
+	testID := newID()
+	metadata := map[string]string{"recipient": recipient, "channel": config.Channel, "visitor": "테스트 방문자", "host": "테스트 담당자", "company": settingOr(s, r.Context(), "general.company_name", "VisitFlow"), "requestNo": "VF-TEST", "passUrl": strings.TrimRight(s.publicBaseURL(r.Context(), r), "/") + "/q/test", "start": time.Now().Format("2006-01-02 15:04"), "end": time.Now().Add(time.Hour).Format("2006-01-02 15:04"), "place": "테스트 장소", "lobby": "테스트 로비", "locale": "ko"}
+	started := time.Now()
+	providerID, sendErr := sendConfiguredNotification(r.Context(), config, claimedNotification{ID: testID, Recipient: recipient, Message: message, Channel: config.Channel, APIConfigID: id, Metadata: metadata})
+	u, _ := userFrom(r)
+	result := map[string]any{"ok": sendErr == nil, "durationMs": time.Since(started).Milliseconds(), "providerMessageId": providerID, "recipient": maskPhone(recipient), "enabled": config.Enabled}
+	if sendErr != nil {
+		result["error"] = sendErr.Error()
+	}
+	s.audit(r.Context(), u.ID, "notification_api.test", "notification_api", id, r.RemoteAddr, result)
+	writeJSON(w, http.StatusOK, result)
+}
 
 // requeueNotificationSQL returns a failed or cancelled message to the queue.
 // Attempts reset so the delivery worker's retry budget applies again, and the

@@ -74,7 +74,45 @@ func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 		}
 		rows.Close()
 	}
-	writeJSON(w, 200, map[string]any{"days": days, "daily": daily, "byDepartment": byDepartment})
+	group := func(query string) []map[string]any {
+		items := []map[string]any{}
+		rows, err := s.db.Query(r.Context(), query, days)
+		if err != nil {
+			return items
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			var count int
+			if rows.Scan(&name, &count) == nil {
+				items = append(items, map[string]any{"name": name, "count": count})
+			}
+		}
+		return items
+	}
+	bySite := group(`SELECT si.name,count(vv.id) FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id
+		WHERE v.start_at>=CURRENT_DATE-$1::int GROUP BY si.name ORDER BY count(vv.id) DESC LIMIT 20`)
+	byVisitType := group(`SELECT COALESCE(vt.name,'미지정'),count(vv.id) FROM visits v LEFT JOIN visit_types vt ON vt.id=v.visit_type_id JOIN visitor_visits vv ON vv.visit_id=v.id
+		WHERE v.start_at>=CURRENT_DATE-$1::int GROUP BY vt.name ORDER BY count(vv.id) DESC LIMIT 20`)
+	byHour := group(`SELECT lpad(extract(hour FROM (vv.checked_in_at AT TIME ZONE si.timezone))::int::text,2,'0'),count(*) FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites si ON si.id=v.site_id
+		WHERE vv.checked_in_at IS NOT NULL AND vv.checked_in_at>=CURRENT_DATE-$1::int GROUP BY 1 ORDER BY 1`)
+	bySource := group(`SELECT v.source,count(*) FROM visits v WHERE v.start_at>=CURRENT_DATE-$1::int GROUP BY v.source ORDER BY count(*) DESC`)
+	var totalParticipants, checkedIn, noShow, cancelled, selfRegistered int
+	var avgDwellMinutes, avgLeadHours float64
+	_ = s.db.QueryRow(r.Context(), `SELECT count(vv.id),
+		count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')),
+		count(vv.id) FILTER(WHERE vv.status='NO_SHOW'),
+		count(vv.id) FILTER(WHERE vv.status='CANCELLED'),
+		count(vv.id) FILTER(WHERE EXISTS(SELECT 1 FROM consent_records c WHERE c.visitor_visit_id=vv.id AND c.source='self')),
+		COALESCE(avg(EXTRACT(EPOCH FROM vv.checked_out_at-vv.checked_in_at)/60) FILTER(WHERE vv.checked_out_at IS NOT NULL AND vv.checked_in_at IS NOT NULL),0),
+		COALESCE(avg(EXTRACT(EPOCH FROM v.start_at-v.created_at)/3600) FILTER(WHERE v.start_at>v.created_at),0)
+		FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE v.start_at>=CURRENT_DATE-$1::int`, days).
+		Scan(&totalParticipants, &checkedIn, &noShow, &cancelled, &selfRegistered, &avgDwellMinutes, &avgLeadHours)
+	writeJSON(w, 200, map[string]any{
+		"days": days, "daily": daily, "byDepartment": byDepartment, "bySite": bySite, "byVisitType": byVisitType, "byHour": byHour, "bySource": bySource,
+		"summary": map[string]any{"participants": totalParticipants, "checkedIn": checkedIn, "noShow": noShow, "cancelled": cancelled, "selfRegistered": selfRegistered,
+			"avgDwellMinutes": int(avgDwellMinutes + 0.5), "avgLeadHours": int(avgLeadHours + 0.5)},
+	})
 }
 
 func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {

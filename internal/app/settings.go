@@ -276,3 +276,26 @@ func validateSettingValue(key, value string) string {
 	}
 	return ""
 }
+
+// exportSettings produces a file that PUT /settings accepts verbatim, so a
+// configuration can be carried to another site or restored after a rebuild.
+// Secrets are never exported: they belong to the installation's key.
+func (s *Server) exportSettings(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(r.Context(), `SELECT key,value FROM settings WHERE NOT secret AND key<>'security.key_check' ORDER BY key`)
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
+	defer rows.Close()
+	values := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if rows.Scan(&key, &value) == nil {
+			values[key] = value
+		}
+	}
+	u, _ := userFrom(r)
+	s.audit(r.Context(), u.ID, "settings.export", "settings", "", r.RemoteAddr, map[string]any{"count": len(values)})
+	w.Header().Set("Content-Disposition", `attachment; filename="visitflow-settings.json"`)
+	writeJSON(w, http.StatusOK, map[string]any{"format": "visitflow-settings/1", "exportedAt": time.Now(), "version": s.version, "settings": values})
+}

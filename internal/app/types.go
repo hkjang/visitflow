@@ -30,6 +30,9 @@ type User struct {
 	// ApprovalDelegate is true while a department manager has delegated to this
 	// user, which grants approval rights for that manager's department.
 	ApprovalDelegate bool `json:"approvalDelegate,omitempty"`
+	// MustChangePassword is set after an administrator issued a temporary
+	// password; until cleared only /auth/me, /auth/password and logout work.
+	MustChangePassword bool `json:"mustChangePassword,omitempty"`
 }
 
 // HasActiveDelegate reports whether approvals and notifications should route to
