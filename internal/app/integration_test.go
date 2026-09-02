@@ -1175,6 +1175,39 @@ func TestAuditLogExportProducesCSV(t *testing.T) {
 	}
 }
 
+// The audit screen filters by actor and period, and its download button is how
+// an auditor hands over evidence for one operator or one date range. An export
+// that ignored those filters would answer a narrow question with the whole log.
+func TestAuditLogExportAppliesScreenFilters(t *testing.T) {
+	env := newTestEnv(t)
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+
+	exportBody := func(query string) string {
+		t.Helper()
+		response := env.do(http.MethodGet, "/api/v1/admin/audit-logs.csv?"+query, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("export %q returned %d: %s", query, response.Code, response.Body.String())
+		}
+		return response.Body.String()
+	}
+	contains := func(body string) bool { return strings.Contains(body, "visit.create") }
+
+	if body := exportBody("actor=no-such-operator"); contains(body) {
+		t.Fatalf("export ignored the actor filter: %s", body[:minInt(len(body), 400)])
+	}
+	future := url.QueryEscape(time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	past := url.QueryEscape(time.Now().Add(-time.Hour).UTC().Format(time.RFC3339))
+	if body := exportBody("from=" + future); contains(body) {
+		t.Fatalf("export ignored the start of the period: %s", body[:minInt(len(body), 400)])
+	}
+	if body := exportBody("to=" + past); contains(body) {
+		t.Fatalf("export ignored the end of the period: %s", body[:minInt(len(body), 400)])
+	}
+	if body := exportBody("actor=admin&from=" + past + "&to=" + future); !contains(body) {
+		t.Fatalf("export dropped rows inside the requested scope: %s", body[:minInt(len(body), 400)])
+	}
+}
+
 // A visitor supplies their own company name, and the visit export exists to be
 // opened in Excel, so the export must not hand the operator a live formula.
 func TestVisitExportNeutralizesSpreadsheetFormulas(t *testing.T) {
