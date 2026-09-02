@@ -93,6 +93,7 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/lobby/walk-ins", s.createWalkIn)
 			r.Post("/qr/verify", s.verifyQR)
 			r.Post("/checkins", s.checkIn)
+			r.Post("/checkins/manual", s.manualCheckIn)
 			r.Post("/checkouts", s.checkOut)
 		})
 		r.Group(func(r chi.Router) {
@@ -109,6 +110,8 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/visits/{visitID}", s.getVisit)
 			r.Put("/visits/{visitID}", s.updateVisit)
 			r.Post("/visits/{visitID}/cancel", s.cancelVisit)
+			r.Post("/visits/{visitID}/cancel-series", s.cancelSeries)
+			r.Post("/visitor-visits/{visitorVisitID}/cancel", s.cancelParticipant)
 			r.Post("/visits/{visitID}/approve", s.approveVisit)
 			r.Post("/visits/{visitID}/reject", s.rejectVisit)
 			r.Post("/visits/{visitID}/notifications/resend", s.resendVisitNotification)

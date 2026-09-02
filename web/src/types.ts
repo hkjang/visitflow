@@ -147,10 +147,31 @@ export interface Visit {
   source: string;
   visitTypeId?: string;
   visitTypeName?: string;
+  approvalReason?: string;
+  seriesId?: string;
   visitorCount: number;
   primaryVisitor: string;
   company?: string;
   createdAt: string;
+}
+
+export interface VisitEvent {
+  type: string;
+  actor?: string;
+  lobby?: string;
+  method?: string;
+  details?: unknown;
+  visitor?: string;
+  createdAt: string;
+}
+
+export interface VisitDetailExtras {
+  notes?: string;
+  approvalReason?: string;
+  approverName?: string;
+  approvedAt?: string;
+  seriesId?: string;
+  events: VisitEvent[];
 }
 
 export interface LobbyVisitor {

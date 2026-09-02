@@ -693,6 +693,86 @@ func TestLobbyMustBelongToSiteAndVerifyHonoursReuseSetting(t *testing.T) {
 	env.json(http.MethodPost, "/api/v1/qr/verify", map[string]string{"token": token}, http.StatusOK)
 }
 
+func TestParticipantCancelAndSeriesCancel(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{"visitors": []map[string]any{
+		{"name": "첫째", "phone": "010-1000-0001", "consent": true},
+		{"name": "둘째", "phone": "010-1000-0002", "consent": true},
+	}}), http.StatusCreated)
+	visitID := fmt.Sprint(created["id"])
+	detail := env.json(http.MethodGet, "/api/v1/visits/"+visitID, nil, http.StatusOK)
+	visitors := detail["visitors"].([]any)
+	second := fmt.Sprint(visitors[1].(map[string]any)["id"])
+	result := env.json(http.MethodPost, "/api/v1/visitor-visits/"+second+"/cancel", map[string]any{}, http.StatusOK)
+	if result["visitCancelled"] != false || fmt.Sprint(result["remaining"]) != "1" {
+		t.Fatalf("cancelling one of two visitors gave %v", result)
+	}
+	after := env.json(http.MethodGet, "/api/v1/visits/"+visitID, nil, http.StatusOK)
+	if visit := after["visit"].(map[string]any); visit["status"] != "SCHEDULED" {
+		t.Fatalf("visit status changed after a single participant cancel: %v", visit["status"])
+	}
+	first := fmt.Sprint(visitors[0].(map[string]any)["id"])
+	last := env.json(http.MethodPost, "/api/v1/visitor-visits/"+first+"/cancel", map[string]any{}, http.StatusOK)
+	if last["visitCancelled"] != true {
+		t.Fatalf("cancelling the last visitor did not cancel the visit: %v", last)
+	}
+
+	series := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{"recurrence": map[string]any{"frequency": "weekly", "occurrences": 3}}), http.StatusCreated)
+	occurrences := series["occurrences"].([]any)
+	middle := fmt.Sprint(occurrences[1].(map[string]any)["id"])
+	cancelled := env.json(http.MethodPost, "/api/v1/visits/"+middle+"/cancel-series", map[string]any{}, http.StatusOK)
+	if fmt.Sprint(cancelled["cancelled"]) != "2" {
+		t.Fatalf("series cancel from the second occurrence cancelled %v visits, want 2", cancelled["cancelled"])
+	}
+	firstOccurrence := env.json(http.MethodGet, "/api/v1/visits/"+fmt.Sprint(occurrences[0].(map[string]any)["id"]), nil, http.StatusOK)
+	if visit := firstOccurrence["visit"].(map[string]any); visit["status"] != "SCHEDULED" {
+		t.Fatalf("an earlier occurrence was cancelled: %v", visit["status"])
+	}
+}
+
+func TestManualCheckInAndRejectionDetail(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, nil), http.StatusCreated)
+	visitID := fmt.Sprint(created["id"])
+	token := passTokenFrom(t, created)
+	detail := env.json(http.MethodGet, "/api/v1/visits/"+visitID, nil, http.StatusOK)
+	participantID := fmt.Sprint(detail["visitors"].([]any)[0].(map[string]any)["id"])
+	if missing := env.do(http.MethodPost, "/api/v1/checkins/manual", map[string]any{"visitorVisitId": participantID}); missing.Code != http.StatusBadRequest {
+		t.Fatalf("manual check-in without a reason returned %d", missing.Code)
+	}
+	env.json(http.MethodPost, "/api/v1/checkins/manual", map[string]any{"visitorVisitId": participantID, "reason": "신분증 확인, 휴대폰 방전"}, http.StatusCreated)
+	// The QR is consumed so it cannot be replayed after a manual admission.
+	if replay := env.do(http.MethodPost, "/api/v1/checkins", map[string]string{"token": token}); replay.Code != http.StatusConflict {
+		t.Fatalf("QR still usable after manual check-in: %d", replay.Code)
+	}
+	after := env.json(http.MethodGet, "/api/v1/visits/"+visitID, nil, http.StatusOK)
+	events := after["detail"].(map[string]any)["events"].([]any)
+	found := false
+	for _, event := range events {
+		entry := event.(map[string]any)
+		if entry["type"] == "CHECKED_IN" && entry["method"] == "manual" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("timeline lacks the manual check-in: %v", events)
+	}
+
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"visit.approval_enabled": "true"}}, http.StatusOK)
+	pending := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, nil), http.StatusCreated)
+	pendingID := fmt.Sprint(pending["id"])
+	env.json(http.MethodPost, "/api/v1/visits/"+pendingID+"/reject", map[string]string{"reason": "일정 중복"}, http.StatusNoContent)
+	rejected := env.json(http.MethodGet, "/api/v1/visits/"+pendingID, nil, http.StatusOK)
+	if extras := rejected["detail"].(map[string]any); extras["approvalReason"] != "일정 중복" || extras["approverName"] == "" {
+		t.Fatalf("rejection reason or approver missing from detail: %v", extras)
+	}
+	if summary := rejected["visit"].(map[string]any); summary["approvalReason"] != "일정 중복" {
+		t.Fatalf("summary lacks the rejection reason: %v", summary)
+	}
+}
+
 func TestFailedNotificationCanBeRetried(t *testing.T) {
 	env := newTestEnv(t)
 	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)

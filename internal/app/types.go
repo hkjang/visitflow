@@ -119,6 +119,8 @@ type VisitSummary struct {
 	Source         string    `json:"source"`
 	VisitTypeID    *string   `json:"visitTypeId,omitempty"`
 	VisitTypeName  string    `json:"visitTypeName,omitempty"`
+	ApprovalReason string    `json:"approvalReason,omitempty"`
+	SeriesID       string    `json:"seriesId,omitempty"`
 	VisitorCount   int       `json:"visitorCount"`
 	PrimaryVisitor string    `json:"primaryVisitor"`
 	Company        string    `json:"company,omitempty"`

@@ -33,7 +33,7 @@ var notificationChannels = map[string]bool{"sms": true, "mms": true, "kakao": tr
 
 var notificationEvents = map[string]bool{
 	"visit_confirmed": true, "visit_start": true, "checked_in": true,
-	"checked_out": true, "visit_cancelled": true, "approval_escalated": true,
+	"checked_out": true, "visit_cancelled": true, "visit_rejected": true, "approval_escalated": true,
 }
 
 var notificationTemplateKeys = map[string]bool{

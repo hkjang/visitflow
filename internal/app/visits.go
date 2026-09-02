@@ -316,7 +316,7 @@ func (s *Server) queryVisits(ctx context.Context, u User, q visitQuery) ([]Visit
 	search := strings.TrimSpace(q.Search)
 	rows, err := s.db.Query(ctx, `
 		SELECT v.id,v.request_no,v.host_user_id,h.display_name,v.department_id,COALESCE(o.name,''),v.site_id,s.name,v.lobby_id,COALESCE(l.name,''),
-		v.start_at,v.end_at,v.purpose,COALESCE(v.place_detail,''),v.status,v.source,v.created_at,v.visit_type_id,COALESCE(vt.name,''),
+		v.start_at,v.end_at,v.purpose,COALESCE(v.place_detail,''),v.status,v.source,v.created_at,v.visit_type_id,COALESCE(vt.name,''),COALESCE(v.approval_reason,''),COALESCE(v.recurrence->>'seriesId',''),
 		count(vv.id),COALESCE((array_agg(p.name_encrypted ORDER BY vv.is_primary DESC,vv.created_at))[1],''),COALESCE((array_agg(p.company ORDER BY vv.is_primary DESC,vv.created_at))[1],''),(array_agg(p.masked_at ORDER BY vv.is_primary DESC,vv.created_at))[1]
 		FROM visits v JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id
 		LEFT JOIN organizations o ON o.id=v.department_id LEFT JOIN lobbies l ON l.id=v.lobby_id
@@ -345,7 +345,7 @@ func (s *Server) queryVisits(ctx context.Context, u User, q visitQuery) ([]Visit
 		var item VisitSummary
 		var nameEncrypted string
 		var maskedAt *time.Time
-		if err := rows.Scan(&item.ID, &item.RequestNo, &item.HostUserID, &item.HostName, &item.DepartmentID, &item.DepartmentName, &item.SiteID, &item.SiteName, &item.LobbyID, &item.LobbyName, &item.StartAt, &item.EndAt, &item.Purpose, &item.PlaceDetail, &item.Status, &item.Source, &item.CreatedAt, &item.VisitTypeID, &item.VisitTypeName, &item.VisitorCount, &nameEncrypted, &item.Company, &maskedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.RequestNo, &item.HostUserID, &item.HostName, &item.DepartmentID, &item.DepartmentName, &item.SiteID, &item.SiteName, &item.LobbyID, &item.LobbyName, &item.StartAt, &item.EndAt, &item.Purpose, &item.PlaceDetail, &item.Status, &item.Source, &item.CreatedAt, &item.VisitTypeID, &item.VisitTypeName, &item.ApprovalReason, &item.SeriesID, &item.VisitorCount, &nameEncrypted, &item.Company, &maskedAt); err != nil {
 			return nil, "", err
 		}
 		item.PrimaryVisitor = s.decryptOptional(nameEncrypted)
@@ -771,8 +771,13 @@ func (s *Server) getVisit(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
+	extras, err := s.visitDetailExtras(r.Context(), id)
+	if err != nil {
+		notFoundOrServer(w, err)
+		return
+	}
 	s.audit(r.Context(), u.ID, "visit.view", "visit", id, r.RemoteAddr, map[string]any{"visitorCount": len(participants)})
-	writeJSON(w, http.StatusOK, map[string]any{"visit": summary, "visitors": participants})
+	writeJSON(w, http.StatusOK, map[string]any{"visit": summary, "visitors": participants, "detail": extras})
 }
 
 func (s *Server) visitParticipants(ctx context.Context, visitID string, includePass bool) ([]map[string]any, error) {
@@ -1042,6 +1047,15 @@ func (s *Server) approvalAction(w http.ResponseWriter, r *http.Request, approve 
 	}
 	if err == nil && tag.RowsAffected() > 0 {
 		_, err = tx.Exec(r.Context(), `INSERT INTO visit_events(visit_id,event_type,actor_user_id,details) VALUES($1,$2,NULLIF($3,''),$4)`, id, status, u.ID, map[string]string{"reason": in.Reason})
+	}
+	if err == nil && tag.RowsAffected() > 0 && !approve {
+		// Rejection has no QR to hand out, but the host must learn the outcome.
+		if err = s.cancelPendingVisitNotificationsTx(r.Context(), tx, id); err == nil {
+			var primary string
+			if scanErr := tx.QueryRow(r.Context(), `SELECT id FROM visitor_visits WHERE visit_id=$1 ORDER BY is_primary DESC,created_at LIMIT 1`, id).Scan(&primary); scanErr == nil {
+				err = s.queueNotificationEventTx(r.Context(), tx, id, primary, "visit_rejected", time.Now())
+			}
+		}
 	}
 	if err != nil || tag.RowsAffected() == 0 {
 		writeError(w, 409, "approval_conflict", "승인 대기 상태가 아니거나 처리할 수 없습니다")
@@ -1596,7 +1610,7 @@ func (s *Server) lobbyList(w http.ResponseWriter, r *http.Request, current bool)
 	if current {
 		where = `vv.status='CHECKED_IN'`
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT vv.id,v.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),s.name,COALESCE(l.name,''),v.start_at,v.end_at,vv.status,vv.checked_in_at FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE `+where+` AND ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[])) ORDER BY COALESCE(vv.checked_in_at,v.start_at) DESC LIMIT 301`, u.Role, u.SiteScope)
+	rows, err := s.db.Query(r.Context(), `SELECT vv.id,v.id,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(o.name,''),s.name,COALESCE(l.name,''),v.start_at,v.end_at,vv.status,vv.checked_in_at FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN organizations o ON o.id=v.department_id WHERE `+where+` AND ($1<>'lobby' OR cardinality($2::text[])=0 OR v.site_id=ANY($2::text[])) AND ($3='' OR v.lobby_id=$3) ORDER BY COALESCE(vv.checked_in_at,v.start_at) DESC LIMIT 301`, u.Role, u.SiteScope, strings.TrimSpace(r.URL.Query().Get("lobby")))
 	if err != nil {
 		notFoundOrServer(w, err)
 		return

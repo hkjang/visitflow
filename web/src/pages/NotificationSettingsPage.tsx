@@ -28,7 +28,7 @@ type RuleForm = Omit<NotificationRule, "id" | "apiConfigName"> & { id?: string }
 const channelLabels: Record<Channel, string> = { sms: "SMS", mms: "MMS", kakao: "카카오톡", webhook: "외부 시스템 연동" };
 const eventLabels: Record<string, string> = {
   visit_confirmed: "방문 확정 시", visit_start: "방문 시작 기준", checked_in: "체크인 시",
-  checked_out: "체크아웃 시", visit_cancelled: "방문 취소 시", approval_escalated: "승인 지연 시",
+  checked_out: "체크아웃 시", visit_cancelled: "방문 취소 시", visit_rejected: "방문 반려 시", approval_escalated: "승인 지연 시",
 };
 const audienceLabels: Record<string, string> = { visitor: "방문자", host: "담당자", system: "외부 시스템" };
 const localeLabels: Record<string, string> = { "": "모든 언어", ko: "한국어", en: "English", ja: "日本語", zh: "中文" };
