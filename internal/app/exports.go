@@ -23,6 +23,32 @@ func exportFilename(prefix string) string {
 	return fmt.Sprintf("%s-%s.csv", prefix, time.Now().Format("20060102-1504"))
 }
 
+// csvFormulaPrefixes are the characters a spreadsheet reads as the start of a
+// formula. Tab and carriage return are included because Excel strips them
+// before deciding, so "\t=cmd|..." is evaluated just like "=cmd|...".
+const csvFormulaPrefixes = "=+-@\t\r"
+
+// csvCell neutralizes spreadsheet formula injection. Visitor names, companies,
+// purposes and audit details reach an export unchanged from self-registration
+// and public forms, and these files exist to be opened in Excel. A leading
+// single quote makes Excel and LibreOffice show the original text as a literal
+// instead of evaluating it, which is the difference between reading a company
+// name and running =cmd|'/c calc'!A0 on the operator's workstation.
+func csvCell(value string) string {
+	if value == "" || !strings.ContainsRune(csvFormulaPrefixes, rune(value[0])) {
+		return value
+	}
+	return "'" + value
+}
+
+func writeCSVRow(writer *csv.Writer, values []string) {
+	cells := make([]string, len(values))
+	for index, value := range values {
+		cells[index] = csvCell(value)
+	}
+	_ = writer.Write(cells)
+}
+
 // formatTime renders with an explicit offset: the service container usually
 // runs in UTC, and a bare wall-clock time would be misread by the operator.
 func formatTime(value *time.Time) string {
@@ -62,7 +88,7 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	writer := csvWriter(w, exportFilename("visitflow-audit"))
-	_ = writer.Write([]string{"id", "createdAt", "actor", "action", "resourceType", "resourceId", "ipAddress", "details"})
+	writeCSVRow(writer, []string{"id", "createdAt", "actor", "action", "resourceType", "resourceId", "ipAddress", "details"})
 	count := 0
 	for rows.Next() {
 		var id int64
@@ -71,7 +97,7 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 		if rows.Scan(&id, &createdAt, &actor, &act, &resourceType, &resourceID, &ip, &details) != nil {
 			continue
 		}
-		_ = writer.Write([]string{strconv.FormatInt(id, 10), formatTime(&createdAt), actor, act, resourceType, resourceID, ip, details})
+		writeCSVRow(writer, []string{strconv.FormatInt(id, 10), formatTime(&createdAt), actor, act, resourceType, resourceID, ip, details})
 		count++
 	}
 	writer.Flush()
@@ -102,7 +128,7 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	writer := csvWriter(w, exportFilename("visitflow-visits"))
-	_ = writer.Write([]string{"requestNo", "startAt", "endAt", "timezone", "site", "lobby", "visitType", "host", "department", "purpose", "placeDetail", "visitStatus", "visitorStatus", "visitor", "company", "checkedInAt", "checkedOutAt", "badgeNo"})
+	writeCSVRow(writer, []string{"requestNo", "startAt", "endAt", "timezone", "site", "lobby", "visitType", "host", "department", "purpose", "placeDetail", "visitStatus", "visitorStatus", "visitor", "company", "checkedInAt", "checkedOutAt", "badgeNo"})
 	count := 0
 	for rows.Next() {
 		var requestNo, site, timezone, lobby, visitType, host, department, purpose, place, visitStatus, participantStatus, nameEnc, company, badge string
@@ -116,7 +142,7 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 			visitor = maskName(visitor)
 		}
 		location := siteLocation(timezone)
-		_ = writer.Write([]string{requestNo, formatSiteTime(&startAt, location), formatSiteTime(&endAt, location), timezone, site, lobby, visitType, host, department, purpose, place,
+		writeCSVRow(writer, []string{requestNo, formatSiteTime(&startAt, location), formatSiteTime(&endAt, location), timezone, site, lobby, visitType, host, department, purpose, place,
 			visitStatus, participantStatus, visitor, company, formatSiteTime(checkedIn, location), formatSiteTime(checkedOut, location), badge})
 		count++
 	}
@@ -147,14 +173,14 @@ func (s *Server) exportStatisticsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	writer := csvWriter(w, exportFilename("visitflow-statistics"))
-	_ = writer.Write([]string{"date", "scheduled", "checkedIn", "noShow", "cancelled"})
+	writeCSVRow(writer, []string{"date", "scheduled", "checkedIn", "noShow", "cancelled"})
 	for rows.Next() {
 		var day time.Time
 		var scheduled, checkedIn, noShow, cancelled int
 		if rows.Scan(&day, &scheduled, &checkedIn, &noShow, &cancelled) != nil {
 			continue
 		}
-		_ = writer.Write([]string{day.Format("2006-01-02"), strconv.Itoa(scheduled), strconv.Itoa(checkedIn), strconv.Itoa(noShow), strconv.Itoa(cancelled)})
+		writeCSVRow(writer, []string{day.Format("2006-01-02"), strconv.Itoa(scheduled), strconv.Itoa(checkedIn), strconv.Itoa(noShow), strconv.Itoa(cancelled)})
 	}
 	writer.Flush()
 	u, _ := userFrom(r)
