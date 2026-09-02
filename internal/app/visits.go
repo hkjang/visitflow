@@ -249,6 +249,9 @@ type visitQuery struct {
 	Status string
 	Period string
 	Search string
+	// ID restricts the result to one visit by id or request number, bypassing
+	// the substring search a detail lookup does not need.
+	ID     string
 	Cursor string
 	Limit  int
 }
@@ -332,10 +335,11 @@ func (s *Server) queryVisits(ctx context.Context, u User, q visitQuery) ([]Visit
 		 OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=v.host_user_id AND hu.delegate_user_id=$4 AND hu.delegate_until>now() AND hu.active)
 		 OR EXISTS(SELECT 1 FROM users m WHERE m.delegate_user_id=$4 AND m.delegate_until>now() AND m.active AND m.role='dept_manager' AND m.department_id=v.department_id))
 		AND ($11=false OR (v.start_at,v.id)<($12::timestamptz,$13))
+		AND ($14='' OR v.id=$14 OR v.request_no=$14)
 		GROUP BY v.id,h.display_name,o.name,s.name,l.name,vt.name ORDER BY v.start_at DESC,v.id DESC LIMIT $8`,
 		q.Status, q.Period, search, u.ID, u.Role, dept, u.SiteScope, q.Limit+1,
 		s.keys.Digest("name:"+strings.ToLower(search)), s.keys.Digest("phone:"+normalizePhone(search)),
-		hasCursor, cursorTime, cursorID)
+		hasCursor, cursorTime, cursorID, strings.TrimSpace(q.ID))
 	if err != nil {
 		return nil, "", err
 	}
@@ -750,7 +754,7 @@ func (s *Server) queueNotificationTx(ctx context.Context, tx pgx.Tx, visitID, re
 func (s *Server) getVisit(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "visitID")
 	u, _ := userFrom(r)
-	items, _, err := s.queryVisits(r.Context(), u, visitQuery{Search: id, Limit: 200})
+	items, _, err := s.queryVisits(r.Context(), u, visitQuery{ID: id, Limit: 2})
 	if err != nil {
 		notFoundOrServer(w, err)
 		return

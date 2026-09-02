@@ -125,7 +125,7 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		if id == "" {
 			return nil, errMCP("visit_id는 필수입니다")
 		}
-		items, _, err := s.queryVisits(r.Context(), u, visitQuery{Search: id, Limit: 5})
+		items, _, err := s.queryVisits(r.Context(), u, visitQuery{ID: id, Limit: 2})
 		if err != nil || len(items) == 0 {
 			return nil, errMCP("방문을 찾을 수 없습니다")
 		}

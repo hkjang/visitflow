@@ -690,6 +690,7 @@ func TestLobbyMustBelongToSiteAndVerifyHonoursReuseSetting(t *testing.T) {
 	if _, err := env.server.db.Exec(context.Background(), `UPDATE settings SET value='false' WHERE key='visit.single_use_qr'`); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
+	env.server.invalidateSettings()
 	env.json(http.MethodPost, "/api/v1/qr/verify", map[string]string{"token": token}, http.StatusOK)
 }
 
@@ -773,6 +774,36 @@ func TestManualCheckInAndRejectionDetail(t *testing.T) {
 	}
 }
 
+// Settings are cached on the hot path; the node that saves them must see its
+// own change immediately, and other nodes within the TTL.
+func TestSettingsCacheInvalidatesOnUpdate(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if value, _ := env.server.getSetting(ctx, "visit.company_required"); value != "false" {
+		t.Fatalf("initial value %q", value)
+	}
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"visit.company_required": "true"}}, http.StatusOK)
+	if value, _ := env.server.getSetting(ctx, "visit.company_required"); value != "true" {
+		t.Fatalf("cached value survived the update: %q", value)
+	}
+	// A direct database write (another node) becomes visible once the TTL lapses.
+	if _, err := env.server.db.Exec(ctx, `UPDATE settings SET value='false' WHERE key='visit.company_required'`); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if value, _ := env.server.getSetting(ctx, "visit.company_required"); value != "true" {
+		t.Fatalf("value was not served from cache inside the TTL: %q", value)
+	}
+	env.server.settingsMu.Lock()
+	for key, entry := range env.server.settingsCache {
+		entry.expires = time.Time{}
+		env.server.settingsCache[key] = entry
+	}
+	env.server.settingsMu.Unlock()
+	if value, _ := env.server.getSetting(ctx, "visit.company_required"); value != "false" {
+		t.Fatalf("expired cache entry was not refreshed: %q", value)
+	}
+}
+
 func TestFailedNotificationCanBeRetried(t *testing.T) {
 	env := newTestEnv(t)
 	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
@@ -813,7 +844,9 @@ func TestPublicEndpointsAreRateLimited(t *testing.T) {
 	if _, err := env.server.db.Exec(context.Background(), `UPDATE settings SET value='2' WHERE key='security.public_rate_limit_per_minute'`); err != nil {
 		t.Fatalf("configure limit: %v", err)
 	}
-	// The limit is cached for a few seconds; expire it so the new value applies.
+	// The test bypasses the settings API, so drop both caches the way the API
+	// path does after a save.
+	env.server.invalidateSettings()
 	env.server.limitCacheMu.Lock()
 	env.server.limitCacheExpires = time.Time{}
 	env.server.limitCacheMu.Unlock()
@@ -860,6 +893,7 @@ func TestMetricsEndpointRequiresConfiguredToken(t *testing.T) {
 	if _, err := env.server.db.Exec(context.Background(), `UPDATE settings SET value=$1 WHERE key='security.metrics_token'`, encrypted); err != nil {
 		t.Fatalf("configure token: %v", err)
 	}
+	env.server.invalidateSettings()
 	if unauthorized := env.do(http.MethodGet, "/metrics", nil); unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("metrics endpoint accepted an unauthenticated scrape: %d", unauthorized.Code)
 	}

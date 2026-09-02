@@ -42,6 +42,9 @@ type Server struct {
 	limitCacheMu      sync.Mutex
 	limitCacheValue   int
 	limitCacheExpires time.Time
+
+	settingsMu    sync.RWMutex
+	settingsCache map[string]cachedSetting
 }
 
 func NewServer(db *pgxpool.Pool, keys *platform.Keyring, logger *slog.Logger, webFS fs.FS, version, commit, builtAt string) *Server {
@@ -56,7 +59,8 @@ func NewServer(db *pgxpool.Pool, keys *platform.Keyring, logger *slog.Logger, we
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, s.recoverer, s.securityHeaders, s.accessLog)
+	r.Use(middleware.RequestID, middleware.RealIP, s.recoverer, s.securityHeaders, s.accessLog,
+		middleware.Compress(5, "application/json", "text/html", "text/css", "text/plain", "text/csv", "application/javascript", "text/javascript", "image/svg+xml", "application/manifest+json"))
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -243,7 +247,11 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 			status = http.StatusOK
 		}
 		s.metrics.observeStatus(status)
-		s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", time.Since(start).Milliseconds(), "request_id", middleware.GetReqID(r.Context()))
+		level := slog.LevelInfo
+		if strings.HasPrefix(r.URL.Path, "/assets/") && status < 400 {
+			level = slog.LevelDebug
+		}
+		s.logger.Log(r.Context(), level, "request", "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", time.Since(start).Milliseconds(), "request_id", middleware.GetReqID(r.Context()))
 	})
 }
 
@@ -307,6 +315,12 @@ func (s *Server) spaHandler() http.Handler {
 		if p != "." {
 			if f, err := s.webFS.Open(p); err == nil {
 				_ = f.Close()
+				if strings.HasPrefix(p, "assets/") {
+					// Vite names these by content hash, so they never change in place.
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				} else if p == "sw.js" {
+					w.Header().Set("Cache-Control", "no-cache")
+				}
 				assets.ServeHTTP(w, r)
 				return
 			}

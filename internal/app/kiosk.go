@@ -58,7 +58,7 @@ func (s *Server) lookupKioskDevice(r *http.Request, token string) (kioskDevice, 
 	if lobbyID != nil {
 		device.LobbyID = *lobbyID
 	}
-	_, _ = s.db.Exec(r.Context(), `UPDATE kiosk_devices SET last_seen_at=now() WHERE id=$1`, device.ID)
+	_, _ = s.db.Exec(r.Context(), `UPDATE kiosk_devices SET last_seen_at=now() WHERE id=$1 AND (last_seen_at IS NULL OR last_seen_at<now()-interval '1 minute')`, device.ID)
 	return device, nil
 }
 

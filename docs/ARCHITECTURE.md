@@ -56,4 +56,5 @@ REQUESTED → PENDING_APPROVAL → SCHEDULED → CHECKED_IN → CHECKED_OUT
 - 목록은 커서(keyset) 페이지네이션을 사용해 새 방문이 생겨도 다음 페이지가 밀리지 않으며, 로비 목록은 한도를 넘으면 잘렸음을 응답에 표시한다.
 - 지표는 프로세스 카운터와 DB Gauge를 합쳐 관리자 화면과 토큰 보호 `/metrics`로 제공한다.
 - Service Worker는 비상 대피 명단만 오프라인 캐시하고 방문자 데이터가 담긴 다른 API 응답은 캐시하지 않는다.
+- 성능: 설정값은 프로세스 내 5초 캐시(변경 노드는 즉시 무효화), 인증은 세션·CSRF·권한 범위를 한 쿼리로 해석하고 API 키·키오스크의 사용 시각 갱신은 분당 1회로 제한한다. 응답은 gzip 압축되고 해시된 정적 자산은 1년 immutable 캐시, SPA 문서는 nonce 때문에 no-store다. 프런트엔드는 화면 단위로 코드 분할되어 모바일 방문증은 관리자 화면 코드를 내려받지 않는다.
 - 영속 백업 단위는 PostgreSQL + 별도 보관한 `ENCRYPTION_KEY`

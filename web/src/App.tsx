@@ -1,24 +1,31 @@
+import { lazy, Suspense } from "react";
 import { CircularProgress, Box } from "@mui/material";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import { AppShell } from "./components/AppShell";
 import { LoginPage } from "./pages/LoginPage";
 import { PersonalDashboardPage } from "./pages/PersonalDashboardPage";
-import { VisitFormPage } from "./pages/VisitFormPage";
-import { VisitsPage } from "./pages/VisitsPage";
-import { TemplatesPage } from "./pages/TemplatesPage";
-import { LobbyPage } from "./pages/LobbyPage";
-import { ScannerPage } from "./pages/ScannerPage";
-import { AdminPage } from "./pages/AdminPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { KeysPage } from "./pages/KeysPage";
-import { MobilePassPage } from "./pages/MobilePassPage";
-import { SelfRegistrationPage } from "./pages/SelfRegistrationPage";
-import { KioskPage } from "./pages/KioskPage";
-import { RosterPage } from "./pages/RosterPage";
-import { ApprovalsPage } from "./pages/ApprovalsPage";
-import { GuidePage } from "./pages/GuidePage";
-import { NotificationSettingsPage } from "./pages/NotificationSettingsPage";
+
+// Every page except the login and dashboard is its own chunk. Visitor-facing
+// pages (pass, self-registration) and the kiosk load on phones and tablets that
+// must never download the admin console.
+const VisitFormPage = lazy(() => import("./pages/VisitFormPage").then((m) => ({ default: m.VisitFormPage })));
+const VisitsPage = lazy(() => import("./pages/VisitsPage").then((m) => ({ default: m.VisitsPage })));
+const TemplatesPage = lazy(() => import("./pages/TemplatesPage").then((m) => ({ default: m.TemplatesPage })));
+const LobbyPage = lazy(() => import("./pages/LobbyPage").then((m) => ({ default: m.LobbyPage })));
+const ScannerPage = lazy(() => import("./pages/ScannerPage").then((m) => ({ default: m.ScannerPage })));
+const AdminPage = lazy(() => import("./pages/AdminPage").then((m) => ({ default: m.AdminPage })));
+const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+const KeysPage = lazy(() => import("./pages/KeysPage").then((m) => ({ default: m.KeysPage })));
+const MobilePassPage = lazy(() => import("./pages/MobilePassPage").then((m) => ({ default: m.MobilePassPage })));
+const ApprovalsPage = lazy(() => import("./pages/ApprovalsPage").then((m) => ({ default: m.ApprovalsPage })));
+const GuidePage = lazy(() => import("./pages/GuidePage").then((m) => ({ default: m.GuidePage })));
+const NotificationSettingsPage = lazy(() => import("./pages/NotificationSettingsPage").then((m) => ({ default: m.NotificationSettingsPage })));
+const SelfRegistrationPage = lazy(() => import("./pages/SelfRegistrationPage").then((m) => ({ default: m.SelfRegistrationPage })));
+const KioskPage = lazy(() => import("./pages/KioskPage").then((m) => ({ default: m.KioskPage })));
+const RosterPage = lazy(() => import("./pages/RosterPage").then((m) => ({ default: m.RosterPage })));
+
+const Spinner = () => <Box sx={{ minHeight: "60vh", display: "grid", placeItems: "center" }}><CircularProgress /></Box>;
 
 function Protected() {
   const { user } = useAuth();
@@ -41,6 +48,7 @@ export default function App() {
   const { loading } = useAuth();
   if (loading) return <Box sx={{ height: "100vh", display: "grid", placeItems: "center" }}><CircularProgress /></Box>;
   return (
+    <Suspense fallback={<Spinner />}>
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/q/:token" element={<MobilePassPage />} />
@@ -67,5 +75,6 @@ export default function App() {
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </Suspense>
   );
 }

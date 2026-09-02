@@ -163,18 +163,22 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 			raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 			if strings.HasPrefix(raw, "vf_") {
 				var keyID string
-				var err error
-				u, err = scanUser(s.db.QueryRow(r.Context(), `SELECT u.id,u.username,u.display_name,COALESCE(u.email,''),u.employee_id,u.role,u.source,u.last_login_at
+				digest := s.keys.Digest(raw)
+				// One round trip resolves the key, its owner and the owner's scope;
+				// the last-used stamp is refreshed at most once a minute so a busy
+				// integration does not turn every read into a write.
+				err := s.db.QueryRow(r.Context(), `SELECT u.id,u.username,u.display_name,COALESCE(u.email,''),u.employee_id,u.role,u.source,u.last_login_at,
+					k.id,k.scopes,u.department_id,u.site_scope,u.delegate_user_id,u.delegate_until,
+					EXISTS(SELECT 1 FROM users m WHERE m.delegate_user_id=u.id AND m.delegate_until>now() AND m.active AND m.role='dept_manager')
 					FROM api_keys k JOIN users u ON u.id=k.user_id
-					WHERE k.secret_hash=$1 AND u.active=true AND (k.expires_at IS NULL OR k.expires_at>now()) AND (k.revoked_at IS NULL OR k.grace_until>now())`, s.keys.Digest(raw)))
-				if err == nil {
-					err = s.db.QueryRow(r.Context(), `SELECT id,scopes FROM api_keys WHERE secret_hash=$1`, s.keys.Digest(raw)).Scan(&keyID, &apiScopes)
-					_, _ = s.db.Exec(r.Context(), `UPDATE api_keys SET last_used_at=now() WHERE id=$1`, keyID)
-				}
+					WHERE k.secret_hash=$1 AND u.active=true AND (k.expires_at IS NULL OR k.expires_at>now()) AND (k.revoked_at IS NULL OR k.grace_until>now())`, digest).
+					Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.EmployeeID, &u.Role, &u.Source, &u.LastLoginAt,
+						&keyID, &apiScopes, &u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil, &u.ApprovalDelegate)
 				if err != nil {
 					writeError(w, http.StatusUnauthorized, "invalid_api_key", "API 키가 유효하지 않습니다")
 					return
 				}
+				_, _ = s.db.Exec(r.Context(), `UPDATE api_keys SET last_used_at=now() WHERE id=$1 AND (last_used_at IS NULL OR last_used_at<now()-interval '1 minute')`, keyID)
 				allowedValue, _ := s.getSetting(r.Context(), "security.api_key_allowed_scopes")
 				allowed := map[string]bool{}
 				for _, scope := range strings.Fields(allowedValue) {
@@ -205,14 +209,18 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 				writeError(w, http.StatusUnauthorized, "authentication_required", "로그인이 필요합니다")
 				return
 			}
-			u, err = scanUser(s.db.QueryRow(r.Context(), `SELECT u.id,u.username,u.display_name,COALESCE(u.email,''),u.employee_id,u.role,u.source,u.last_login_at
-				FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active=true`, s.keys.Digest(cookie.Value)))
+			// Session, CSRF token and the user's scope come back in a single query.
+			err = s.db.QueryRow(r.Context(), `SELECT u.id,u.username,u.display_name,COALESCE(u.email,''),u.employee_id,u.role,u.source,u.last_login_at,
+				s.csrf_token,u.department_id,u.site_scope,u.delegate_user_id,u.delegate_until,
+				EXISTS(SELECT 1 FROM users m WHERE m.delegate_user_id=u.id AND m.delegate_until>now() AND m.active AND m.role='dept_manager')
+				FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active=true`, s.keys.Digest(cookie.Value)).
+				Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.EmployeeID, &u.Role, &u.Source, &u.LastLoginAt,
+					&csrf, &u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil, &u.ApprovalDelegate)
 			if err != nil {
 				http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
 				writeError(w, http.StatusUnauthorized, "session_expired", "세션이 만료되었습니다")
 				return
 			}
-			_ = s.db.QueryRow(r.Context(), `SELECT csrf_token FROM sessions WHERE token_hash=$1`, s.keys.Digest(cookie.Value)).Scan(&csrf)
 			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && r.URL.Path != "/api/v1/auth/logout" {
 				provided := r.Header.Get("X-CSRF-Token")
 				if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(csrf)) != 1 {
@@ -221,7 +229,6 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 				}
 			}
 		}
-		s.loadUserScope(r.Context(), &u)
 		ctx := context.WithValue(r.Context(), userContextKey, u)
 		ctx = context.WithValue(ctx, csrfContextKey, csrf)
 		ctx = context.WithValue(ctx, apiScopesContextKey, apiScopes)

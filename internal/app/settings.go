@@ -8,24 +8,58 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
+// settingsCacheTTL bounds how stale a setting may be on a node that did not
+// perform the change itself. The node that saves settings invalidates at once.
+const settingsCacheTTL = 5 * time.Second
+
+type cachedSetting struct {
+	value   string
+	err     error
+	expires time.Time
+}
+
+// getSetting is on the hot path of authentication, QR verification and visit
+// creation, each of which reads several settings; the cache turns those into
+// one database round trip per key every few seconds instead of per request.
 func (s *Server) getSetting(ctx context.Context, key string) (string, error) {
 	if s.db == nil {
 		return "", errors.New("database is not configured")
 	}
+	now := time.Now()
+	s.settingsMu.RLock()
+	entry, ok := s.settingsCache[key]
+	s.settingsMu.RUnlock()
+	if ok && now.Before(entry.expires) {
+		return entry.value, entry.err
+	}
 	var value string
 	var secret bool
 	err := s.db.QueryRow(ctx, `SELECT value,secret FROM settings WHERE key=$1`, key).Scan(&value, &secret)
-	if err != nil {
+	if err == nil && secret && value != "" {
+		value, err = s.keys.Decrypt(value)
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		// Transient database errors are not cached; a missing key is.
 		return "", err
 	}
-	if secret && value != "" {
-		return s.keys.Decrypt(value)
+	s.settingsMu.Lock()
+	if s.settingsCache == nil {
+		s.settingsCache = map[string]cachedSetting{}
 	}
-	return value, nil
+	s.settingsCache[key] = cachedSetting{value: value, err: err, expires: now.Add(settingsCacheTTL)}
+	s.settingsMu.Unlock()
+	return value, err
+}
+
+func (s *Server) invalidateSettings() {
+	s.settingsMu.Lock()
+	s.settingsCache = nil
+	s.settingsMu.Unlock()
 }
 
 func (s *Server) listSettings(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +192,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		notFoundOrServer(w, err)
 		return
 	}
+	s.invalidateSettings()
 	u, _ := userFrom(r)
 	s.audit(r.Context(), u.ID, "settings.update", "settings", "", r.RemoteAddr, map[string]any{"changes": changes})
 	writeJSON(w, http.StatusOK, map[string]any{"updated": updated})

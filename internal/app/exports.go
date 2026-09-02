@@ -130,14 +130,17 @@ func (s *Server) exportStatisticsCSV(w http.ResponseWriter, r *http.Request) {
 	if days < 1 || days > 366 {
 		days = 30
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT d::date,COALESCE(count(DISTINCT vv.id),0),
-		COALESCE(count(DISTINCT vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')),0),
-		COALESCE(count(DISTINCT vv.id) FILTER(WHERE vv.status='NO_SHOW'),0),
-		COALESCE(count(DISTINCT vv.id) FILTER(WHERE vv.status='CANCELLED'),0)
-		FROM generate_series(CURRENT_DATE-($1::int-1),CURRENT_DATE,interval '1 day') d
-		LEFT JOIN visits v ON (v.start_at AT TIME ZONE (SELECT timezone FROM sites WHERE id=v.site_id))::date=d::date
-		LEFT JOIN visitor_visits vv ON vv.visit_id=v.id
-		GROUP BY d ORDER BY d`, days)
+	rows, err := s.db.Query(r.Context(), `WITH buckets AS (
+		SELECT (v.start_at AT TIME ZONE si.timezone)::date AS day,
+			count(vv.id) AS scheduled,
+			count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')) AS checked,
+			count(vv.id) FILTER(WHERE vv.status='NO_SHOW') AS no_show,
+			count(vv.id) FILTER(WHERE vv.status='CANCELLED') AS cancelled
+		FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id
+		WHERE v.start_at>=(CURRENT_DATE-($1::int))::timestamp-interval '1 day' AND v.start_at<(CURRENT_DATE+2)::timestamp
+		GROUP BY 1)
+		SELECT d::date,COALESCE(b.scheduled,0),COALESCE(b.checked,0),COALESCE(b.no_show,0),COALESCE(b.cancelled,0)
+		FROM generate_series(CURRENT_DATE-($1::int-1),CURRENT_DATE,interval '1 day') d LEFT JOIN buckets b ON b.day=d::date ORDER BY d`, days)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return

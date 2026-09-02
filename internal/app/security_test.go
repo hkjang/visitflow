@@ -1,10 +1,13 @@
 package app
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -179,5 +182,40 @@ func TestToSnakeCase(t *testing.T) {
 		if got := toSnakeCase(input); got != want {
 			t.Fatalf("toSnakeCase(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestHashedAssetsAreImmutableAndCompressed(t *testing.T) {
+	server := NewServer(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), fstest.MapFS{
+		"index.html":           {Data: []byte("<html><head></head><body>spa</body></html>")},
+		"assets/app-abc123.js": {Data: []byte(strings.Repeat("console.log('visitflow');", 200))},
+		"sw.js":                {Data: []byte("self.addEventListener('fetch', () => {});")},
+	}, "test", "test", "test")
+	handler := server.Routes()
+
+	request := httptest.NewRequest(http.MethodGet, "/assets/app-abc123.js", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("asset returned %d", response.Code)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("hashed asset cache header = %q", got)
+	}
+	if got := response.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("asset was not compressed: %q", got)
+	}
+
+	worker := httptest.NewRecorder()
+	handler.ServeHTTP(worker, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
+	if got := worker.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("service worker must revalidate: %q", got)
+	}
+
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/visits", nil))
+	if got := page.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("the SPA document carries a per-request nonce and must not be cached: %q", got)
 	}
 }
