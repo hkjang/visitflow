@@ -1175,6 +1175,27 @@ func TestAuditLogExportProducesCSV(t *testing.T) {
 	}
 }
 
+// A visitor supplies their own company name, and the visit export exists to be
+// opened in Excel, so the export must not hand the operator a live formula.
+func TestVisitExportNeutralizesSpreadsheetFormulas(t *testing.T) {
+	env := newTestEnv(t)
+	payload := "=cmd|'/c calc'!A0"
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+		"visitors": []map[string]any{{"name": "김방문", "phone": "010-1234-5678", "company": payload, "consent": true}},
+	}), http.StatusCreated)
+	response := env.do(http.MethodGet, "/api/v1/admin/visits.csv", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("export returned %d: %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "'"+payload) {
+		t.Fatalf("export did not escape the visitor supplied formula: %s", body[:minInt(len(body), 600)])
+	}
+	if strings.Contains(body, ","+payload) {
+		t.Fatalf("export wrote a live formula cell: %s", body[:minInt(len(body), 600)])
+	}
+}
+
 func TestMetricsEndpointRequiresConfiguredToken(t *testing.T) {
 	env := newTestEnv(t)
 	if disabled := env.do(http.MethodGet, "/metrics", nil); disabled.Code != http.StatusNotFound {
