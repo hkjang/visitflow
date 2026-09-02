@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Box, Button, Card, CardContent, Grid, InputAdornment, Paper, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import EventAvailableRounded from "@mui/icons-material/EventAvailableRounded";
 import MeetingRoomRounded from "@mui/icons-material/MeetingRoomRounded";
@@ -19,7 +19,10 @@ export function LobbyPage() {
   const [query, setQuery] = useState("");
   const load = useCallback(async () => { try { setData(await api(`/api/v1/lobby/${tab}?q=${encodeURIComponent(query)}`)); } catch (e) { setError(e instanceof Error ? e.message : "로비 현황을 불러오지 못했습니다"); } }, [tab, query]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { const stream = new EventSource("/api/v1/lobby/stream"); stream.addEventListener("ready", () => setConnected(true)); stream.addEventListener("visitflow", () => void load()); stream.onerror = () => setConnected(false); return () => stream.close(); }, [load]);
+  // The stream must outlive filter changes: re-subscribing on every keystroke
+  // reconnects the SSE channel and drops events in between.
+  const loadRef = useRef(load); useEffect(() => { loadRef.current = load; }, [load]);
+  useEffect(() => { const stream = new EventSource("/api/v1/lobby/stream"); stream.addEventListener("ready", () => setConnected(true)); stream.addEventListener("visitflow", () => void loadRef.current()); stream.onerror = () => setConnected(false); return () => stream.close(); }, []);
   const checkout = async (id: string) => { try { await postJSON("/api/v1/checkouts", { visitorVisitId: id, method: "lobby" }); await load(); } catch (e) { setError(e instanceof Error ? e.message : "퇴실 처리하지 못했습니다"); } };
   return <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1500, mx: "auto" }}><PageHeader eyebrow="LIVE LOBBY" title="Lobby Dashboard" description="오늘 방문 예정과 현재 사내 체류 인원을 실시간으로 관리합니다." actions={<><Button startIcon={<ChecklistRounded />} onClick={() => navigate("/lobby/roster")}>비상 명단</Button><Button startIcon={<PersonAddAltRounded />} onClick={() => navigate("/lobby/walk-in")}>현장 등록</Button><Button variant="contained" startIcon={<QrCodeScannerRounded />} onClick={() => navigate("/lobby/scan")}>QR 스캔</Button></>} />{error && <Alert severity="error" onClose={() => setError("")} sx={{ mb: 2 }}>{error}</Alert>}<Stack direction="row" alignItems="center" spacing={1} mb={2}><Box sx={{ width: 9, height: 9, borderRadius: "50%", bgcolor: connected ? "success.main" : "warning.main" }} /><Typography variant="caption" color="text.secondary">{connected ? "실시간 연결됨" : "재연결 중 · 화면 조회는 정상"}</Typography></Stack>
     <Grid container spacing={2}>{[["방문 예정", data.counts.scheduled ?? 0, "오늘 체크인 대기", <EventAvailableRounded />, "#3978A8"], ["현재 방문중", data.counts.current ?? 0, "재난 시 체류 기준 인원", <MeetingRoomRounded />, "#176B5B"], ["퇴실 완료", data.counts.completed ?? 0, "오늘 퇴실 처리", <ExitToAppRounded />, "#61736E"], ["미방문", data.counts.noShow ?? 0, "정책시간 경과", <PersonOffRounded />, "#D58A20"]].map(([label, value, helper, icon, tone]) => <Grid key={String(label)} size={{ xs: 6, lg: 3 }}><MetricCard label={String(label)} value={Number(value)} helper={String(helper)} icon={icon} tone={String(tone)} /></Grid>)}</Grid>

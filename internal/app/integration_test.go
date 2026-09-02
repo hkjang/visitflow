@@ -651,6 +651,48 @@ func TestAuditLogPagingAndVisitorSearch(t *testing.T) {
 	}
 }
 
+func TestProfileUpdateKeepsPhoneUnlessProvided(t *testing.T) {
+	env := newTestEnv(t)
+	env.json(http.MethodPatch, "/api/v1/profile", map[string]any{"displayName": "관리자", "phone": "010-2222-3333"}, http.StatusNoContent)
+	me := env.json(http.MethodGet, "/api/v1/auth/me", nil, http.StatusOK)
+	if me["phoneMasked"] != "010-****-3333" {
+		t.Fatalf("phone not stored or not masked: %v", me["phoneMasked"])
+	}
+	// A rename that omits the phone must not delete it.
+	env.json(http.MethodPatch, "/api/v1/profile", map[string]any{"displayName": "관리자2"}, http.StatusNoContent)
+	if me := env.json(http.MethodGet, "/api/v1/auth/me", nil, http.StatusOK); me["phoneMasked"] != "010-****-3333" {
+		t.Fatalf("renaming wiped the phone: %v", me["phoneMasked"])
+	}
+	if bad := env.do(http.MethodPatch, "/api/v1/profile", map[string]any{"displayName": "관리자2", "phone": "12"}); bad.Code != http.StatusBadRequest {
+		t.Fatalf("invalid phone accepted: %d", bad.Code)
+	}
+	env.json(http.MethodPatch, "/api/v1/profile", map[string]any{"displayName": "관리자2", "phone": ""}, http.StatusNoContent)
+	if me := env.json(http.MethodGet, "/api/v1/auth/me", nil, http.StatusOK); me["phoneMasked"] != "" {
+		t.Fatalf("explicit empty phone did not clear it: %v", me["phoneMasked"])
+	}
+}
+
+func TestLobbyMustBelongToSiteAndVerifyHonoursReuseSetting(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	other := env.json(http.MethodPost, "/api/v1/admin/sites", map[string]any{"code": "LAB", "name": "연구소"}, http.StatusOK)
+	lobby := env.json(http.MethodPost, "/api/v1/admin/lobbies", map[string]any{"siteId": fmt.Sprint(other["id"]), "code": "L1", "name": "연구소 로비"}, http.StatusOK)
+	if mismatch := env.do(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{"lobbyId": fmt.Sprint(lobby["id"])})); mismatch.Code != http.StatusBadRequest {
+		t.Fatalf("lobby from another site accepted: %d %s", mismatch.Code, mismatch.Body.String())
+	}
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, nil), http.StatusCreated)
+	token := passTokenFrom(t, created)
+	env.json(http.MethodPost, "/api/v1/checkins", map[string]string{"token": token}, http.StatusCreated)
+	if reused := env.do(http.MethodPost, "/api/v1/qr/verify", map[string]string{"token": token}); reused.Code != http.StatusConflict {
+		t.Fatalf("used QR verified with single-use on: %d", reused.Code)
+	}
+	// With single-use off the scanner and the check-in must agree that reuse is fine.
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE settings SET value='false' WHERE key='visit.single_use_qr'`); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	env.json(http.MethodPost, "/api/v1/qr/verify", map[string]string{"token": token}, http.StatusOK)
+}
+
 func TestFailedNotificationCanBeRetried(t *testing.T) {
 	env := newTestEnv(t)
 	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Alert, AppBar, Avatar, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, TextField, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
+import { Alert, AppBar, Avatar, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Drawer, FormControlLabel, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Stack, TextField, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
 import MenuRounded from "@mui/icons-material/MenuRounded";
 import HomeRounded from "@mui/icons-material/HomeRounded";
 import AddCircleOutlineRounded from "@mui/icons-material/AddCircleOutlineRounded";
@@ -43,7 +43,7 @@ const roleNames: Record<string, string> = { user: "방문 요청자", lobby: "�
 type Nav = { label: string; path: string; icon: React.ReactNode };
 
 export function AppShell() {
-  const { user, version, config, logout, reload } = useAuth();
+  const { user, phoneMasked, version, config, logout, reload } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const theme = useTheme();
@@ -53,6 +53,7 @@ export function AppShell() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileName, setProfileName] = useState(user?.displayName ?? "");
   const [profilePhone, setProfilePhone] = useState("");
+  const [clearPhone, setClearPhone] = useState(false);
   const [profileDepartment, setProfileDepartment] = useState(user?.departmentId ?? "");
   const [delegateUserId, setDelegateUserId] = useState(user?.delegateUserId ?? "");
   const [delegateUntil, setDelegateUntil] = useState("");
@@ -93,6 +94,7 @@ export function AppShell() {
   const activeLabel = groups.flatMap((g) => g.items).find((x) => x.path === location.pathname)?.label ?? (location.pathname.startsWith("/admin/") ? "관리자" : "VisitFlow");
   const openProfile = async () => {
     setProfileAnchor(null); setProfileName(user?.displayName ?? ""); setProfileDepartment(user?.departmentId ?? ""); setProfilePhone("");
+    setClearPhone(false);
     setDelegateUserId(user?.delegateUserId ?? "");
     setDelegateUntil(user?.delegateUntil ? toLocalInput(new Date(user.delegateUntil)) : "");
     setProfileError(""); setProfileOpen(true);
@@ -101,8 +103,11 @@ export function AppShell() {
   const saveProfile = async () => {
     setProfileError("");
     try {
+      // Send the phone only when the user typed a new one or asked to remove it;
+      // omitting it keeps the stored number.
+      const phone = clearPhone ? "" : profilePhone.trim() || undefined;
       await patchJSON("/api/v1/profile", {
-        displayName: profileName, phone: profilePhone, departmentId: profileDepartment,
+        displayName: profileName, phone, departmentId: profileDepartment,
         delegateUserId: delegateUserId,
         delegateUntil: delegateUserId && delegateUntil ? new Date(delegateUntil).toISOString() : "",
       });
@@ -135,7 +140,7 @@ export function AppShell() {
         <MenuItem disabled><InfoOutlined fontSize="small" sx={{ mr: 1.5 }} /><Box><Typography variant="body2">{config?.serviceName ?? "VisitFlow"} v{version?.version ?? "dev"}</Typography><Typography variant="caption" color="text.secondary">commit {version?.commit?.slice(0, 12) ?? "unknown"}</Typography></Box></MenuItem>
         <Divider /><MenuItem onClick={() => void logout()}><LogoutRounded fontSize="small" sx={{ mr: 1.5 }} />로그아웃</MenuItem>
       </Menu>
-      <Dialog open={profileOpen} onClose={() => setProfileOpen(false)} fullWidth maxWidth="sm"><DialogTitle>프로필 · 도착 알림 연락처</DialogTitle><DialogContent><Stack spacing={2} mt={1}><TextField label="표시 이름" value={profileName} onChange={(e) => setProfileName(e.target.value)} /><TextField label="휴대전화" value={profilePhone} onChange={(e) => setProfilePhone(e.target.value)} placeholder="010-0000-0000" helperText="방문자 체크인 시 담당자 SMS 알림에 사용하며 암호화 저장됩니다. 비워 두면 기존 연락처가 삭제됩니다." /><TextField select label="소속 부서" value={profileDepartment} onChange={(e) => setProfileDepartment(e.target.value)}><MenuItem value="">미지정</MenuItem>{reference?.departments.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
+      <Dialog open={profileOpen} onClose={() => setProfileOpen(false)} fullWidth maxWidth="sm"><DialogTitle>프로필 · 도착 알림 연락처</DialogTitle><DialogContent><Stack spacing={2} mt={1}><TextField label="표시 이름" value={profileName} onChange={(e) => setProfileName(e.target.value)} /><TextField label="휴대전화" value={profilePhone} onChange={(e) => { setProfilePhone(e.target.value); setClearPhone(false); }} placeholder={phoneMasked ? `현재 ${phoneMasked} · 변경 시 입력` : "010-0000-0000"} helperText="방문자 체크인 시 담당자 SMS 알림에 사용하며 암호화 저장됩니다. 비워 두면 기존 연락처가 유지됩니다." /><FormControlLabel control={<Checkbox checked={clearPhone} disabled={!phoneMasked} onChange={(e) => { setClearPhone(e.target.checked); if (e.target.checked) setProfilePhone(""); }} />} label="등록된 연락처 삭제" /><TextField select label="소속 부서" value={profileDepartment} onChange={(e) => setProfileDepartment(e.target.value)}><MenuItem value="">미지정</MenuItem>{reference?.departments.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
       <Divider textAlign="left"><Typography variant="caption" color="text.secondary">부재 시 대리 담당자</Typography></Divider>
       <TextField select label="대리 담당자" value={delegateUserId} onChange={(e) => setDelegateUserId(e.target.value)} helperText="지정 기간 동안 방문 승인과 도착 알림이 대리 담당자에게 전달됩니다."><MenuItem value="">지정 안 함</MenuItem>{(reference?.hosts ?? []).filter((x) => x.id !== user?.id).map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
       {delegateUserId && <TextField type="datetime-local" label="대리 종료 시각" value={delegateUntil} onChange={(e) => setDelegateUntil(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />}

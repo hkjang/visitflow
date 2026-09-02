@@ -146,7 +146,7 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 	// intentionally replaced wholesale because the UI documents that behaviour.
 	var in struct {
 		DisplayName    string  `json:"displayName"`
-		Phone          string  `json:"phone"`
+		Phone          *string `json:"phone"`
 		DepartmentID   *string `json:"departmentId"`
 		DelegateUserID *string `json:"delegateUserId"`
 		DelegateUntil  string  `json:"delegateUntil"`
@@ -155,11 +155,22 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, _ := userFrom(r)
-	phone, err := s.encryptOptional(in.Phone)
-	if err != nil {
-		notFoundOrServer(w, err)
-		return
+	// An omitted phone keeps the stored number; an explicit "" clears it. The
+	// old whole-replace behaviour wiped the host's number on every name change.
+	phoneSet, phone := in.Phone != nil, ""
+	if phoneSet {
+		if normalized := normalizePhone(*in.Phone); normalized != "" && len(normalized) < 7 {
+			writeError(w, http.StatusBadRequest, "invalid_phone", "휴대전화 번호를 확인하세요")
+			return
+		}
+		encrypted, err := s.encryptOptional(*in.Phone)
+		if err != nil {
+			notFoundOrServer(w, err)
+			return
+		}
+		phone = encrypted
 	}
+	var err error
 	departmentSet, department := in.DepartmentID != nil, ""
 	if departmentSet {
 		department = strings.TrimSpace(*in.DepartmentID)
@@ -190,17 +201,18 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		delegateUntil = &parsed
 	}
-	_, err = s.db.Exec(r.Context(), `UPDATE users SET display_name=COALESCE(NULLIF($2,''),display_name),phone_encrypted=NULLIF($3,''),
+	_, err = s.db.Exec(r.Context(), `UPDATE users SET display_name=COALESCE(NULLIF($2,''),display_name),
+		phone_encrypted=CASE WHEN $9 THEN NULLIF($3,'') ELSE phone_encrypted END,
 		department_id=CASE WHEN $4 THEN NULLIF($5,'') ELSE department_id END,
 		delegate_user_id=CASE WHEN $6 THEN NULLIF($7,'') ELSE delegate_user_id END,
 		delegate_until=CASE WHEN $6 THEN $8 ELSE delegate_until END,
-		updated_at=now() WHERE id=$1`, u.ID, strings.TrimSpace(in.DisplayName), phone, departmentSet, department, delegateSet, delegateID, delegateUntil)
+		updated_at=now() WHERE id=$1`, u.ID, strings.TrimSpace(in.DisplayName), phone, departmentSet, department, delegateSet, delegateID, delegateUntil, phoneSet)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
 	s.audit(r.Context(), u.ID, "profile.update", "user", u.ID, r.RemoteAddr, map[string]any{
-		"departmentChanged": departmentSet, "phoneConfigured": in.Phone != "",
+		"departmentChanged": departmentSet, "phoneChanged": phoneSet, "phoneConfigured": phone != "",
 		"delegateChanged": delegateSet, "delegateUserId": delegateID, "delegateUntil": delegateUntil,
 	})
 	w.WriteHeader(http.StatusNoContent)
@@ -398,6 +410,9 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 	if !siteAllowed(actor, in.SiteID) {
 		return nil, visitError{403, "site_scope_forbidden", "담당 사업장 범위를 벗어난 요청입니다"}
 	}
+	if err := s.lobbyBelongsToSite(ctx, in.LobbyID, in.SiteID); err != nil {
+		return nil, err
+	}
 	companyRequired, _ := s.getSetting(ctx, "visit.company_required")
 	for _, visitor := range in.Visitors {
 		if strings.TrimSpace(visitor.Name) == "" || len(normalizePhone(visitor.Phone)) < 7 || !visitor.Consent {
@@ -584,6 +599,22 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 		result["walkIn"] = true
 	}
 	return result, nil
+}
+
+// lobbyBelongsToSite rejects a lobby from another site; the lobby drives the
+// pass, the scanner default and every lobby-scoped list.
+func (s *Server) lobbyBelongsToSite(ctx context.Context, lobbyID, siteID string) error {
+	if strings.TrimSpace(lobbyID) == "" {
+		return nil
+	}
+	var matches bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM lobbies WHERE id=$1 AND site_id=$2 AND active)`, lobbyID, siteID).Scan(&matches); err != nil {
+		return err
+	}
+	if !matches {
+		return visitError{400, "lobby_site_mismatch", "선택한 로비가 해당 사업장에 속하지 않습니다"}
+	}
+	return nil
 }
 
 // actsForHost reports whether u is the host or the host's active delegate.
@@ -798,12 +829,22 @@ func (s *Server) updateVisit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_visit", "일정과 방문 목적을 확인하세요")
 		return
 	}
+	if in.EndAt.Sub(in.StartAt) > 31*24*time.Hour {
+		writeError(w, 400, "schedule_too_long", "한 방문 일정은 31일을 초과할 수 없습니다")
+		return
+	}
 	u, _ := userFrom(r)
 	id := chi.URLParam(r, "visitID")
 	var oldStart, oldEnd time.Time
-	var oldPurpose, oldPlace, oldLobby string
-	if err := s.db.QueryRow(r.Context(), `SELECT start_at,end_at,purpose,COALESCE(place_detail,''),COALESCE(lobby_id,'') FROM visits WHERE id=$1 AND (host_user_id=$2 OR $3) AND status IN ('PENDING_APPROVAL','SCHEDULED','APPROVED')`, id, u.ID, u.IsAdmin()).Scan(&oldStart, &oldEnd, &oldPurpose, &oldPlace, &oldLobby); err != nil {
+	var oldPurpose, oldPlace, oldLobby, siteID string
+	if err := s.db.QueryRow(r.Context(), `SELECT start_at,end_at,purpose,COALESCE(place_detail,''),COALESCE(lobby_id,''),site_id FROM visits
+		WHERE id=$1 AND (host_user_id=$2 OR $3 OR EXISTS(SELECT 1 FROM users hu WHERE hu.id=visits.host_user_id AND hu.delegate_user_id=$2 AND hu.delegate_until>now()))
+		AND status IN ('PENDING_APPROVAL','SCHEDULED','APPROVED')`, id, u.ID, u.IsAdmin()).Scan(&oldStart, &oldEnd, &oldPurpose, &oldPlace, &oldLobby, &siteID); err != nil {
 		notFoundOrServer(w, err)
+		return
+	}
+	if err := s.lobbyBelongsToSite(r.Context(), in.LobbyID, siteID); err != nil {
+		writeVisitError(w, err)
 		return
 	}
 	earlyMinutes, _ := strconv.Atoi(settingOr(s, r.Context(), "visit.early_checkin_minutes", "60"))
@@ -1402,8 +1443,10 @@ func (s *Server) verifyQR(w http.ResponseWriter, r *http.Request) {
 		result, status, message = "too_early", 409, "아직 사용할 수 없는 방문증입니다"
 	} else if time.Now().After(q.ValidUntil) {
 		result, status, message = "expired", 409, "유효기간이 지난 방문증입니다"
-	} else if q.UsedAt != nil {
+	} else if q.UsedAt != nil && settingOr(s, r.Context(), "visit.single_use_qr", "true") == "true" {
 		result, status, message = "already_used", 409, "이미 체크인에 사용된 방문증입니다"
+	} else if qrParticipantStatusTerminal(q.ParticipantStatus) {
+		result, status, message = "participant_closed", 409, "이미 종료 처리된 방문자입니다"
 	}
 	details := map[string]any{"result": result}
 	if q.VisitID != "" {
@@ -1451,7 +1494,7 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 	var usedAt, revokedAt *time.Time
 	err = tx.QueryRow(r.Context(), `SELECT qt.id,vv.id,v.id,v.status,vv.status,v.host_user_id,p.name_encrypted,COALESCE(l.name,''),v.site_id,qt.valid_from,qt.valid_until,qt.used_at,qt.revoked_at FROM qr_tokens qt JOIN visitor_visits vv ON vv.id=qt.visitor_visit_id JOIN visitors p ON p.id=vv.visitor_id JOIN visits v ON v.id=vv.visit_id LEFT JOIN lobbies l ON l.id=COALESCE(NULLIF($2,''),v.lobby_id) WHERE qt.token_hash=$1 FOR UPDATE OF qt,vv,v,p`, s.keys.Digest("qr:"+raw), in.LobbyID).Scan(&tokenID, &participantID, &visitID, &visitStatus, &participantStatus, &hostID, &visitorNameEnc, &lobbyName, &siteID, &validFrom, &validUntil, &usedAt, &revokedAt)
 	now := time.Now()
-	if err != nil || !siteAllowed(u, siteID) || revokedAt != nil || now.Before(validFrom) || now.After(validUntil) || visitStatus == "CANCELLED" || visitStatus == "REJECTED" || participantStatus == "CHECKED_OUT" {
+	if err != nil || !siteAllowed(u, siteID) || revokedAt != nil || now.Before(validFrom) || now.After(validUntil) || visitStatus == "CANCELLED" || visitStatus == "REJECTED" || qrParticipantStatusTerminal(participantStatus) {
 		writeError(w, 409, "invalid_qr", "체크인할 수 없는 방문증입니다")
 		return
 	}

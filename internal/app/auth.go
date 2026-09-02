@@ -296,7 +296,15 @@ func (s *Server) loadUserScope(ctx context.Context, u *User) {
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	u, _ := userFrom(r)
 	csrf, _ := r.Context().Value(csrfContextKey).(string)
-	writeJSON(w, http.StatusOK, map[string]any{"user": u, "csrfToken": csrf, "version": map[string]string{"version": s.version, "commit": s.commit, "builtAt": s.builtAt}})
+	// The profile dialog needs to know whether an arrival-notification phone is
+	// on file without ever receiving the number itself.
+	var phoneEncrypted string
+	_ = s.db.QueryRow(r.Context(), `SELECT COALESCE(phone_encrypted,'') FROM users WHERE id=$1`, u.ID).Scan(&phoneEncrypted)
+	phoneMasked := ""
+	if phoneEncrypted != "" {
+		phoneMasked = maskPhone(s.decryptOptional(phoneEncrypted))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": u, "phoneMasked": phoneMasked, "csrfToken": csrf, "version": map[string]string{"version": s.version, "commit": s.commit, "builtAt": s.builtAt}})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

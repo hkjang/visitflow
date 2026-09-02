@@ -12,6 +12,7 @@ import type { AuthConfig, User, VersionInfo } from "./types";
 
 interface AuthState {
   user: User | null;
+  phoneMasked: string;
   config: AuthConfig | null;
   version: VersionInfo | null;
   loading: boolean;
@@ -23,6 +24,7 @@ const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null),
+    [phoneMasked, setPhoneMasked] = useState(""),
     [config, setConfig] = useState<AuthConfig | null>(null),
     [version, setVersion] = useState<VersionInfo | null>(null),
     [loading, setLoading] = useState(true);
@@ -34,10 +36,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const me = await api<{
           user: User;
+          phoneMasked?: string;
           csrfToken: string;
           version: VersionInfo;
         }>("/api/v1/auth/me");
         setUser(me.user);
+        setPhoneMasked(me.phoneMasked ?? "");
         setVersion(me.version);
         setCSRF(me.csrfToken);
       } catch {
@@ -67,8 +71,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
   const value = useMemo(
-    () => ({ user, config, version, loading, login, logout, reload }),
-    [user, config, version, loading, login, logout, reload],
+    () => ({ user, phoneMasked, config, version, loading, login, logout, reload }),
+    [user, phoneMasked, config, version, loading, login, logout, reload],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

@@ -278,7 +278,7 @@ export function KeysPage() {
           <Button
             startIcon={<ContentCopyRounded />}
             onClick={() =>
-              void navigator.clipboard.writeText(revealed?.key || "")
+              void navigator.clipboard.writeText(revealed?.key || "").catch(() => undefined)
             }
           >
             복사
