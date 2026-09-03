@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"encoding/csv"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -43,5 +45,34 @@ func TestWriteCSVRowEscapesUntrustedValues(t *testing.T) {
 	want := []string{"홍길동", "'=cmd|'/c calc'!A0", "정상값"}
 	if !reflect.DeepEqual(record, want) {
 		t.Fatalf("row = %q, want %q", record, want)
+	}
+}
+
+func TestParseVisitExportFiltersReadsTheScreenFilters(t *testing.T) {
+	filters := parseVisitExportFilters(httptest.NewRequest(http.MethodGet, "/admin/visits.csv?days=30&status=checked_in&q=%20테스트상사%20", nil))
+	if filters.days != 30 {
+		t.Fatalf("days = %d, want 30", filters.days)
+	}
+	if filters.status != "CHECKED_IN" {
+		t.Fatalf("status = %q, want CHECKED_IN", filters.status)
+	}
+	if filters.search != "테스트상사" {
+		t.Fatalf("search = %q, want the trimmed query", filters.search)
+	}
+	if details := filters.details(); details["days"] != 30 || details["status"] != "CHECKED_IN" || details["q"] != "테스트상사" {
+		t.Fatalf("details() = %v, want the applied scope", details)
+	}
+}
+
+func TestParseVisitExportFiltersRejectsUnusableValues(t *testing.T) {
+	for _, query := range []string{"", "days=0", "days=4000", "days=abc"} {
+		if filters := parseVisitExportFilters(httptest.NewRequest(http.MethodGet, "/admin/visits.csv?"+query, nil)); filters.days != 90 {
+			t.Fatalf("parseVisitExportFilters(%q).days = %d, want the 90 day default", query, filters.days)
+		}
+	}
+	// An unknown status must widen back to every status instead of filtering the
+	// export down to nothing without telling the operator why.
+	if filters := parseVisitExportFilters(httptest.NewRequest(http.MethodGet, "/admin/visits.csv?status=NOT_A_STATUS", nil)); filters.status != "" {
+		t.Fatalf("status = %q, want it dropped", filters.status)
 	}
 }

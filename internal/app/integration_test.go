@@ -1229,6 +1229,50 @@ func TestVisitExportNeutralizesSpreadsheetFormulas(t *testing.T) {
 	}
 }
 
+// The admin visit list narrows to one company, host or request number, and the
+// download button sits beside it. An export that ignored the search handed the
+// operator every visit in the period, including visitors they never looked up.
+func TestVisitExportAppliesScreenFilters(t *testing.T) {
+	env := newTestEnv(t)
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+		"purpose":  "찾는 방문",
+		"visitors": []map[string]any{{"name": "김방문", "phone": "010-1234-5678", "company": "찾는상사", "consent": true}},
+	}), http.StatusCreated)
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+		"purpose":  "다른 방문",
+		"visitors": []map[string]any{{"name": "이방문", "phone": "010-9876-5432", "company": "무관상사", "consent": true}},
+	}), http.StatusCreated)
+
+	exportBody := func(query string) string {
+		t.Helper()
+		response := env.do(http.MethodGet, "/api/v1/admin/visits.csv?"+query, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("export %q returned %d: %s", query, response.Code, response.Body.String())
+		}
+		return response.Body.String()
+	}
+
+	body := exportBody("q=" + url.QueryEscape("찾는상사"))
+	if !strings.Contains(body, "찾는상사") {
+		t.Fatalf("export dropped the searched company: %s", body[:minInt(len(body), 600)])
+	}
+	if strings.Contains(body, "무관상사") {
+		t.Fatalf("export ignored the company search: %s", body[:minInt(len(body), 600)])
+	}
+	if body := exportBody("q=" + url.QueryEscape("이방문")); strings.Contains(body, "찾는상사") || !strings.Contains(body, "무관상사") {
+		t.Fatalf("export ignored the visitor name search: %s", body[:minInt(len(body), 600)])
+	}
+	if body := exportBody("q=" + url.QueryEscape("010-9876-5432")); strings.Contains(body, "찾는상사") || !strings.Contains(body, "무관상사") {
+		t.Fatalf("export ignored the visitor phone search: %s", body[:minInt(len(body), 600)])
+	}
+	if body := exportBody("status=CANCELLED"); strings.Contains(body, "찾는상사") || strings.Contains(body, "무관상사") {
+		t.Fatalf("export ignored the status filter: %s", body[:minInt(len(body), 600)])
+	}
+	if body := exportBody("status=NOT_A_STATUS"); !strings.Contains(body, "찾는상사") || !strings.Contains(body, "무관상사") {
+		t.Fatalf("an unusable status must not silently empty the export: %s", body[:minInt(len(body), 600)])
+	}
+}
+
 func TestMetricsEndpointRequiresConfiguredToken(t *testing.T) {
 	env := newTestEnv(t)
 	if disabled := env.do(http.MethodGet, "/metrics", nil); disabled.Code != http.StatusNotFound {
