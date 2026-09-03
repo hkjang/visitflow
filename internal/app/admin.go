@@ -42,6 +42,25 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 // latest site-local date keeps each site's current day on the axis.
 const statisticsTodayCTE = `today AS (SELECT COALESCE(max((now() AT TIME ZONE si.timezone)::date),CURRENT_DATE) AS day FROM sites si)`
 
+// statisticsSpanCTE names the exact calendar the trend draws: the requested
+// number of site-local days ending on the newest day any site is in. Every
+// figure on the statistics screen takes $1 as the day count and reads its
+// window from here.
+const statisticsSpanCTE = statisticsTodayCTE + `, span AS (SELECT (SELECT day FROM today)-($1::int-1) AS from_day,(SELECT day FROM today) AS to_day)`
+
+// statisticsSpanWhere restricts a timestamptz column to the span. The summary
+// tiles and the breakdowns used to filter on CURRENT_DATE-days, which is the
+// database session's midnight — UTC in the shipped container — so on the
+// default Asia/Seoul site they counted from 09:00 on the day before the chart's
+// first column. The tiles therefore reported more participants than the trend
+// beside them drew, and the extra ones came from a day with no bar at all.
+// The two plain comparisons keep the timestamp indexes usable; the site-local
+// date test then trims the day of slack a timezone offset can add.
+func statisticsSpanWhere(column string) string {
+	return column + `>=((SELECT from_day FROM span)-1)::timestamp AND ` + column + `<((SELECT to_day FROM span)+2)::timestamp` +
+		` AND (` + column + ` AT TIME ZONE si.timezone)::date BETWEEN (SELECT from_day FROM span) AND (SELECT to_day FROM span)`
+}
+
 func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
 	if days < 1 || days > 366 {
@@ -50,15 +69,15 @@ func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 	// Bucket each participation into its site-local day once, then join the
 	// buckets to the calendar; the previous per-day correlated subquery scanned
 	// every visit for every day in the range.
-	rows, err := s.db.Query(r.Context(), `WITH `+statisticsTodayCTE+`, buckets AS (
+	rows, err := s.db.Query(r.Context(), `WITH `+statisticsSpanCTE+`, buckets AS (
 		SELECT (v.start_at AT TIME ZONE si.timezone)::date AS day,
 			count(vv.id) AS scheduled,
 			count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')) AS checked
 		FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id
-		WHERE v.start_at>=((SELECT day FROM today)-($1::int))::timestamp-interval '1 day' AND v.start_at<((SELECT day FROM today)+2)::timestamp
+		WHERE `+statisticsSpanWhere("v.start_at")+`
 		GROUP BY 1)
 		SELECT d::date,COALESCE(b.scheduled,0),COALESCE(b.checked,0)
-		FROM generate_series((SELECT day FROM today)-($1::int-1),(SELECT day FROM today),interval '1 day') d LEFT JOIN buckets b ON b.day=d::date ORDER BY d`, days)
+		FROM generate_series((SELECT from_day FROM span),(SELECT to_day FROM span),interval '1 day') d LEFT JOIN buckets b ON b.day=d::date ORDER BY d`, days)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -73,7 +92,9 @@ func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 	}
 	rows.Close()
 	byDepartment := []map[string]any{}
-	rows, err = s.db.Query(r.Context(), `SELECT COALESCE(o.name,'미지정'),count(vv.id) FROM visits v JOIN visitor_visits vv ON vv.visit_id=v.id LEFT JOIN organizations o ON o.id=v.department_id WHERE v.start_at>=CURRENT_DATE-$1::int GROUP BY o.name ORDER BY count(vv.id) DESC LIMIT 20`, days)
+	rows, err = s.db.Query(r.Context(), `WITH `+statisticsSpanCTE+`
+		SELECT COALESCE(o.name,'미지정'),count(vv.id) FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id LEFT JOIN organizations o ON o.id=v.department_id
+		WHERE `+statisticsSpanWhere("v.start_at")+` GROUP BY o.name ORDER BY count(vv.id) DESC LIMIT 20`, days)
 	if err == nil {
 		for rows.Next() {
 			var name string
@@ -100,23 +121,29 @@ func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 		}
 		return items
 	}
-	bySite := group(`SELECT si.name,count(vv.id) FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id
-		WHERE v.start_at>=CURRENT_DATE-$1::int GROUP BY si.name ORDER BY count(vv.id) DESC LIMIT 20`)
-	byVisitType := group(`SELECT COALESCE(vt.name,'미지정'),count(vv.id) FROM visits v LEFT JOIN visit_types vt ON vt.id=v.visit_type_id JOIN visitor_visits vv ON vv.visit_id=v.id
-		WHERE v.start_at>=CURRENT_DATE-$1::int GROUP BY vt.name ORDER BY count(vv.id) DESC LIMIT 20`)
-	byHour := group(`SELECT lpad(extract(hour FROM (vv.checked_in_at AT TIME ZONE si.timezone))::int::text,2,'0'),count(*) FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites si ON si.id=v.site_id
-		WHERE vv.checked_in_at IS NOT NULL AND vv.checked_in_at>=CURRENT_DATE-$1::int GROUP BY 1 ORDER BY 1`)
-	bySource := group(`SELECT v.source,count(*) FROM visits v WHERE v.start_at>=CURRENT_DATE-$1::int GROUP BY v.source ORDER BY count(*) DESC`)
+	bySite := group(`WITH ` + statisticsSpanCTE + `
+		SELECT si.name,count(vv.id) FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id
+		WHERE ` + statisticsSpanWhere("v.start_at") + ` GROUP BY si.name ORDER BY count(vv.id) DESC LIMIT 20`)
+	byVisitType := group(`WITH ` + statisticsSpanCTE + `
+		SELECT COALESCE(vt.name,'미지정'),count(vv.id) FROM visits v JOIN sites si ON si.id=v.site_id LEFT JOIN visit_types vt ON vt.id=v.visit_type_id JOIN visitor_visits vv ON vv.visit_id=v.id
+		WHERE ` + statisticsSpanWhere("v.start_at") + ` GROUP BY vt.name ORDER BY count(vv.id) DESC LIMIT 20`)
+	byHour := group(`WITH ` + statisticsSpanCTE + `
+		SELECT lpad(extract(hour FROM (vv.checked_in_at AT TIME ZONE si.timezone))::int::text,2,'0'),count(*) FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites si ON si.id=v.site_id
+		WHERE vv.checked_in_at IS NOT NULL AND ` + statisticsSpanWhere("vv.checked_in_at") + ` GROUP BY 1 ORDER BY 1`)
+	bySource := group(`WITH ` + statisticsSpanCTE + `
+		SELECT v.source,count(*) FROM visits v JOIN sites si ON si.id=v.site_id
+		WHERE ` + statisticsSpanWhere("v.start_at") + ` GROUP BY v.source ORDER BY count(*) DESC`)
 	var totalParticipants, checkedIn, noShow, cancelled, selfRegistered int
 	var avgDwellMinutes, avgLeadHours float64
-	_ = s.db.QueryRow(r.Context(), `SELECT count(vv.id),
+	_ = s.db.QueryRow(r.Context(), `WITH `+statisticsSpanCTE+`
+		SELECT count(vv.id),
 		count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')),
 		count(vv.id) FILTER(WHERE vv.status='NO_SHOW'),
 		count(vv.id) FILTER(WHERE vv.status='CANCELLED'),
 		count(vv.id) FILTER(WHERE EXISTS(SELECT 1 FROM consent_records c WHERE c.visitor_visit_id=vv.id AND c.source='self')),
 		COALESCE(avg(EXTRACT(EPOCH FROM vv.checked_out_at-vv.checked_in_at)/60) FILTER(WHERE vv.checked_out_at IS NOT NULL AND vv.checked_in_at IS NOT NULL),0),
 		COALESCE(avg(EXTRACT(EPOCH FROM v.start_at-v.created_at)/3600) FILTER(WHERE v.start_at>v.created_at),0)
-		FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id WHERE v.start_at>=CURRENT_DATE-$1::int`, days).
+		FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id JOIN sites si ON si.id=v.site_id WHERE `+statisticsSpanWhere("v.start_at"), days).
 		Scan(&totalParticipants, &checkedIn, &noShow, &cancelled, &selfRegistered, &avgDwellMinutes, &avgLeadHours)
 	writeJSON(w, 200, map[string]any{
 		"days": days, "daily": daily, "byDepartment": byDepartment, "bySite": bySite, "byVisitType": byVisitType, "byHour": byHour, "bySource": bySource,
