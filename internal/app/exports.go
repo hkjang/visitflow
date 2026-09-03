@@ -111,11 +111,46 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), u.ID, "audit.export", "audit_log", "", clientIP(r), details)
 }
 
-func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
-	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
-	if days < 1 || days > 3650 {
-		days = 90
+// visitStatuses is the set the visits table accepts. An unknown value from the
+// query string is dropped instead of filtering everything away, so a stale link
+// still downloads the period the operator asked for.
+var visitStatuses = map[string]bool{"REQUESTED": true, "PENDING_APPROVAL": true, "APPROVED": true, "SCHEDULED": true,
+	"ARRIVED": true, "CHECKED_IN": true, "CHECKED_OUT": true, "CANCELLED": true, "REJECTED": true, "NO_SHOW": true}
+
+// visitExportFilters keeps the visit history download beside the admin visit
+// list narrowed to the same rows. The screen searches by request number,
+// company, host or visitor, and an export that widened back to every visit in
+// the period both answered the wrong question and handed the operator the
+// personal data of visitors they never asked to see.
+type visitExportFilters struct {
+	days   int
+	status string
+	search string
+}
+
+func parseVisitExportFilters(r *http.Request) visitExportFilters {
+	filters := visitExportFilters{
+		status: strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("status"))),
+		search: strings.TrimSpace(r.URL.Query().Get("q")),
 	}
+	filters.days, _ = strconv.Atoi(r.URL.Query().Get("days"))
+	if filters.days < 1 || filters.days > 3650 {
+		filters.days = 90
+	}
+	if !visitStatuses[filters.status] {
+		filters.status = ""
+	}
+	return filters
+}
+
+// details records what the export actually covered, so the audit trail names
+// the scope instead of implying the whole period was taken.
+func (f visitExportFilters) details() map[string]any {
+	return map[string]any{"days": f.days, "status": f.status, "q": f.search}
+}
+
+func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
+	filters := parseVisitExportFilters(r)
 	rows, err := s.db.Query(r.Context(), `SELECT v.request_no,v.start_at,v.end_at,si.name,si.timezone,COALESCE(l.name,''),COALESCE(vt.name,''),h.display_name,COALESCE(o.name,''),
 		v.purpose,COALESCE(v.place_detail,''),v.status,vv.status,p.name_encrypted,COALESCE(p.company,''),p.masked_at,vv.checked_in_at,vv.checked_out_at,COALESCE(vv.badge_no,'')
 		FROM visits v
@@ -127,7 +162,12 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN organizations o ON o.id=v.department_id
 		LEFT JOIN visit_types vt ON vt.id=v.visit_type_id
 		WHERE v.start_at>=now()-($1::int*interval '1 day')
-		ORDER BY v.start_at DESC LIMIT 50000`, days)
+		AND ($2='' OR v.status=$2)
+		AND ($3='' OR v.id=$3 OR v.request_no ILIKE '%'||$3||'%' OR h.display_name ILIKE '%'||$3||'%'
+		 OR EXISTS(SELECT 1 FROM visitor_visits mvv JOIN visitors mp ON mp.id=mvv.visitor_id
+			WHERE mvv.visit_id=v.id AND (mp.company ILIKE '%'||$3||'%' OR mp.name_hash=$4 OR mp.phone_hash=$5)))
+		ORDER BY v.start_at DESC LIMIT 50000`, filters.days, filters.status, filters.search,
+		s.keys.Digest("name:"+strings.ToLower(filters.search)), s.keys.Digest("phone:"+normalizePhone(filters.search)))
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -154,7 +194,9 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	writer.Flush()
 	u, _ := userFrom(r)
-	s.audit(r.Context(), u.ID, "visit.export", "visit", "", clientIP(r), map[string]any{"count": count, "days": days})
+	details := filters.details()
+	details["count"] = count
+	s.audit(r.Context(), u.ID, "visit.export", "visit", "", clientIP(r), details)
 }
 
 func (s *Server) exportStatisticsCSV(w http.ResponseWriter, r *http.Request) {

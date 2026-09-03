@@ -39,7 +39,7 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `GET /api/v1/guides`, `GET /api/v1/guides/{id}`
 - `GET|HEAD /img/visitor/{qrcode_file_seq}.jpg` 외부 MMS Gateway용 QR JPEG
 - `GET /api/v1/admin/statistics|audit-logs|notifications|visitors|metrics` — 감사 로그는 `action`·`actor`·`from`·`to`·`before`(keyset), 방문자는 `q`, 알림은 `status`로 필터링한다.
-- `GET /api/v1/admin/audit-logs.csv|visits.csv|statistics.csv` UTF-8 BOM CSV 내보내기 — 감사 로그 CSV는 목록과 동일하게 `action`·`actor`·`from`·`to`를 적용하고 `limit`(기본 10,000, 최대 100,000)까지 내려받는다.
+- `GET /api/v1/admin/audit-logs.csv|visits.csv|statistics.csv` UTF-8 BOM CSV 내보내기 — 감사 로그 CSV는 목록과 동일하게 `action`·`actor`·`from`·`to`를 적용하고 `limit`(기본 10,000, 최대 100,000)까지 내려받는다. 방문 이력 CSV는 `days`(기본 90, 최대 3,650)와 함께 방문 목록과 동일한 `q`(방문번호·회사·담당자·방문자 이름/전화) 검색과 `status` 필터를 적용한다.
 - `POST /api/v1/admin/notifications/retry-failed`, `POST /api/v1/admin/notifications/{id}/retry|cancel`
 - `POST /api/v1/admin/users` 로컬 사용자 생성, `POST /api/v1/admin/users/{id}/password-reset|sessions/revoke`
 - `GET /api/v1/admin/visitors/{id}`, `POST /api/v1/admin/visitors/{id}/erase` 방문자 이력 조회·삭제 요청 처리
