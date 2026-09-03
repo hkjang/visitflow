@@ -206,17 +206,17 @@ func (s *Server) exportStatisticsCSV(w http.ResponseWriter, r *http.Request) {
 	}
 	// The download uses the same site-local day axis as the on-screen trend; see
 	// statisticsTodayCTE for why CURRENT_DATE cannot anchor it.
-	rows, err := s.db.Query(r.Context(), `WITH `+statisticsTodayCTE+`, buckets AS (
+	rows, err := s.db.Query(r.Context(), `WITH `+statisticsSpanCTE+`, buckets AS (
 		SELECT (v.start_at AT TIME ZONE si.timezone)::date AS day,
 			count(vv.id) AS scheduled,
 			count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')) AS checked,
 			count(vv.id) FILTER(WHERE vv.status='NO_SHOW') AS no_show,
 			count(vv.id) FILTER(WHERE vv.status='CANCELLED') AS cancelled
 		FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id
-		WHERE v.start_at>=((SELECT day FROM today)-($1::int))::timestamp-interval '1 day' AND v.start_at<((SELECT day FROM today)+2)::timestamp
+		WHERE `+statisticsSpanWhere("v.start_at")+`
 		GROUP BY 1)
 		SELECT d::date,COALESCE(b.scheduled,0),COALESCE(b.checked,0),COALESCE(b.no_show,0),COALESCE(b.cancelled,0)
-		FROM generate_series((SELECT day FROM today)-($1::int-1),(SELECT day FROM today),interval '1 day') d LEFT JOIN buckets b ON b.day=d::date ORDER BY d`, days)
+		FROM generate_series((SELECT from_day FROM span),(SELECT to_day FROM span),interval '1 day') d LEFT JOIN buckets b ON b.day=d::date ORDER BY d`, days)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return

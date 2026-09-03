@@ -1336,19 +1336,16 @@ func TestReadyzReportsSchemaAndBacklog(t *testing.T) {
 	}
 }
 
-// The dashboard counts "오늘" in the site's timezone while the trend used to lay
-// its days on the database session's CURRENT_DATE. On the default Asia/Seoul
-// site running on a UTC server the two disagree for nine hours every night, and
-// the day the tiles call today had no column at all — its visits were missing
-// from both the chart and the statistics CSV.
-func TestStatisticsTrendFollowsTheSiteCalendar(t *testing.T) {
-	env := newTestEnv(t)
+// moveSitesOffSessionDate puts every site in whichever of the two twelve-hour
+// offsets currently lands on a different calendar date than the database
+// session, and returns that zone with the site's own current date. Statistics
+// that mix the two calendars can then only line up if they resolve days in the
+// site's timezone rather than the session's.
+func (e *testEnv) moveSitesOffSessionDate(t *testing.T) (*time.Location, time.Time) {
+	t.Helper()
 	ctx := context.Background()
-	// Pick whichever of the two twelve-hour offsets currently lands on a
-	// different date than the session, so the axis and the buckets can only
-	// agree if the fix is in place.
 	var ahead, behind, sessionDay time.Time
-	if err := env.server.db.QueryRow(ctx, `SELECT (now() AT TIME ZONE 'Etc/GMT-12')::date,(now() AT TIME ZONE 'Etc/GMT+12')::date,CURRENT_DATE`).Scan(&ahead, &behind, &sessionDay); err != nil {
+	if err := e.server.db.QueryRow(ctx, `SELECT (now() AT TIME ZONE 'Etc/GMT-12')::date,(now() AT TIME ZONE 'Etc/GMT+12')::date,CURRENT_DATE`).Scan(&ahead, &behind, &sessionDay); err != nil {
 		t.Fatalf("read session date: %v", err)
 	}
 	zone, localDay := "Etc/GMT-12", ahead
@@ -1362,9 +1359,20 @@ func TestStatisticsTrendFollowsTheSiteCalendar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load %s: %v", zone, err)
 	}
-	if _, err := env.server.db.Exec(ctx, `UPDATE sites SET timezone=$1`, zone); err != nil {
+	if _, err := e.server.db.Exec(ctx, `UPDATE sites SET timezone=$1`, zone); err != nil {
 		t.Fatalf("set site timezone: %v", err)
 	}
+	return location, localDay
+}
+
+// The dashboard counts "오늘" in the site's timezone while the trend used to lay
+// its days on the database session's CURRENT_DATE. On the default Asia/Seoul
+// site running on a UTC server the two disagree for nine hours every night, and
+// the day the tiles call today had no column at all — its visits were missing
+// from both the chart and the statistics CSV.
+func TestStatisticsTrendFollowsTheSiteCalendar(t *testing.T) {
+	env := newTestEnv(t)
+	location, localDay := env.moveSitesOffSessionDate(t)
 
 	// Midday of the site's own current date, which is not the session's date.
 	noon := time.Date(localDay.Year(), localDay.Month(), localDay.Day(), 12, 0, 0, 0, location)
@@ -1400,6 +1408,58 @@ func TestStatisticsTrendFollowsTheSiteCalendar(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, "\n"+want+",1,") {
 		t.Fatalf("statistics export lost the site's own day %s: %s", want, body)
+	}
+}
+
+// The tiles and the breakdowns sit beside the trend under one 기간 selector, so
+// they have to count the same days. They used to filter on CURRENT_DATE-days —
+// the session's midnight — which reaches back past the chart's first column and
+// picked up visits the chart never drew.
+func TestStatisticsSummaryCoversTheSameDaysAsTheTrend(t *testing.T) {
+	env := newTestEnv(t)
+	location, localDay := env.moveSitesOffSessionDate(t)
+
+	// Inside the seven-day span: midday of the site's own current date.
+	noon := time.Date(localDay.Year(), localDay.Month(), localDay.Day(), 12, 0, 0, 0, location)
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+		"startAt": noon.UTC().Format(time.RFC3339),
+		"endAt":   noon.Add(time.Hour).UTC().Format(time.RFC3339),
+	}), http.StatusCreated)
+
+	// One day before the span's first column, late enough locally that the old
+	// CURRENT_DATE-days boundary still swept it into the tiles.
+	outside := time.Date(localDay.Year(), localDay.Month(), localDay.Day()-7, 23, 0, 0, 0, location)
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+		"startAt": outside.UTC().Format(time.RFC3339),
+		"endAt":   outside.Add(time.Hour).UTC().Format(time.RFC3339),
+	}), http.StatusCreated)
+
+	stats := env.json(http.MethodGet, "/api/v1/admin/statistics?days=7", nil, http.StatusOK)
+	drawn := 0
+	daily, _ := stats["daily"].([]any)
+	for _, item := range daily {
+		entry, _ := item.(map[string]any)
+		count, _ := entry["scheduled"].(float64)
+		drawn += int(count)
+	}
+	if drawn != 1 {
+		t.Fatalf("trend drew %d participants, want only the one inside the span: %v", drawn, stats["daily"])
+	}
+	summary, _ := stats["summary"].(map[string]any)
+	if fmt.Sprint(summary["participants"]) != "1" {
+		t.Fatalf("summary counted %v participants over a span the trend draws %d in: %v", summary["participants"], drawn, summary)
+	}
+	for _, key := range []string{"byDepartment", "bySite", "byVisitType", "bySource"} {
+		total := 0
+		items, _ := stats[key].([]any)
+		for _, item := range items {
+			entry, _ := item.(map[string]any)
+			count, _ := entry["count"].(float64)
+			total += int(count)
+		}
+		if total != 1 {
+			t.Fatalf("%s counted %d participants, want the %d the trend draws: %v", key, total, drawn, stats[key])
+		}
 	}
 }
 
