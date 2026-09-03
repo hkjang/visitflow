@@ -1336,6 +1336,73 @@ func TestReadyzReportsSchemaAndBacklog(t *testing.T) {
 	}
 }
 
+// The dashboard counts "오늘" in the site's timezone while the trend used to lay
+// its days on the database session's CURRENT_DATE. On the default Asia/Seoul
+// site running on a UTC server the two disagree for nine hours every night, and
+// the day the tiles call today had no column at all — its visits were missing
+// from both the chart and the statistics CSV.
+func TestStatisticsTrendFollowsTheSiteCalendar(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	// Pick whichever of the two twelve-hour offsets currently lands on a
+	// different date than the session, so the axis and the buckets can only
+	// agree if the fix is in place.
+	var ahead, behind, sessionDay time.Time
+	if err := env.server.db.QueryRow(ctx, `SELECT (now() AT TIME ZONE 'Etc/GMT-12')::date,(now() AT TIME ZONE 'Etc/GMT+12')::date,CURRENT_DATE`).Scan(&ahead, &behind, &sessionDay); err != nil {
+		t.Fatalf("read session date: %v", err)
+	}
+	zone, localDay := "Etc/GMT-12", ahead
+	if localDay.Equal(sessionDay) {
+		zone, localDay = "Etc/GMT+12", behind
+	}
+	if localDay.Equal(sessionDay) {
+		t.Fatalf("neither offset differs from the session date %s", sessionDay.Format("2006-01-02"))
+	}
+	location, err := time.LoadLocation(zone)
+	if err != nil {
+		t.Fatalf("load %s: %v", zone, err)
+	}
+	if _, err := env.server.db.Exec(ctx, `UPDATE sites SET timezone=$1`, zone); err != nil {
+		t.Fatalf("set site timezone: %v", err)
+	}
+
+	// Midday of the site's own current date, which is not the session's date.
+	noon := time.Date(localDay.Year(), localDay.Month(), localDay.Day(), 12, 0, 0, 0, location)
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+		"startAt": noon.UTC().Format(time.RFC3339),
+		"endAt":   noon.Add(time.Hour).UTC().Format(time.RFC3339),
+	}), http.StatusCreated)
+
+	want := localDay.Format("2006-01-02")
+	stats := env.json(http.MethodGet, "/api/v1/admin/statistics?days=7", nil, http.StatusOK)
+	daily, _ := stats["daily"].([]any)
+	if len(daily) != 7 {
+		t.Fatalf("trend returned %d days: %v", len(daily), stats["daily"])
+	}
+	last, _ := daily[len(daily)-1].(map[string]any)
+	if fmt.Sprint(last["date"]) != want {
+		t.Fatalf("trend ends on %v, want the site's own day %s", last["date"], want)
+	}
+	scheduled := 0
+	for _, item := range daily {
+		entry, _ := item.(map[string]any)
+		count, _ := entry["scheduled"].(float64)
+		scheduled += int(count)
+	}
+	if scheduled != 1 {
+		t.Fatalf("trend counted %d participants, want the one booked for %s: %v", scheduled, want, stats["daily"])
+	}
+
+	response := env.do(http.MethodGet, "/api/v1/admin/statistics.csv?days=7", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("statistics export returned %d: %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "\n"+want+",1,") {
+		t.Fatalf("statistics export lost the site's own day %s: %s", want, body)
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a

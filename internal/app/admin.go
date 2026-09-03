@@ -32,6 +32,16 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"counts": counts})
 }
 
+// statisticsTodayCTE anchors the daily trend to the newest calendar day any
+// site is currently in. The trend dates each participation in its own site's
+// timezone but used to lay those buckets on an axis of CURRENT_DATE, which is
+// the database session's date — UTC in the shipped container. On the default
+// Asia/Seoul site that axis stops nine hours short, so from midnight until
+// 09:00 local the day the dashboard counts as "오늘" has no column at all and
+// every visit booked for it disappears from the chart and the CSV. Taking the
+// latest site-local date keeps each site's current day on the axis.
+const statisticsTodayCTE = `today AS (SELECT COALESCE(max((now() AT TIME ZONE si.timezone)::date),CURRENT_DATE) AS day FROM sites si)`
+
 func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
 	if days < 1 || days > 366 {
@@ -40,15 +50,15 @@ func (s *Server) statistics(w http.ResponseWriter, r *http.Request) {
 	// Bucket each participation into its site-local day once, then join the
 	// buckets to the calendar; the previous per-day correlated subquery scanned
 	// every visit for every day in the range.
-	rows, err := s.db.Query(r.Context(), `WITH buckets AS (
+	rows, err := s.db.Query(r.Context(), `WITH `+statisticsTodayCTE+`, buckets AS (
 		SELECT (v.start_at AT TIME ZONE si.timezone)::date AS day,
 			count(vv.id) AS scheduled,
 			count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')) AS checked
 		FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id
-		WHERE v.start_at>=(CURRENT_DATE-($1::int))::timestamp-interval '1 day' AND v.start_at<(CURRENT_DATE+2)::timestamp
+		WHERE v.start_at>=((SELECT day FROM today)-($1::int))::timestamp-interval '1 day' AND v.start_at<((SELECT day FROM today)+2)::timestamp
 		GROUP BY 1)
 		SELECT d::date,COALESCE(b.scheduled,0),COALESCE(b.checked,0)
-		FROM generate_series(CURRENT_DATE-($1::int-1),CURRENT_DATE,interval '1 day') d LEFT JOIN buckets b ON b.day=d::date ORDER BY d`, days)
+		FROM generate_series((SELECT day FROM today)-($1::int-1),(SELECT day FROM today),interval '1 day') d LEFT JOIN buckets b ON b.day=d::date ORDER BY d`, days)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
