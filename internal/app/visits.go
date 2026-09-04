@@ -400,6 +400,27 @@ func writeVisitError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusInternalServerError, "visit_failed", "방문 요청을 처리하지 못했습니다")
 }
 
+// requestNoSuffix draws the six characters a request number ends with. The
+// suffix used to be the uppercased first six characters of a five-byte base64url
+// token with "_" stripped out, but that token is only seven characters long: when
+// two of them were separators fewer than six were left and the slice panicked, so
+// roughly one visit in three hundred failed with a 500 the requester could only
+// answer by submitting the form again. Twelve bytes leave a wide margin, and the
+// retry makes running short impossible rather than merely unlikely.
+func requestNoSuffix() (string, error) {
+	separators := strings.NewReplacer("_", "", "-", "")
+	for attempt := 0; attempt < 4; attempt++ {
+		random, err := platform.RandomToken(12)
+		if err != nil {
+			return "", err
+		}
+		if cleaned := strings.ToUpper(separators.Replace(random)); len(cleaned) >= 6 {
+			return cleaned[:6], nil
+		}
+	}
+	return "", errors.New("방문 신청번호를 생성하지 못했습니다")
+}
+
 func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor User, in VisitInput, source string, autoCheckIn bool) (map[string]any, error) {
 	in.Purpose = strings.TrimSpace(in.Purpose)
 	if in.SiteID == "" || in.Purpose == "" || len(in.Visitors) == 0 || len(in.Visitors) > 100 {
@@ -508,11 +529,11 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 		scheduled.StartAt = in.StartAt.AddDate(0, 0, occurrence*7)
 		scheduled.EndAt = in.EndAt.AddDate(0, 0, occurrence*7)
 		visitID := newID()
-		random, randomErr := platform.RandomToken(5)
+		suffix, randomErr := requestNoSuffix()
 		if randomErr != nil {
 			return nil, randomErr
 		}
-		requestNo := fmt.Sprintf("VF-%s-%s", scheduled.StartAt.Format("060102"), strings.ToUpper(strings.ReplaceAll(random, "_", ""))[:6])
+		requestNo := fmt.Sprintf("VF-%s-%s", scheduled.StartAt.Format("060102"), suffix)
 		recurrenceValue := map[string]any{}
 		if occurrences > 1 {
 			recurrenceValue = map[string]any{"frequency": "weekly", "occurrences": occurrences, "index": occurrence + 1, "seriesId": seriesID}

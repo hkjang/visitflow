@@ -1463,6 +1463,86 @@ func TestStatisticsSummaryCoversTheSameDaysAsTheTrend(t *testing.T) {
 	}
 }
 
+// zoneAtLocalHour names a fixed-offset timezone whose current local hour is the
+// requested one, so a test can place a site on either side of a cutoff without
+// depending on where the machine running it keeps its clock.
+func (e *testEnv) zoneAtLocalHour(t *testing.T, hour int) string {
+	t.Helper()
+	var utcHour int
+	if err := e.server.db.QueryRow(context.Background(), `SELECT extract(hour FROM (now() AT TIME ZONE 'UTC'))::int`).Scan(&utcHour); err != nil {
+		t.Fatalf("read the session's UTC hour: %v", err)
+	}
+	offset := ((hour-utcHour)%24 + 24) % 24
+	if offset > 14 {
+		offset -= 24
+	}
+	switch {
+	case offset == 0:
+		return "UTC"
+	case offset > 0:
+		// Etc/GMT-9 is UTC+9: the sign in these names is inverted.
+		return fmt.Sprintf("Etc/GMT-%d", offset)
+	default:
+		return fmt.Sprintf("Etc/GMT+%d", -offset)
+	}
+}
+
+// The nightly sweep closes out whoever is still inside once a site passes its
+// configured cutoff hour. It used to compare that hour against the service's own
+// clock, which is UTC in the shipped container: an Asia/Seoul site with the
+// default 23시 cutoff swept at 08:00 local, checking out visitors minutes after
+// they arrived and dropping them from the evacuation roster while they were
+// still in the building. One server clock also made every site close out on the
+// first site's evening.
+func TestAutomaticCheckoutFollowsEachSiteClock(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	// Two sites eight hours apart around a 12시 cutoff: one is well past it, the
+	// other is still in the morning. A single server clock decides the same way
+	// for both, whichever way it decides.
+	eveningSite := env.siteID()
+	if _, err := env.server.db.Exec(ctx, `UPDATE sites SET timezone=$1 WHERE id=$2`, env.zoneAtLocalHour(t, 16), eveningSite); err != nil {
+		t.Fatalf("set the evening site's timezone: %v", err)
+	}
+	created := env.json(http.MethodPost, "/api/v1/admin/sites", map[string]any{
+		"code": "MORN" + randomSuffix(t)[:4], "name": "아침 사업장", "timezone": env.zoneAtLocalHour(t, 8),
+	}, http.StatusOK)
+	morningSite := fmt.Sprint(created["id"])
+
+	for _, siteID := range []string{eveningSite, morningSite} {
+		env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, nil), http.StatusCreated)
+	}
+	if _, err := env.server.db.Exec(ctx, `UPDATE visitor_visits SET status='CHECKED_IN',checked_in_at=now()`); err != nil {
+		t.Fatalf("check the visitors in: %v", err)
+	}
+
+	if err := env.server.runAutomaticCheckouts(ctx, 12); err != nil {
+		t.Fatalf("automatic checkout: %v", err)
+	}
+
+	statuses := map[string]string{}
+	rows, err := env.server.db.Query(ctx, `SELECT v.site_id,vv.status FROM visitor_visits vv JOIN visits v ON v.id=vv.visit_id`)
+	if err != nil {
+		t.Fatalf("read participant statuses: %v", err)
+	}
+	for rows.Next() {
+		var siteID, status string
+		if err := rows.Scan(&siteID, &status); err != nil {
+			rows.Close()
+			t.Fatalf("scan participant status: %v", err)
+		}
+		statuses[siteID] = status
+	}
+	rows.Close()
+	if statuses[eveningSite] != "CHECKED_OUT" {
+		t.Fatalf("the site past its cutoff left a visitor %s, want CHECKED_OUT", statuses[eveningSite])
+	}
+	if statuses[morningSite] != "CHECKED_IN" {
+		t.Fatalf("a visitor who arrived in the morning was swept out as %s before the site reached its cutoff", statuses[morningSite])
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a

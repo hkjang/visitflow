@@ -182,6 +182,40 @@ func TestVisitorImportRows(t *testing.T) {
 	}
 }
 
+// The suffix is sliced to a fixed length, so it has to be long enough every
+// time. The five-byte base64 token it replaced was not: two separators in one
+// token left five characters and panicked the visit request.
+func TestRequestNoSuffixIsAlwaysSixCharacters(t *testing.T) {
+	for attempt := 0; attempt < 5000; attempt++ {
+		suffix, err := requestNoSuffix()
+		if err != nil {
+			t.Fatalf("requestNoSuffix: %v", err)
+		}
+		if len(suffix) != 6 {
+			t.Fatalf("requestNoSuffix() = %q, want six characters", suffix)
+		}
+		if strings.ContainsAny(suffix, "-_") {
+			t.Fatalf("requestNoSuffix() = %q, want no separators in a number people read aloud", suffix)
+		}
+	}
+}
+
+func TestAutoCheckoutHour(t *testing.T) {
+	if got := autoCheckoutHour(" 18 "); got != 18 {
+		t.Fatalf("autoCheckoutHour(\" 18 \") = %d, want 18", got)
+	}
+	if got := autoCheckoutHour("0"); got != 0 {
+		t.Fatalf("autoCheckoutHour(\"0\") = %d, want 0", got)
+	}
+	// A value that is not an hour of the day must fall back to the shipped
+	// default rather than to 0, which would sweep the building all day long.
+	for _, value := range []string{"", "매일", "24", "-1"} {
+		if got := autoCheckoutHour(value); got != 23 {
+			t.Fatalf("autoCheckoutHour(%q) = %d, want the 23 default", value, got)
+		}
+	}
+}
+
 func TestSettingValidation(t *testing.T) {
 	valid := map[string]string{
 		"visit.dynamic_qr_seconds":        "30",
