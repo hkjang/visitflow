@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -322,12 +323,8 @@ func (s *Server) runVisitMaintenance(ctx context.Context) {
 	} else {
 		_, _ = s.db.Exec(ctx, `UPDATE visits SET status='NO_SHOW',updated_at=now() WHERE status='SCHEDULED' AND NOT EXISTS(SELECT 1 FROM visitor_visits vv WHERE vv.visit_id=visits.id AND vv.status<>'NO_SHOW')`)
 	}
-	hour, _ := strconv.Atoi(settingOr(s, ctx, "visit.auto_checkout_hour", "23"))
-	if hour >= 0 && hour <= 23 && time.Now().Hour() >= hour {
-		err = s.runAutomaticCheckouts(ctx)
-		if err != nil {
-			s.logger.Error("automatic checkout failed", "error", err)
-		}
+	if err = s.runAutomaticCheckouts(ctx, autoCheckoutHour(settingOr(s, ctx, "visit.auto_checkout_hour", "23"))); err != nil {
+		s.logger.Error("automatic checkout failed", "error", err)
 	}
 	_, _ = s.db.Exec(ctx, `DELETE FROM sessions WHERE expires_at<now(); DELETE FROM oidc_states WHERE expires_at<now();`)
 	// Throttle rows outlive their lockout only to keep the failure window; drop
@@ -400,17 +397,38 @@ type automaticCheckoutItem struct {
 	checkedOutAt           time.Time
 }
 
-func (s *Server) runAutomaticCheckouts(ctx context.Context) error {
+// autoCheckoutHour reads the daily cutoff setting, falling back to the shipped
+// default when the stored value is not an hour of the day.
+func autoCheckoutHour(value string) int {
+	hour, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || hour < 0 || hour > 23 {
+		return 23
+	}
+	return hour
+}
+
+// runAutomaticCheckouts closes out everyone still inside once a site's own
+// clock passes the configured cutoff hour. The hour used to be compared against
+// the service's clock, which is UTC in the shipped container: an Asia/Seoul site
+// with the default 23시 cutoff swept at 08:00 local, so a visitor who checked in
+// first thing in the morning was marked CHECKED_OUT within ten minutes and
+// dropped off the evacuation roster while still in the building. Reading the
+// hour in each site's timezone also lets sites in different zones close out on
+// their own evenings instead of all following the first one.
+func (s *Server) runAutomaticCheckouts(ctx context.Context, hour int) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	ended := []automaticCheckoutItem{}
-	rows, err := tx.Query(ctx, `UPDATE visitor_visits
+	rows, err := tx.Query(ctx, `UPDATE visitor_visits vv
 		SET status='CHECKED_OUT',checked_out_at=now()
-		WHERE status='CHECKED_IN' AND checked_in_at::date<CURRENT_DATE+1
-		RETURNING visit_id,id,checked_out_at`)
+		FROM visits v JOIN sites si ON si.id=v.site_id
+		WHERE vv.visit_id=v.id AND vv.status='CHECKED_IN'
+		AND extract(hour FROM (now() AT TIME ZONE si.timezone))>=$1::int
+		AND (vv.checked_in_at AT TIME ZONE si.timezone)::date<=(now() AT TIME ZONE si.timezone)::date
+		RETURNING vv.visit_id,vv.id,vv.checked_out_at`, hour)
 	if err != nil {
 		return err
 	}

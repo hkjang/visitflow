@@ -182,6 +182,22 @@ func TestVisitorImportRows(t *testing.T) {
 	}
 }
 
+func TestAutoCheckoutHour(t *testing.T) {
+	if got := autoCheckoutHour(" 18 "); got != 18 {
+		t.Fatalf("autoCheckoutHour(\" 18 \") = %d, want 18", got)
+	}
+	if got := autoCheckoutHour("0"); got != 0 {
+		t.Fatalf("autoCheckoutHour(\"0\") = %d, want 0", got)
+	}
+	// A value that is not an hour of the day must fall back to the shipped
+	// default rather than to 0, which would sweep the building all day long.
+	for _, value := range []string{"", "매일", "24", "-1"} {
+		if got := autoCheckoutHour(value); got != 23 {
+			t.Fatalf("autoCheckoutHour(%q) = %d, want the 23 default", value, got)
+		}
+	}
+}
+
 func TestSettingValidation(t *testing.T) {
 	valid := map[string]string{
 		"visit.dynamic_qr_seconds":        "30",

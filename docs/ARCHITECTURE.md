@@ -51,7 +51,7 @@ REQUESTED → PENDING_APPROVAL → SCHEDULED → CHECKED_IN → CHECKED_OUT
 - MMS Gateway는 인증 없이 `GET /img/visitor/{qrcode_file_seq}.jpg`를 가져갈 수 있다. 식별자는 추측하기 어려운 난수이며 폐기·만료·취소·반려·퇴실·미방문 QR은 같은 404 응답으로 차단한다. 참가자별 활성 QR은 partial unique index와 참가자 Row Lock으로 하나만 허용한다.
 - 사용자 가이드 글은 PostgreSQL에 저장하고 로그인 사용자에게 게시 글만 제공한다. 초안·등록·수정·삭제는 관리자 RBAC와 감사 로그 경계를 따른다.
 - SSE는 프로세스 내 Fan-out으로 로비 변경을 전달하고 DB가 Source of Truth 역할을 수행
-- Scheduler는 미방문, 자동 퇴실, Session·잠금 정리, 만료 사전등록 링크 폐기, 승인 지연 에스컬레이션, 개인정보 파기와 감사 로그 보존을 수행
+- Scheduler는 미방문, 자동 퇴실, Session·잠금 정리, 만료 사전등록 링크 폐기, 승인 지연 에스컬레이션, 개인정보 파기와 감사 로그 보존을 수행. 자동 퇴실 컷오프 시각은 서비스 프로세스의 시계(컨테이너 기본 UTC)가 아니라 각 사업장의 시간대에서 판정한다.
 - Migration은 `migrations/<version>_<name>.sql` 파일 단위로 각자의 트랜잭션에서 한 번만 적용하고 `schema_migrations`에 기록한다. `GET /readyz`는 적용 버전과 바이너리가 기대하는 버전을 함께 반환하고 불일치 시 503을 반환한다.
 - 목록은 커서(keyset) 페이지네이션을 사용해 새 방문이 생겨도 다음 페이지가 밀리지 않으며, 로비 목록은 한도를 넘으면 잘렸음을 응답에 표시한다.
 - 지표는 프로세스 카운터와 DB Gauge를 합쳐 관리자 화면과 토큰 보호 `/metrics`로 제공한다.
