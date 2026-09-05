@@ -463,6 +463,38 @@ func TestVisitListPaginatesWithCursor(t *testing.T) {
 	}
 }
 
+// Searching the visit list by one participant used to filter the joined
+// participant rows, which is also what the visitor count and the representative
+// visitor are aggregated from. A hit on a companion therefore shrank the party
+// to that one person on screen.
+func TestVisitSearchKeepsTheWholeParty(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{"visitors": []map[string]any{
+		{"name": "대표방문", "phone": "010-4444-1111", "company": "대표상사", "consent": true},
+		{"name": "동행방문", "phone": "010-4444-2222", "company": "동행상사", "consent": true},
+	}}), http.StatusCreated)
+	visitID := fmt.Sprint(created["id"])
+
+	for _, term := range []string{"010-4444-2222", "동행방문", "동행상사"} {
+		found := env.json(http.MethodGet, "/api/v1/visits?q="+url.QueryEscape(term), nil, http.StatusOK)
+		items, _ := found["items"].([]any)
+		if len(items) != 1 {
+			t.Fatalf("search for %q returned %d visits: %v", term, len(items), found)
+		}
+		item, _ := items[0].(map[string]any)
+		if fmt.Sprint(item["id"]) != visitID {
+			t.Fatalf("search for %q returned visit %v, want %s", term, item["id"], visitID)
+		}
+		if fmt.Sprint(item["visitorCount"]) != "2" {
+			t.Fatalf("search for %q reported %v participants, want 2", term, item["visitorCount"])
+		}
+		if fmt.Sprint(item["primaryVisitor"]) != "대표방문" {
+			t.Fatalf("search for %q named %v as the representative visitor", term, item["primaryVisitor"])
+		}
+	}
+}
+
 func TestKioskDeviceCanCheckVisitorsIn(t *testing.T) {
 	env := newTestEnv(t)
 	siteID := env.siteID()
