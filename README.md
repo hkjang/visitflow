@@ -56,7 +56,7 @@ React 19 + TypeScript + Material UI 7을 사용한다. 방문자 운영 화면�
 PostgreSQL 14+ 데이터베이스를 준비한 뒤 GitHub Release의 이미지 하나만 내부망으로 반입한다.
 
 ```bash
-docker load < visitflow-v2.6.4.tar.gz
+docker load < visitflow-v2.6.5.tar.gz
 
 export POSTGRES_DSN='postgres://visitflow:password@postgres.intra:5432/visitflow?sslmode=require'
 export BOOTSTRAP_ADMIN='admin'
@@ -133,6 +133,6 @@ VISITFLOW_BASE_URL=http://127.0.0.1:8080 npm run test:e2e
 `v*.*.*` 태그를 push하면 GitHub Actions가 `linux/amd64` 단일 서비스 이미지 `visitflow:vX.Y.Z`를 빌드한다. `docker save | gzip`으로 만든 `visitflow-vX.Y.Z.tar.gz`만 Release 자산으로 첨부하며 런타임에는 레지스트리나 인터넷이 필요 없다. 아카이브에는 Compose가 바로 사용할 수 있는 `visitflow:latest` 별칭도 포함된다.
 
 ```bash
-./scripts/release-image.sh 2.6.4
-gzip -t visitflow-v2.6.4.tar.gz
+./scripts/release-image.sh 2.6.5
+gzip -t visitflow-v2.6.5.tar.gz
 ```
