@@ -307,6 +307,15 @@ func (s *Server) listVisits(w http.ResponseWriter, r *http.Request) {
 
 // queryVisits returns one page plus the cursor for the next one. It fetches a
 // single extra row to decide whether more pages exist without a count query.
+//
+// The participant part of the search — company, visitor name and phone — is an
+// EXISTS over the visit rather than a predicate on the joined participant rows.
+// Those rows are what count(vv.id) and the primary-visitor array_agg below are
+// built from, so filtering them threw away every companion who did not match
+// the term: a search for one visitor's phone number reported "방문자 1명" for a
+// party of five and named the matching visitor as the representative instead of
+// the primary one. The subquery decides whether the visit matches and leaves
+// the aggregate looking at the whole party.
 func (s *Server) queryVisits(ctx context.Context, u User, q visitQuery) ([]VisitSummary, string, error) {
 	dept := ""
 	if u.DepartmentID != nil {
@@ -327,7 +336,9 @@ func (s *Server) queryVisits(ctx context.Context, u User, q visitQuery) ([]Visit
 		LEFT JOIN visitor_visits vv ON vv.visit_id=v.id LEFT JOIN visitors p ON p.id=vv.visitor_id
 		WHERE ($1='' OR v.status=$1)
 		AND ($2='' OR ($2='today' AND (v.start_at AT TIME ZONE s.timezone)::date=(now() AT TIME ZONE s.timezone)::date) OR ($2='upcoming' AND v.start_at>=now()) OR ($2='past' AND v.end_at<now()))
-		AND ($3='' OR v.id=$3 OR v.request_no ILIKE '%%'||$3||'%%' OR p.company ILIKE '%%'||$3||'%%' OR h.display_name ILIKE '%%'||$3||'%%' OR p.name_hash=$9 OR p.phone_hash=$10)
+		AND ($3='' OR v.id=$3 OR v.request_no ILIKE '%%'||$3||'%%' OR h.display_name ILIKE '%%'||$3||'%%'
+		 OR EXISTS(SELECT 1 FROM visitor_visits mvv JOIN visitors mp ON mp.id=mvv.visitor_id
+			WHERE mvv.visit_id=v.id AND (mp.company ILIKE '%%'||$3||'%%' OR mp.name_hash=$9 OR mp.phone_hash=$10)))
 		AND ($5 IN ('admin','super_admin','security','auditor')
 		 OR ($5='lobby' AND (cardinality($7::text[])=0 OR v.site_id=ANY($7::text[])))
 		 OR ($5='dept_manager' AND v.department_id=NULLIF($6,''))

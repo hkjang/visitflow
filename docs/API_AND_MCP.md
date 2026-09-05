@@ -20,7 +20,7 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 
 - `POST /api/v1/visits` 단일·단체 방문 신청
 - `POST /api/v1/visits/import/preview` CSV/XLSX 방문자 가져오기 검증
-- `GET /api/v1/visits` 사용자/부서/사업장 범위 방문 검색. `limit`과 `cursor`로 페이지를 넘기고 응답의 `nextCursor`·`hasMore`로 다음 페이지를 판단한다.
+- `GET /api/v1/visits` 사용자/부서/사업장 범위 방문 검색. `limit`과 `cursor`로 페이지를 넘기고 응답의 `nextCursor`·`hasMore`로 다음 페이지를 판단한다. `q`는 방문번호·담당자와 함께 동행자를 포함한 모든 방문자의 회사·이름·전화로 방문을 찾으며, 한 명만 검색어에 걸려도 `visitorCount`와 `primaryVisitor`는 그 방문의 참가자 전원을 기준으로 돌려준다.
 - `POST /api/v1/visits/{id}/approve|reject|cancel`, `POST /api/v1/visits/{id}/cancel-series` 이 회차부터 반복 일정 취소
 - `POST /api/v1/visitor-visits/{id}/cancel` 단체 방문의 방문자 개별 취소
 - `POST /api/v1/checkins/manual` QR 없는 방문자의 신분 확인 후 직접 체크인(로비 담당자, 사유 필수)
