@@ -1495,6 +1495,79 @@ func TestStatisticsSummaryCoversTheSameDaysAsTheTrend(t *testing.T) {
 	}
 }
 
+// mcpTool calls a tool over the real /mcp endpoint with a freshly minted
+// personal API key, which is the only way in — /mcp refuses session cookies.
+func (e *testEnv) mcpTool(name string, args map[string]any) map[string]any {
+	e.t.Helper()
+	created := e.json(http.MethodPost, "/api/v1/api-keys", map[string]any{"name": "mcp-" + name + "-" + randomSuffix(e.t), "scopes": []string{"read", "mcp"}}, http.StatusCreated)
+	key, _ := created["key"].(string)
+	if key == "" {
+		e.t.Fatalf("api key creation returned no secret: %v", created)
+	}
+	payload, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+	if err != nil {
+		e.t.Fatalf("encode mcp call: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(string(payload)))
+	request.RemoteAddr = "10.0.0.1:5000"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+key)
+	response := httptest.NewRecorder()
+	e.handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		e.t.Fatalf("mcp %s returned %d: %s", name, response.Code, response.Body.String())
+	}
+	var decoded struct {
+		Result struct {
+			StructuredContent map[string]any `json:"structuredContent"`
+			IsError           bool           `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		e.t.Fatalf("decode mcp response: %v (%s)", err, response.Body.String())
+	}
+	if decoded.Result.IsError {
+		e.t.Fatalf("mcp %s failed: %s", name, response.Body.String())
+	}
+	return decoded.Result.StructuredContent
+}
+
+// An agent asking the MCP tool for the period statistics has to get the numbers
+// the admin sees on the statistics screen. The tool used to span from the
+// database session's CURRENT_DATE-days with no upper bound, so it both started
+// on a different day than the screen and counted visits booked for the future.
+func TestMCPVisitStatisticsMatchTheStatisticsScreen(t *testing.T) {
+	env := newTestEnv(t)
+	location, localDay := env.moveSitesOffSessionDate(t)
+	book := func(start time.Time) {
+		env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+			"startAt": start.UTC().Format(time.RFC3339),
+			"endAt":   start.Add(time.Hour).UTC().Format(time.RFC3339),
+		}), http.StatusCreated)
+	}
+	// Inside the seven-day span: midday of the site's own current date.
+	book(time.Date(localDay.Year(), localDay.Month(), localDay.Day(), 12, 0, 0, 0, location))
+	// One day before the span's first column, late enough locally that the old
+	// CURRENT_DATE-days boundary still counted it.
+	book(time.Date(localDay.Year(), localDay.Month(), localDay.Day()-7, 23, 0, 0, 0, location))
+	// Well past today, which the tool's open upper bound used to sweep in.
+	book(time.Date(localDay.Year(), localDay.Month(), localDay.Day()+30, 12, 0, 0, 0, location))
+
+	stats := env.json(http.MethodGet, "/api/v1/admin/statistics?days=7", nil, http.StatusOK)
+	summary, _ := stats["summary"].(map[string]any)
+	if fmt.Sprint(summary["participants"]) != "1" {
+		t.Fatalf("statistics screen counted %v participants, want the one inside the span: %v", summary["participants"], summary)
+	}
+
+	result := env.mcpTool("get_visit_statistics", map[string]any{"days": 7})
+	if fmt.Sprint(result["scheduled"]) != fmt.Sprint(summary["participants"]) {
+		t.Fatalf("mcp reported %v participants over the span the screen counts %v in: %v", result["scheduled"], summary["participants"], result)
+	}
+	if fmt.Sprint(result["days"]) != "7" {
+		t.Fatalf("mcp did not echo the requested day count: %v", result)
+	}
+}
+
 // zoneAtLocalHour names a fixed-offset timezone whose current local hour is the
 // requested one, so a test can place a site on either side of a cutoff without
 // depending on where the machine running it keeps its clock.

@@ -83,6 +83,6 @@ Authorization: Bearer vf_...
 - `get_lobby_status`
 - `get_visit_statistics`
 
-`search_visits`와 `get_today_visitors`는 REST와 같은 `cursor` 페이지네이션을 지원하고 `create_visit`은 `visit_type_id`를 받는다.
+`search_visits`와 `get_today_visitors`는 REST와 같은 `cursor` 페이지네이션을 지원하고 `create_visit`은 `visit_type_id`를 받는다. `get_visit_statistics`는 통계 화면과 같은 구간(`days`만큼을 사업장 시간대 기준 오늘까지, 기본 30·최대 366)을 세므로 요약 타일의 방문자 수·입실 수와 같은 값을 돌려주며, 아직 오지 않은 예약은 포함하지 않는다.
 
 개인정보는 마스킹하고 REST와 동일한 Role, API Scope, 사용자/부서/사업장 Scope를 적용한다. 변경 Tool은 감사 로그를 남긴다.
