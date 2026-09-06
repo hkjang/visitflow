@@ -50,7 +50,7 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `GET /api/v1/settings/export` 비밀값 제외 설정 JSON(`PUT /settings`에 그대로 사용 가능)
 - `GET|POST /api/v1/admin/visit-types`, `PUT|DELETE /api/v1/admin/visit-types/{id}`
 - `GET|POST /api/v1/admin/kiosk-devices`, `DELETE /api/v1/admin/kiosk-devices/{id}`
-- `GET|POST /api/v1/admin/notification-apis|notification-rules` 및 항목별 `PUT|DELETE`
+- `GET|POST /api/v1/admin/notification-apis|notification-rules` 및 항목별 `PUT|DELETE`. 규칙 `channel`은 `sms|mms|kakao|webhook|email`이며 `email`은 `subjectTemplate`을 받고 `apiConfigId` 없이 SMTP로 발송한다.
 - `GET|POST /api/v1/admin/guides`, `PUT|DELETE /api/v1/admin/guides/{id}`
 - `GET|PUT /api/v1/settings`
 - `GET|POST /api/v1/api-keys`

@@ -29,7 +29,7 @@ var (
 
 // notificationChannels covers both messaging and the generic 'webhook' channel
 // used to drive gates, guest Wi-Fi and other systems from the same adapter.
-var notificationChannels = map[string]bool{"sms": true, "mms": true, "kakao": true, "webhook": true}
+var notificationChannels = map[string]bool{"sms": true, "mms": true, "kakao": true, "webhook": true, "email": true}
 
 var notificationEvents = map[string]bool{
 	"visit_confirmed": true, "visit_start": true, "checked_in": true,
@@ -84,6 +84,7 @@ type notificationRuleInput struct {
 	OffsetMinutes int    `json:"offsetMinutes"`
 	TemplateKey   string `json:"templateKey"`
 	BodyTemplate  string `json:"bodyTemplate"`
+	Subject       string `json:"subjectTemplate"`
 	Locale        string `json:"locale"`
 	Enabled       *bool  `json:"enabled"`
 }
@@ -99,6 +100,7 @@ type notificationRule struct {
 	OffsetMinutes int       `json:"offsetMinutes"`
 	TemplateKey   string    `json:"templateKey"`
 	BodyTemplate  string    `json:"bodyTemplate"`
+	Subject       string    `json:"subjectTemplate"`
 	Locale        string    `json:"locale"`
 	Enabled       bool      `json:"enabled"`
 	CreatedAt     time.Time `json:"createdAt"`
@@ -163,8 +165,8 @@ func validateNotificationAPIInput(in notificationAPIInput) string {
 	if in.Name == "" || len(in.Name) > 100 {
 		return "API 이름은 1~100자로 입력하세요"
 	}
-	if !notificationChannels[in.Channel] {
-		return "채널은 sms, mms, kakao, webhook 중 하나여야 합니다"
+	if !notificationChannels[in.Channel] || in.Channel == "email" {
+		return "채널은 sms, mms, kakao, webhook 중 하나여야 합니다 (이메일은 SMTP 설정으로 발송)"
 	}
 	parsed, err := url.Parse(in.BaseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -232,6 +234,7 @@ func normalizeNotificationRuleInput(in *notificationRuleInput) {
 	in.APIConfigID = strings.TrimSpace(in.APIConfigID)
 	in.TemplateKey = strings.ToLower(strings.TrimSpace(in.TemplateKey))
 	in.BodyTemplate = strings.TrimSpace(in.BodyTemplate)
+	in.Subject = strings.TrimSpace(in.Subject)
 	in.Locale = strings.ToLower(strings.TrimSpace(in.Locale))
 	// Store the base tag the visitor record uses ("ko-KR" would never match "ko").
 	if normalized := normalizeLocale(in.Locale); normalized != "" {
@@ -254,6 +257,17 @@ func validateNotificationRuleInput(in notificationRuleInput) string {
 	}
 	if in.Audience == "system" && in.Channel != "webhook" {
 		return "system 대상 규칙은 webhook 채널을 사용해야 합니다"
+	}
+	if in.Channel == "email" {
+		if in.APIConfigID != "" {
+			return "이메일 채널은 문자 API가 아닌 SMTP 설정으로 발송합니다"
+		}
+		if len(in.Subject) > 200 {
+			return "메일 제목은 200자 이내로 입력하세요"
+		}
+		if message := validateNotificationTemplate(in.Subject); message != "" {
+			return "제목: " + message
+		}
 	}
 	if in.Audience == "system" && in.APIConfigID == "" {
 		return "system 대상 규칙에는 호출할 외부 API를 선택해야 합니다"
@@ -608,7 +622,7 @@ func (s *Server) deleteNotificationAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listNotificationRules(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT nr.id,nr.name,nr.event,nr.audience,nr.channel,COALESCE(nr.api_config_id,''),COALESCE(na.name,''),nr.offset_minutes,nr.template_key,nr.body_template,nr.locale,nr.enabled,nr.created_at,nr.updated_at FROM notification_rules nr LEFT JOIN notification_api_configs na ON na.id=nr.api_config_id ORDER BY nr.event,nr.offset_minutes,nr.name`)
+	rows, err := s.db.Query(r.Context(), `SELECT nr.id,nr.name,nr.event,nr.audience,nr.channel,COALESCE(nr.api_config_id,''),COALESCE(na.name,''),nr.offset_minutes,nr.template_key,nr.body_template,nr.subject_template,nr.locale,nr.enabled,nr.created_at,nr.updated_at FROM notification_rules nr LEFT JOIN notification_api_configs na ON na.id=nr.api_config_id ORDER BY nr.event,nr.offset_minutes,nr.name`)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -617,7 +631,7 @@ func (s *Server) listNotificationRules(w http.ResponseWriter, r *http.Request) {
 	items := []notificationRule{}
 	for rows.Next() {
 		var item notificationRule
-		if err := rows.Scan(&item.ID, &item.Name, &item.Event, &item.Audience, &item.Channel, &item.APIConfigID, &item.APIConfigName, &item.OffsetMinutes, &item.TemplateKey, &item.BodyTemplate, &item.Locale, &item.Enabled, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Event, &item.Audience, &item.Channel, &item.APIConfigID, &item.APIConfigName, &item.OffsetMinutes, &item.TemplateKey, &item.BodyTemplate, &item.Subject, &item.Locale, &item.Enabled, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			notFoundOrServer(w, err)
 			return
 		}
@@ -676,7 +690,7 @@ func (s *Server) createNotificationRule(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_notification_rule", message)
 		return
 	}
-	_, err = tx.Exec(r.Context(), `INSERT INTO notification_rules(id,name,event,audience,channel,api_config_id,offset_minutes,template_key,body_template,locale,enabled,created_by) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10,$11,$12)`, id, in.Name, in.Event, in.Audience, in.Channel, in.APIConfigID, in.OffsetMinutes, in.TemplateKey, in.BodyTemplate, in.Locale, enabled, u.ID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO notification_rules(id,name,event,audience,channel,api_config_id,offset_minutes,template_key,body_template,subject_template,locale,enabled,created_by) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9,$10,$11,$12,$13)`, id, in.Name, in.Event, in.Audience, in.Channel, in.APIConfigID, in.OffsetMinutes, in.TemplateKey, in.BodyTemplate, in.Subject, in.Locale, enabled, u.ID)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -714,16 +728,16 @@ func (s *Server) updateNotificationRule(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_notification_rule", message)
 		return
 	}
-	var oldEvent, oldAudience, oldChannel, oldAPIConfigID, oldTemplateKey, oldBodyTemplate, oldLocale string
+	var oldEvent, oldAudience, oldChannel, oldAPIConfigID, oldTemplateKey, oldBodyTemplate, oldSubject, oldLocale string
 	var oldOffsetMinutes int
 	var oldEnabled bool
-	if err = tx.QueryRow(r.Context(), `SELECT event,audience,channel,COALESCE(api_config_id,''),offset_minutes,template_key,body_template,locale,enabled FROM notification_rules WHERE id=$1 FOR UPDATE`, id).
-		Scan(&oldEvent, &oldAudience, &oldChannel, &oldAPIConfigID, &oldOffsetMinutes, &oldTemplateKey, &oldBodyTemplate, &oldLocale, &oldEnabled); err != nil {
+	if err = tx.QueryRow(r.Context(), `SELECT event,audience,channel,COALESCE(api_config_id,''),offset_minutes,template_key,body_template,subject_template,locale,enabled FROM notification_rules WHERE id=$1 FOR UPDATE`, id).
+		Scan(&oldEvent, &oldAudience, &oldChannel, &oldAPIConfigID, &oldOffsetMinutes, &oldTemplateKey, &oldBodyTemplate, &oldSubject, &oldLocale, &oldEnabled); err != nil {
 		notFoundOrServer(w, err)
 		return
 	}
-	queuePolicyChanged := oldEvent != in.Event || oldAudience != in.Audience || oldChannel != in.Channel || oldAPIConfigID != in.APIConfigID || oldOffsetMinutes != in.OffsetMinutes || oldTemplateKey != in.TemplateKey || oldBodyTemplate != in.BodyTemplate || oldLocale != in.Locale || oldEnabled != enabled
-	tag, err := tx.Exec(r.Context(), `UPDATE notification_rules SET name=$2,event=$3,audience=$4,channel=$5,api_config_id=NULLIF($6,''),offset_minutes=$7,template_key=$8,body_template=$9,locale=$10,enabled=$11,updated_at=now() WHERE id=$1`, id, in.Name, in.Event, in.Audience, in.Channel, in.APIConfigID, in.OffsetMinutes, in.TemplateKey, in.BodyTemplate, in.Locale, enabled)
+	queuePolicyChanged := oldEvent != in.Event || oldAudience != in.Audience || oldChannel != in.Channel || oldAPIConfigID != in.APIConfigID || oldOffsetMinutes != in.OffsetMinutes || oldTemplateKey != in.TemplateKey || oldBodyTemplate != in.BodyTemplate || oldSubject != in.Subject || oldLocale != in.Locale || oldEnabled != enabled
+	tag, err := tx.Exec(r.Context(), `UPDATE notification_rules SET name=$2,event=$3,audience=$4,channel=$5,api_config_id=NULLIF($6,''),offset_minutes=$7,template_key=$8,body_template=$9,subject_template=$10,locale=$11,enabled=$12,updated_at=now() WHERE id=$1`, id, in.Name, in.Event, in.Audience, in.Channel, in.APIConfigID, in.OffsetMinutes, in.TemplateKey, in.BodyTemplate, in.Subject, in.Locale, enabled)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -839,24 +853,31 @@ type notificationEventData struct {
 	VisitID, VisitorVisitID, RequestNo, Visitor, VisitorPhone, VisitorCompany             string
 	Host, HostPhone, Company, Place, Lobby, PassURL, QRCodeFileSeq, QRCodePath, QRCodeURL string
 	Locale, VisitType, BadgeNo, SiteCode, Delegate                                        string
+	VisitorEmail, HostEmail                                                               string
 	StartAt, EndAt                                                                        time.Time
 	Timezone                                                                              string
 }
 
 func (s *Server) notificationEventDataTx(ctx context.Context, tx pgx.Tx, visitID, visitorVisitID string) (notificationEventData, error) {
 	var data notificationEventData
-	var visitorNameEncrypted, visitorPhoneEncrypted, hostPhoneEncrypted, delegatePhoneEncrypted, tokenEncrypted string
+	var visitorNameEncrypted, visitorPhoneEncrypted, hostPhoneEncrypted, delegatePhoneEncrypted, tokenEncrypted, visitorEmailEncrypted, delegateEmail string
 	err := tx.QueryRow(ctx, `SELECT v.id,vv.id,v.request_no,p.name_encrypted,p.phone_encrypted,COALESCE(p.company,''),h.display_name,COALESCE(h.phone_encrypted,''),COALESCE(sv.value,''),COALESCE(NULLIF(v.place_detail,''),s.name),COALESCE(l.name,''),v.start_at,v.end_at,s.timezone,COALESCE(q.token_encrypted,''),COALESCE(q.qrcode_file_seq,''),
-		p.locale,COALESCE(vt.name,''),COALESCE(vv.badge_no,''),s.code,COALESCE(d.display_name,''),COALESCE(d.phone_encrypted,'')
+		p.locale,COALESCE(vt.name,''),COALESCE(vv.badge_no,''),s.code,COALESCE(d.display_name,''),COALESCE(d.phone_encrypted,''),
+		COALESCE(p.email_encrypted,''),COALESCE(h.email,''),COALESCE(d.email,'')
 		FROM visits v JOIN visitor_visits vv ON vv.visit_id=v.id JOIN visitors p ON p.id=vv.visitor_id JOIN users h ON h.id=v.host_user_id JOIN sites s ON s.id=v.site_id
 		LEFT JOIN lobbies l ON l.id=v.lobby_id LEFT JOIN settings sv ON sv.key='general.company_name'
 		LEFT JOIN visit_types vt ON vt.id=v.visit_type_id
 		LEFT JOIN users d ON d.id=h.delegate_user_id AND h.delegate_until>now() AND d.active
 		LEFT JOIN LATERAL (SELECT token_encrypted,qrcode_file_seq FROM qr_tokens WHERE visitor_visit_id=vv.id AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1) q ON true
 		WHERE v.id=$1 AND vv.id=$2`, visitID, visitorVisitID).Scan(&data.VisitID, &data.VisitorVisitID, &data.RequestNo, &visitorNameEncrypted, &visitorPhoneEncrypted, &data.VisitorCompany, &data.Host, &hostPhoneEncrypted, &data.Company, &data.Place, &data.Lobby, &data.StartAt, &data.EndAt, &data.Timezone, &tokenEncrypted, &data.QRCodeFileSeq,
-		&data.Locale, &data.VisitType, &data.BadgeNo, &data.SiteCode, &data.Delegate, &delegatePhoneEncrypted)
+		&data.Locale, &data.VisitType, &data.BadgeNo, &data.SiteCode, &data.Delegate, &delegatePhoneEncrypted,
+		&visitorEmailEncrypted, &data.HostEmail, &delegateEmail)
 	if err != nil {
 		return data, err
+	}
+	data.VisitorEmail = s.decryptOptional(visitorEmailEncrypted)
+	if delegateEmail != "" {
+		data.HostEmail = delegateEmail
 	}
 	data.Visitor = s.decryptOptional(visitorNameEncrypted)
 	data.VisitorPhone = s.decryptOptional(visitorPhoneEncrypted)
@@ -905,20 +926,20 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 		return err
 	}
 	type queuedRule struct {
-		id, audience, channel, apiConfigID, templateKey, bodyTemplate, locale string
-		offsetMinutes                                                         int
+		id, audience, channel, apiConfigID, templateKey, bodyTemplate, subjectTemplate, locale string
+		offsetMinutes                                                                          int
 	}
 	rules := []queuedRule{}
 	// A rule with a locale only fires for visitors who chose that language, so
 	// one event can carry a Korean and an English template side by side.
-	rows, err := tx.Query(ctx, `SELECT id,audience,channel,COALESCE(api_config_id,''),offset_minutes,template_key,body_template,locale
+	rows, err := tx.Query(ctx, `SELECT id,audience,channel,COALESCE(api_config_id,''),offset_minutes,template_key,body_template,subject_template,locale
 		FROM notification_rules WHERE enabled AND event=$1 AND (locale='' OR locale=$2) ORDER BY created_at`, event, data.Locale)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var rule queuedRule
-		if err := rows.Scan(&rule.id, &rule.audience, &rule.channel, &rule.apiConfigID, &rule.offsetMinutes, &rule.templateKey, &rule.bodyTemplate, &rule.locale); err != nil {
+		if err := rows.Scan(&rule.id, &rule.audience, &rule.channel, &rule.apiConfigID, &rule.offsetMinutes, &rule.templateKey, &rule.bodyTemplate, &rule.subjectTemplate, &rule.locale); err != nil {
 			rows.Close()
 			return err
 		}
@@ -940,7 +961,7 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 		return err
 	}
 	for _, rule := range rules {
-		recipient := notificationRecipient(rule.audience, data)
+		recipient := notificationRecipient(rule.audience, rule.channel, data)
 		if strings.TrimSpace(recipient) == "" {
 			continue
 		}
@@ -949,6 +970,22 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 		body, renderErr := renderNotificationTemplate(rule.bodyTemplate, variables)
 		if renderErr != nil {
 			return renderErr
+		}
+		ruleMetadata := metadataEncrypted
+		if rule.channel == "email" {
+			subject, subjectErr := renderRuleSubject(rule.subjectTemplate, variables)
+			if subjectErr != nil {
+				return subjectErr
+			}
+			mailMeta := map[string]string{}
+			for key, value := range variables {
+				mailMeta[key] = value
+			}
+			mailMeta["subject"] = subject
+			mailJSON, _ := json.Marshal(mailMeta)
+			if ruleMetadata, err = s.keys.Encrypt(string(mailJSON)); err != nil {
+				return err
+			}
 		}
 		recipientEncrypted, encryptErr := s.keys.Encrypt(recipient)
 		if encryptErr != nil {
@@ -965,7 +1002,7 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 		if scheduledAt.Before(time.Now()) {
 			scheduledAt = time.Now()
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO notifications(id,visit_id,visitor_visit_id,rule_id,api_config_id,recipient_encrypted,channel,template_key,body_encrypted,metadata_encrypted,next_attempt_at) VALUES($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,$10,$11)`, newID(), visitID, visitorVisitID, rule.id, rule.apiConfigID, recipientEncrypted, rule.channel, rule.templateKey, bodyEncrypted, metadataEncrypted, scheduledAt)
+		_, err = tx.Exec(ctx, `INSERT INTO notifications(id,visit_id,visitor_visit_id,rule_id,api_config_id,recipient_encrypted,channel,template_key,body_encrypted,metadata_encrypted,next_attempt_at) VALUES($1,$2,$3,$4,NULLIF($5,''),$6,$7,$8,$9,$10,$11)`, newID(), visitID, visitorVisitID, rule.id, rule.apiConfigID, recipientEncrypted, rule.channel, rule.templateKey, bodyEncrypted, ruleMetadata, scheduledAt)
 		if err != nil {
 			return err
 		}
@@ -979,7 +1016,13 @@ func (s *Server) queueNotificationEventCountTx(ctx context.Context, tx pgx.Tx, v
 // notificationRecipient resolves what the adapter is addressed to. Messaging
 // audiences use a normalized phone number; a 'system' rule targets an external
 // system, so the participant id identifies the subject instead.
-func notificationRecipient(audience string, data notificationEventData) string {
+func notificationRecipient(audience, channel string, data notificationEventData) string {
+	if channel == "email" {
+		if audience == "host" {
+			return strings.TrimSpace(data.HostEmail)
+		}
+		return strings.TrimSpace(data.VisitorEmail)
+	}
 	switch audience {
 	case "host":
 		return normalizePhone(data.HostPhone)
@@ -988,6 +1031,15 @@ func notificationRecipient(audience string, data notificationEventData) string {
 	default:
 		return normalizePhone(data.VisitorPhone)
 	}
+}
+
+// renderRuleSubject gives every mailed rule a subject; the body template alone
+// would arrive with an empty header line.
+func renderRuleSubject(subjectTemplate string, variables map[string]string) (string, error) {
+	if strings.TrimSpace(subjectTemplate) == "" {
+		subjectTemplate = "[VisitFlow] 방문 안내 {{requestNo}}"
+	}
+	return renderNotificationTemplate(subjectTemplate, variables)
 }
 
 func (s *Server) cancelPendingVisitNotificationsTx(ctx context.Context, tx pgx.Tx, visitID string) error {
@@ -1019,12 +1071,12 @@ func (s *Server) refreshVisitStartRuleNotificationsTx(ctx context.Context, tx pg
 
 func (s *Server) refreshVisitStartNotificationsScopedTx(ctx context.Context, tx pgx.Tx, visitID, participantScope, ruleScope string) error {
 	type pendingNotification struct {
-		id, participantID, bodyTemplate, audience, channel, apiConfigID, templateKey, locale string
-		offsetMinutes                                                                        int
-		enabled                                                                              bool
+		id, participantID, bodyTemplate, subjectTemplate, audience, channel, apiConfigID, templateKey, locale string
+		offsetMinutes                                                                                         int
+		enabled                                                                                               bool
 	}
 	items := []pendingNotification{}
-	rows, err := tx.Query(ctx, `SELECT n.id,COALESCE(n.visitor_visit_id,''),nr.body_template,nr.audience,nr.channel,COALESCE(nr.api_config_id,''),nr.offset_minutes,nr.template_key,nr.locale,nr.enabled
+	rows, err := tx.Query(ctx, `SELECT n.id,COALESCE(n.visitor_visit_id,''),nr.body_template,nr.subject_template,nr.audience,nr.channel,COALESCE(nr.api_config_id,''),nr.offset_minutes,nr.template_key,nr.locale,nr.enabled
 		FROM notifications n JOIN notification_rules nr ON nr.id=n.rule_id
 		WHERE n.visit_id=$1 AND ($2='' OR n.visitor_visit_id=$2) AND ($3='' OR n.rule_id=$3)
 		AND nr.event='visit_start' AND n.status IN ('queued','failed') FOR UPDATE OF n`, visitID, participantScope, ruleScope)
@@ -1033,7 +1085,7 @@ func (s *Server) refreshVisitStartNotificationsScopedTx(ctx context.Context, tx 
 	}
 	for rows.Next() {
 		var item pendingNotification
-		if err := rows.Scan(&item.id, &item.participantID, &item.bodyTemplate, &item.audience, &item.channel, &item.apiConfigID, &item.offsetMinutes, &item.templateKey, &item.locale, &item.enabled); err != nil {
+		if err := rows.Scan(&item.id, &item.participantID, &item.bodyTemplate, &item.subjectTemplate, &item.audience, &item.channel, &item.apiConfigID, &item.offsetMinutes, &item.templateKey, &item.locale, &item.enabled); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1082,9 +1134,9 @@ func (s *Server) refreshVisitStartNotificationsScopedTx(ctx context.Context, tx 
 			}
 			continue
 		}
-		recipient := notificationRecipient(item.audience, data)
+		recipient := notificationRecipient(item.audience, item.channel, data)
 		if recipient == "" {
-			if err := cancelPendingNotificationTx(ctx, tx, item.id, "수신 번호가 없습니다"); err != nil {
+			if err := cancelPendingNotificationTx(ctx, tx, item.id, "수신 번호 또는 이메일이 없습니다"); err != nil {
 				return err
 			}
 			continue
@@ -1094,6 +1146,13 @@ func (s *Server) refreshVisitStartNotificationsScopedTx(ctx context.Context, tx 
 		body, renderErr := renderNotificationTemplate(item.bodyTemplate, variables)
 		if renderErr != nil {
 			return renderErr
+		}
+		if item.channel == "email" {
+			subject, subjectErr := renderRuleSubject(item.subjectTemplate, variables)
+			if subjectErr != nil {
+				return subjectErr
+			}
+			variables["subject"] = subject
 		}
 		metadataJSON, _ := json.Marshal(variables)
 		metadataEncrypted, encryptErr := s.keys.Encrypt(string(metadataJSON))

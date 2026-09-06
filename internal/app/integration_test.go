@@ -1131,6 +1131,45 @@ func TestPersonalMailAlertsFollowPreferences(t *testing.T) {
 	}
 }
 
+func TestEmailRuleMailsVisitorWithSubject(t *testing.T) {
+	env := newTestEnv(t)
+	relay := startFakeSMTP(t)
+	env.enableSMTP(t, relay)
+	if bad := env.do(http.MethodPost, "/api/v1/admin/notification-rules", map[string]any{"name": "x", "event": "visit_confirmed", "audience": "visitor", "channel": "email", "apiConfigId": "nope", "templateKey": "mail_pass", "bodyTemplate": "hi"}); bad.Code != http.StatusBadRequest {
+		t.Fatalf("e-mail rule with an API accepted: %d", bad.Code)
+	}
+	env.json(http.MethodPost, "/api/v1/admin/notification-rules", map[string]any{
+		"name": "방문증 메일", "event": "visit_confirmed", "audience": "visitor", "channel": "email", "templateKey": "mail_pass",
+		"subjectTemplate": "[{{company}}] {{visitor}} 님 방문 안내 {{requestNo}}", "bodyTemplate": "{{visitor}} 님, {{start}} 방문 안내입니다. 방문증: {{passUrl}}",
+	}, http.StatusCreated)
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{"visitors": []map[string]any{
+		{"name": "김방문", "phone": "010-1234-5678", "email": "guest@partner.example", "company": "테스트상사", "consent": true},
+	}}), http.StatusCreated)
+	var subjectJSON string
+	if err := env.server.db.QueryRow(context.Background(), `SELECT metadata_encrypted FROM notifications WHERE channel='email' AND template_key='mail_pass'`).Scan(&subjectJSON); err != nil {
+		t.Fatalf("e-mail notification not queued: %v", err)
+	}
+	env.server.processNotifications(context.Background())
+	if relay.count() != 1 {
+		t.Fatalf("relay received %d messages, want 1", relay.count())
+	}
+	message := relay.last()
+	if !strings.Contains(message, "To: guest@partner.example") || !strings.Contains(message, "/q/vfq_") {
+		t.Fatalf("mail lacks recipient or pass link: %q", message)
+	}
+	// The subject is RFC 2047 encoded; decode-free check on a stable ASCII fragment.
+	if !strings.Contains(message, "Subject: =?utf-8?q?") || !strings.Contains(message, fmt.Sprint(created["requestNo"])) {
+		t.Fatalf("subject missing or unencoded: %q", message)
+	}
+	// A visitor without an e-mail address simply gets no mail row.
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+	var rows int
+	_ = env.server.db.QueryRow(context.Background(), `SELECT count(*) FROM notifications WHERE channel='email' AND template_key='mail_pass'`).Scan(&rows)
+	if rows != 1 {
+		t.Fatalf("expected 1 mail row, got %d", rows)
+	}
+}
+
 func TestFailedNotificationCanBeRetried(t *testing.T) {
 	env := newTestEnv(t)
 	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)

@@ -10,7 +10,7 @@ import EditOutlined from "@mui/icons-material/EditOutlined";
 import { api, postJSON, putJSON } from "../api";
 import { PageHeader } from "../components/AdminUI";
 
-type Channel = "sms" | "mms" | "kakao" | "webhook";
+type Channel = "sms" | "mms" | "kakao" | "webhook" | "email";
 type NotificationAPI = {
   id: string; name: string; channel: Channel; baseUrl: string; path: string; method: string;
   requestFormat: string; headers: Record<string, string>; parameters: Record<string, string>;
@@ -18,14 +18,15 @@ type NotificationAPI = {
 };
 type NotificationRule = {
   id: string; name: string; event: string; audience: string; channel: Channel; apiConfigId?: string;
-  apiConfigName?: string; offsetMinutes: number; templateKey: string; bodyTemplate: string; locale: string; enabled: boolean;
+  apiConfigName?: string; offsetMinutes: number; templateKey: string; bodyTemplate: string; subjectTemplate?: string; locale: string; enabled: boolean;
 };
 type APIForm = Omit<NotificationAPI, "id" | "headers" | "parameters" | "secretKeys"> & {
   id?: string; headersJSON: string; parametersJSON: string; secretKeysText: string;
 };
 type RuleForm = Omit<NotificationRule, "id" | "apiConfigName"> & { id?: string };
 
-const channelLabels: Record<Channel, string> = { sms: "SMS", mms: "MMS", kakao: "카카오톡", webhook: "외부 시스템 연동" };
+const channelLabels: Record<Channel, string> = { sms: "SMS", mms: "MMS", kakao: "카카오톡", webhook: "외부 시스템 연동", email: "이메일 (SMTP)" };
+const apiChannels = (Object.keys(channelLabels) as Channel[]).filter((c) => c !== "email");
 const eventLabels: Record<string, string> = {
   visit_confirmed: "방문 확정 시", visit_start: "방문 시작 기준", checked_in: "체크인 시",
   checked_out: "체크아웃 시", visit_cancelled: "방문 취소 시", visit_rejected: "방문 반려 시", approval_escalated: "승인 지연 시",
@@ -42,7 +43,7 @@ const emptyAPI = (): APIForm => ({
 });
 const emptyRule = (): RuleForm => ({
   name: "", event: "visit_confirmed", audience: "visitor", channel: "sms", apiConfigId: "",
-  offsetMinutes: 0, templateKey: "visitor_message", bodyTemplate: "{{visitor}}님, {{start}} 방문 안내입니다. {{passUrl}}", locale: "", enabled: true,
+  offsetMinutes: 0, templateKey: "visitor_message", bodyTemplate: "{{visitor}}님, {{start}} 방문 안내입니다. {{passUrl}}", subjectTemplate: "", locale: "", enabled: true,
 });
 
 function mapJSON(value: string, label: string): Record<string, string> {
@@ -153,7 +154,7 @@ export function NotificationSettingsPage() {
           <Button variant="contained" startIcon={<AddRounded />} onClick={() => { setError(""); setRuleForm(emptyRule()); }}>규칙 추가</Button>
         </Stack>
         <TableContainer component={Paper} variant="outlined"><Table size="small"><TableHead><TableRow><TableCell>규칙</TableCell><TableCell>시점</TableCell><TableCell>수신</TableCell><TableCell>언어</TableCell><TableCell>채널 · API</TableCell><TableCell>템플릿</TableCell><TableCell>상태</TableCell><TableCell align="right">관리</TableCell></TableRow></TableHead><TableBody>
-          {rules.map((item) => <TableRow key={item.id}><TableCell><Typography fontWeight={750} variant="body2">{item.name}</Typography></TableCell><TableCell>{eventLabels[item.event] ?? item.event}{item.offsetMinutes ? ` ${item.offsetMinutes > 0 ? "+" : ""}${item.offsetMinutes}분` : ""}</TableCell><TableCell>{audienceLabels[item.audience] ?? item.audience}</TableCell><TableCell>{localeLabels[item.locale ?? ""] ?? item.locale}</TableCell><TableCell>{channelLabels[item.channel]} · {item.apiConfigName || "기존 Adapter"}</TableCell><TableCell sx={{ fontFamily: "monospace" }}>{item.templateKey}</TableCell><TableCell><Chip size="small" color={item.enabled ? "success" : "default"} label={item.enabled ? "사용" : "중지"} /></TableCell><TableCell align="right"><Button size="small" startIcon={<EditOutlined />} onClick={() => { setError(""); setRuleForm({ ...item }); }}>수정</Button><Button size="small" color="error" startIcon={<DeleteOutlineRounded />} onClick={() => void remove("rule", item.id)}>삭제</Button></TableCell></TableRow>)}
+          {rules.map((item) => <TableRow key={item.id}><TableCell><Typography fontWeight={750} variant="body2">{item.name}</Typography></TableCell><TableCell>{eventLabels[item.event] ?? item.event}{item.offsetMinutes ? ` ${item.offsetMinutes > 0 ? "+" : ""}${item.offsetMinutes}분` : ""}</TableCell><TableCell>{audienceLabels[item.audience] ?? item.audience}</TableCell><TableCell>{localeLabels[item.locale ?? ""] ?? item.locale}</TableCell><TableCell>{channelLabels[item.channel]} · {item.channel === "email" ? "SMTP" : item.apiConfigName || "기존 Adapter"}</TableCell><TableCell sx={{ fontFamily: "monospace" }}>{item.templateKey}</TableCell><TableCell><Chip size="small" color={item.enabled ? "success" : "default"} label={item.enabled ? "사용" : "중지"} /></TableCell><TableCell align="right"><Button size="small" startIcon={<EditOutlined />} onClick={() => { setError(""); setRuleForm({ ...item }); }}>수정</Button><Button size="small" color="error" startIcon={<DeleteOutlineRounded />} onClick={() => void remove("rule", item.id)}>삭제</Button></TableCell></TableRow>)}
         </TableBody></Table></TableContainer>
       </CardContent>
     </Card>
@@ -162,7 +163,7 @@ export function NotificationSettingsPage() {
       <DialogTitle>{apiForm?.id ? "문자 API 수정" : "문자 API 추가"}</DialogTitle><DialogContent dividers>{apiForm && <Stack spacing={2} mt={1}>
         {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
         {apiForm.enabled === false && <Alert severity="warning">API를 중지하면 연결된 발송 규칙도 중지되고 아직 발송되지 않은 대기 건은 취소됩니다.</Alert>}
-        <Grid container spacing={2}><Grid size={{ xs: 12, sm: 8 }}><TextField fullWidth required label="API 이름" value={apiForm.name} onChange={(e) => setAPIForm({ ...apiForm, name: e.target.value })} /></Grid><Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth select label="채널" value={apiForm.channel} onChange={(e) => setAPIForm({ ...apiForm, channel: e.target.value as Channel })}>{Object.entries(channelLabels).map(([value, label]) => <MenuItem key={value} value={value}>{label}</MenuItem>)}</TextField></Grid>
+        <Grid container spacing={2}><Grid size={{ xs: 12, sm: 8 }}><TextField fullWidth required label="API 이름" value={apiForm.name} onChange={(e) => setAPIForm({ ...apiForm, name: e.target.value })} /></Grid><Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth select label="채널" value={apiForm.channel} onChange={(e) => setAPIForm({ ...apiForm, channel: e.target.value as Channel })}>{apiChannels.map((value) => <MenuItem key={value} value={value}>{channelLabels[value]}</MenuItem>)}</TextField></Grid>
           <Grid size={{ xs: 12, sm: 8 }}><TextField fullWidth required label="기본 URL" value={apiForm.baseUrl} onChange={(e) => setAPIForm({ ...apiForm, baseUrl: e.target.value })} placeholder="https://message.company.intra/api" /></Grid><Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth label="Path" value={apiForm.path} onChange={(e) => setAPIForm({ ...apiForm, path: e.target.value })} placeholder="/v1/send" /></Grid>
           <Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth select label="Method" value={apiForm.method} onChange={(e) => setAPIForm({ ...apiForm, method: e.target.value })}>{["GET", "POST", "PUT", "PATCH"].map((value) => <MenuItem key={value} value={value}>{value}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth select label="요청 형식" value={apiForm.requestFormat} onChange={(e) => setAPIForm({ ...apiForm, requestFormat: e.target.value })}>{["json", "form", "query"].map((value) => <MenuItem key={value} value={value}>{value}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 6, sm: 3 }}><TextField fullWidth type="number" label="Timeout (초)" value={apiForm.timeoutSeconds} onChange={(e) => setAPIForm({ ...apiForm, timeoutSeconds: Number(e.target.value) })} /></Grid><Grid size={{ xs: 6, sm: 3 }}><FormControlLabel control={<Switch checked={apiForm.enabled} onChange={(e) => setAPIForm({ ...apiForm, enabled: e.target.checked })} />} label="사용" /></Grid>
         </Grid>
@@ -179,9 +180,10 @@ export function NotificationSettingsPage() {
         {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
         <TextField required label="규칙 이름" value={ruleForm.name} onChange={(e) => setRuleForm({ ...ruleForm, name: e.target.value })} />
         <Grid container spacing={2}><Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth select label="발송 시점" value={ruleForm.event} onChange={(e) => setRuleForm({ ...ruleForm, event: e.target.value, offsetMinutes: e.target.value === "visit_start" ? ruleForm.offsetMinutes : Math.max(0, ruleForm.offsetMinutes) })}>{Object.entries(eventLabels).map(([value, label]) => <MenuItem key={value} value={value}>{label}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 6, sm: 4 }}><TextField fullWidth select label="수신 대상" value={ruleForm.audience} onChange={(e) => setRuleForm({ ...ruleForm, audience: e.target.value })}>{Object.entries(audienceLabels).map(([value, label]) => <MenuItem key={value} value={value}>{label}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 6, sm: 4 }}><TextField fullWidth type="number" label="Offset (분)" value={ruleForm.offsetMinutes} onChange={(e) => setRuleForm({ ...ruleForm, offsetMinutes: Number(e.target.value) })} helperText="방문 시작 전은 음수" /></Grid>
-          <Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth select label="채널" value={ruleForm.channel} onChange={(e) => setRuleForm({ ...ruleForm, channel: e.target.value as Channel, apiConfigId: "" })}>{Object.entries(channelLabels).map(([value, label]) => <MenuItem key={value} value={value}>{label}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth select label="방문자 언어" value={ruleForm.locale ?? ""} onChange={(e) => setRuleForm({ ...ruleForm, locale: e.target.value })} helperText="선택한 언어의 방문자에게만 발송">{Object.entries(localeLabels).map(([value, label]) => <MenuItem key={value || "all"} value={value}>{label}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth select label="호출 API" value={ruleForm.apiConfigId ?? ""} onChange={(e) => setRuleForm({ ...ruleForm, apiConfigId: e.target.value })}><MenuItem value="">기존 log/webhook Adapter</MenuItem>{availableAPIs.map((item) => <MenuItem key={item.id} value={item.id}>{item.name}{item.enabled ? "" : " (중지)"}</MenuItem>)}</TextField></Grid>
+          <Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth select label="채널" value={ruleForm.channel} onChange={(e) => setRuleForm({ ...ruleForm, channel: e.target.value as Channel, apiConfigId: "" })}>{Object.entries(channelLabels).map(([value, label]) => <MenuItem key={value} value={value}>{label}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 12, sm: 4 }}><TextField fullWidth select label="방문자 언어" value={ruleForm.locale ?? ""} onChange={(e) => setRuleForm({ ...ruleForm, locale: e.target.value })} helperText="선택한 언어의 방문자에게만 발송">{Object.entries(localeLabels).map(([value, label]) => <MenuItem key={value || "all"} value={value}>{label}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 12, sm: 4 }}>{ruleForm.channel === "email" ? <TextField fullWidth disabled label="발송 경로" value="시스템 설정의 SMTP" /> : <TextField fullWidth select label="호출 API" value={ruleForm.apiConfigId ?? ""} onChange={(e) => setRuleForm({ ...ruleForm, apiConfigId: e.target.value })}><MenuItem value="">기존 log/webhook Adapter</MenuItem>{availableAPIs.map((item) => <MenuItem key={item.id} value={item.id}>{item.name}{item.enabled ? "" : " (중지)"}</MenuItem>)}</TextField>}</Grid>
         </Grid>
         {ruleForm.audience === "system" && <Alert severity="info">외부 시스템 연동 규칙입니다. 채널을 <strong>외부 시스템 연동</strong>으로 두고 게이트·게스트 Wi-Fi 등 호출할 API를 반드시 선택하세요. 수신자 값에는 방문자 참가 ID가 전달됩니다.</Alert>}
+        {ruleForm.channel === "email" && <TextField label="메일 제목 템플릿" value={ruleForm.subjectTemplate ?? ""} onChange={(e) => setRuleForm({ ...ruleForm, subjectTemplate: e.target.value })} placeholder="[{{company}}] {{visitor}} 님 방문 안내 {{requestNo}}" helperText="비우면 '[VisitFlow] 방문 안내 {{requestNo}}'. 본문과 같은 변수를 쓸 수 있습니다. 수신자는 방문자 또는 담당자의 이메일이며 주소가 없으면 발송되지 않습니다." />}
         <TextField required label="Template Key" value={ruleForm.templateKey} onChange={(e) => setRuleForm({ ...ruleForm, templateKey: e.target.value })} helperText="알림 이력에서 식별할 영문 키" />
         <TextField required multiline minRows={5} label="메시지 본문 템플릿" value={ruleForm.bodyTemplate} onChange={(e) => setRuleForm({ ...ruleForm, bodyTemplate: e.target.value })} helperText={rulePlaceholders} />
         <FormControlLabel control={<Switch checked={ruleForm.enabled} onChange={(e) => setRuleForm({ ...ruleForm, enabled: e.target.checked })} />} label="규칙 사용" />

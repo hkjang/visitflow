@@ -137,14 +137,21 @@ func TestInjectCSPNoncePublishesMetaTag(t *testing.T) {
 
 func TestNotificationRecipientPerAudience(t *testing.T) {
 	data := notificationEventData{VisitorPhone: "010-1111-2222", HostPhone: "010-3333-4444", VisitorVisitID: "vv-1"}
-	if got := notificationRecipient("visitor", data); got != "01011112222" {
+	if got := notificationRecipient("visitor", "sms", data); got != "01011112222" {
 		t.Fatalf("visitor recipient = %q", got)
 	}
-	if got := notificationRecipient("host", data); got != "01033334444" {
+	if got := notificationRecipient("host", "sms", data); got != "01033334444" {
 		t.Fatalf("host recipient = %q", got)
 	}
-	if got := notificationRecipient("system", data); got != "vv-1" {
+	if got := notificationRecipient("system", "webhook", data); got != "vv-1" {
 		t.Fatalf("system recipient = %q, want the participant id", got)
+	}
+	data.VisitorEmail, data.HostEmail = "guest@partner.example", "host@company.intra"
+	if got := notificationRecipient("visitor", "email", data); got != "guest@partner.example" {
+		t.Fatalf("visitor e-mail recipient = %q", got)
+	}
+	if got := notificationRecipient("host", "email", data); got != "host@company.intra" {
+		t.Fatalf("host e-mail recipient = %q", got)
 	}
 }
 
