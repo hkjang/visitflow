@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1653,4 +1654,50 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// Both downloads stop at a row cap. The file is what an auditor hands over as
+// the record of a period, and it is read long after the screen that produced it
+// is gone, so a cut export that looked complete would understate the period by
+// however many rows the cap dropped.
+func TestExportsSayWhenTheRowLimitCutThemShort(t *testing.T) {
+	env := newTestEnv(t)
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+		"visitors": []map[string]any{{"name": "김방문", "phone": "010-1234-5678", "company": "첫상사", "consent": true}},
+	}), http.StatusCreated)
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{
+		"visitors": []map[string]any{{"name": "이방문", "phone": "010-9876-5432", "company": "둘상사", "consent": true}},
+	}), http.StatusCreated)
+
+	exportBody := func(path string) string {
+		t.Helper()
+		response := env.do(http.MethodGet, path, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("export %q returned %d: %s", path, response.Code, response.Body.String())
+		}
+		return response.Body.String()
+	}
+	const notice = "잘렸습니다"
+	for _, path := range []string{"/api/v1/admin/visits.csv", "/api/v1/admin/audit-logs.csv"} {
+		cut := exportBody(path + "?limit=1")
+		if !strings.Contains(cut, notice) {
+			t.Fatalf("%s dropped rows without saying so: %s", path, cut[:minInt(len(cut), 600)])
+		}
+		reader := csv.NewReader(strings.NewReader(strings.TrimPrefix(cut, "\ufeff")))
+		reader.FieldsPerRecord = -1
+		records, err := reader.ReadAll()
+		if err != nil {
+			t.Fatalf("%s is not readable CSV: %v", path, err)
+		}
+		// Header, the single row the cap allowed, and the notice.
+		if len(records) != 3 {
+			t.Fatalf("%s wrote %d rows, want the header, one row and the notice", path, len(records))
+		}
+		if last := records[2][0]; !strings.HasPrefix(last, "#") {
+			t.Fatalf("%s put the notice somewhere other than the last row: %q", path, last)
+		}
+		if full := exportBody(path); strings.Contains(full, notice) {
+			t.Fatalf("%s claimed truncation on a complete export: %s", path, full[:minInt(len(full), 600)])
+		}
+	}
 }

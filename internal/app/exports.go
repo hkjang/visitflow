@@ -49,6 +49,24 @@ func writeCSVRow(writer *csv.Writer, values []string) {
 	_ = writer.Write(cells)
 }
 
+// auditExportRowLimit and visitExportRowLimit cap one download so a wide period
+// cannot pull the whole table into one response. Both queries ask for one row
+// more than the cap so the handler can tell a full export from a cut one.
+const (
+	auditExportRowLimit = 10000
+	visitExportRowLimit = 50000
+)
+
+// writeExportTruncationNotice closes a cut-short download with a line saying so.
+// These files are read long after the screen that produced them is gone, and
+// they are handed over as the record of a period, so without the line the rows
+// the cap dropped look exactly like rows that never existed. The notice goes in
+// the file rather than a response header because the download is a plain link:
+// the operator sees the spreadsheet, never the headers.
+func writeExportTruncationNotice(writer *csv.Writer, limit int) {
+	_ = writer.Write([]string{fmt.Sprintf("# 내보내기 한도 %d행에 걸려 이후 데이터가 잘렸습니다. 기간이나 필터를 좁혀 나머지를 다시 내려받으세요.", limit)})
+}
+
 // formatTime renders with an explicit offset: the service container usually
 // runs in UTC, and a bare wall-clock time would be misread by the operator.
 func formatTime(value *time.Time) string {
@@ -76,7 +94,7 @@ func siteLocation(name string) *time.Location {
 func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit < 1 || limit > 100000 {
-		limit = 10000
+		limit = auditExportRowLimit
 	}
 	filters := parseAuditLogFilters(r)
 	rows, err := s.db.Query(r.Context(), `SELECT a.id,a.created_at,COALESCE(u.display_name,'system'),a.action,a.resource_type,COALESCE(a.resource_id,''),COALESCE(a.ip_address,''),a.details::text
@@ -85,7 +103,7 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 		AND ($3='' OR u.display_name ILIKE '%'||$3||'%' OR u.username ILIKE '%'||$3||'%')
 		AND ($4::timestamptz IS NULL OR a.created_at>=$4)
 		AND ($5::timestamptz IS NULL OR a.created_at<=$5)
-		ORDER BY a.id DESC LIMIT $2`, filters.action, limit, filters.actor, filters.from, filters.to)
+		ORDER BY a.id DESC LIMIT $2`, filters.action, limit+1, filters.actor, filters.from, filters.to)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -93,8 +111,12 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	writer := csvWriter(w, exportFilename("visitflow-audit"))
 	writeCSVRow(writer, []string{"id", "createdAt", "actor", "action", "resourceType", "resourceId", "ipAddress", "details"})
-	count := 0
+	count, truncated := 0, false
 	for rows.Next() {
+		if count >= limit {
+			truncated = true
+			break
+		}
 		var id int64
 		var createdAt time.Time
 		var actor, act, resourceType, resourceID, ip, details string
@@ -104,10 +126,15 @@ func (s *Server) exportAuditLogsCSV(w http.ResponseWriter, r *http.Request) {
 		writeCSVRow(writer, []string{strconv.FormatInt(id, 10), formatTime(&createdAt), actor, act, resourceType, resourceID, ip, details})
 		count++
 	}
+	if truncated {
+		writeExportTruncationNotice(writer, limit)
+	}
 	writer.Flush()
 	u, _ := userFrom(r)
 	details := filters.details()
 	details["count"] = count
+	details["limit"] = limit
+	details["truncated"] = truncated
 	s.audit(r.Context(), u.ID, "audit.export", "audit_log", "", clientIP(r), details)
 }
 
@@ -126,6 +153,7 @@ type visitExportFilters struct {
 	days   int
 	status string
 	search string
+	limit  int
 }
 
 func parseVisitExportFilters(r *http.Request) visitExportFilters {
@@ -140,13 +168,17 @@ func parseVisitExportFilters(r *http.Request) visitExportFilters {
 	if !visitStatuses[filters.status] {
 		filters.status = ""
 	}
+	filters.limit, _ = strconv.Atoi(r.URL.Query().Get("limit"))
+	if filters.limit < 1 || filters.limit > visitExportRowLimit {
+		filters.limit = visitExportRowLimit
+	}
 	return filters
 }
 
 // details records what the export actually covered, so the audit trail names
 // the scope instead of implying the whole period was taken.
 func (f visitExportFilters) details() map[string]any {
-	return map[string]any{"days": f.days, "status": f.status, "q": f.search}
+	return map[string]any{"days": f.days, "status": f.status, "q": f.search, "limit": f.limit}
 }
 
 func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
@@ -166,8 +198,8 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 		AND ($3='' OR v.id=$3 OR v.request_no ILIKE '%'||$3||'%' OR h.display_name ILIKE '%'||$3||'%'
 		 OR EXISTS(SELECT 1 FROM visitor_visits mvv JOIN visitors mp ON mp.id=mvv.visitor_id
 			WHERE mvv.visit_id=v.id AND (mp.company ILIKE '%'||$3||'%' OR mp.name_hash=$4 OR mp.phone_hash=$5)))
-		ORDER BY v.start_at DESC LIMIT 50000`, filters.days, filters.status, filters.search,
-		s.keys.Digest("name:"+strings.ToLower(filters.search)), s.keys.Digest("phone:"+normalizePhone(filters.search)))
+		ORDER BY v.start_at DESC LIMIT $6`, filters.days, filters.status, filters.search,
+		s.keys.Digest("name:"+strings.ToLower(filters.search)), s.keys.Digest("phone:"+normalizePhone(filters.search)), filters.limit+1)
 	if err != nil {
 		notFoundOrServer(w, err)
 		return
@@ -175,8 +207,12 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	writer := csvWriter(w, exportFilename("visitflow-visits"))
 	writeCSVRow(writer, []string{"requestNo", "startAt", "endAt", "timezone", "site", "lobby", "visitType", "host", "department", "purpose", "placeDetail", "visitStatus", "visitorStatus", "visitor", "company", "checkedInAt", "checkedOutAt", "badgeNo"})
-	count := 0
+	count, truncated := 0, false
 	for rows.Next() {
+		if count >= filters.limit {
+			truncated = true
+			break
+		}
 		var requestNo, site, timezone, lobby, visitType, host, department, purpose, place, visitStatus, participantStatus, nameEnc, company, badge string
 		var startAt, endAt time.Time
 		var maskedAt, checkedIn, checkedOut *time.Time
@@ -192,10 +228,14 @@ func (s *Server) exportVisitsCSV(w http.ResponseWriter, r *http.Request) {
 			visitStatus, participantStatus, visitor, company, formatSiteTime(checkedIn, location), formatSiteTime(checkedOut, location), badge})
 		count++
 	}
+	if truncated {
+		writeExportTruncationNotice(writer, filters.limit)
+	}
 	writer.Flush()
 	u, _ := userFrom(r)
 	details := filters.details()
 	details["count"] = count
+	details["truncated"] = truncated
 	s.audit(r.Context(), u.ID, "visit.export", "visit", "", clientIP(r), details)
 }
 
