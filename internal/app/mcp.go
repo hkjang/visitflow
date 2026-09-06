@@ -67,9 +67,22 @@ func mcpTools() []map[string]any {
 		{"name": "cancel_visit", "description": "본인이 신청한 취소 가능한 방문을 취소하고 QR을 즉시 폐기합니다. write 범위가 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"visit_id": stringProperty("방문 ID")}, "required": []string{"visit_id"}}},
 		{"name": "search_visitor_history", "description": "회사 기준 방문 이력을 조회합니다. 이름과 전화번호는 마스킹됩니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"company": stringProperty("회사명"), "months": map[string]any{"type": "integer", "minimum": 1, "maximum": 60}}, "required": []string{"company"}}},
 		{"name": "get_lobby_status", "description": "오늘 예정·현재 방문중·퇴실·미방문 집계를 조회합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
-		{"name": "get_visit_statistics", "description": "기간 방문 통계를 조회합니다. 관리자 권한이 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"days": map[string]any{"type": "integer", "minimum": 1, "maximum": 366}}}},
+		{"name": "get_visit_statistics", "description": "관리자 통계 화면과 같은 기간(사업장 시간대 기준 오늘까지 days일)의 방문 통계를 조회합니다. 관리자 권한이 필요합니다.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"days": map[string]any{"type": "integer", "minimum": 1, "maximum": 366}}}},
 	}
 }
+
+// mcpVisitStatisticsQuery counts the participants the statistics screen's
+// summary tiles count, over the same span. The tool used to filter on
+// v.start_at>=CURRENT_DATE-days, which differs from the screen twice over: the
+// session's midnight is UTC in the shipped container, so on the default
+// Asia/Seoul site it reached back nine hours past the screen's first day, and
+// the open upper bound swept in every visit booked beyond today — a visit
+// scheduled for next month was reported as part of "지난 30일". An agent asked
+// for the same figures the admin is reading has to answer with those figures.
+var mcpVisitStatisticsQuery = `WITH ` + statisticsSpanCTE + `
+	SELECT count(vv.id),count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT'))
+	FROM visits v JOIN sites si ON si.id=v.site_id JOIN visitor_visits vv ON vv.visit_id=v.id
+	WHERE ` + statisticsSpanWhere("v.start_at")
 
 func (s *Server) mcpToolCall(w http.ResponseWriter, r *http.Request, req mcpRequest) {
 	var params struct {
@@ -216,7 +229,7 @@ func (s *Server) executeMCPTool(r *http.Request, name string, args map[string]an
 		}
 		days := intArg(args, "days", 30, 1, 366)
 		var scheduled, checked int
-		err := s.db.QueryRow(r.Context(), `SELECT count(vv.id),count(vv.id) FILTER(WHERE vv.status IN ('CHECKED_IN','CHECKED_OUT')) FROM visits v JOIN visitor_visits vv ON vv.visit_id=v.id WHERE v.start_at>=CURRENT_DATE-$1::int`, days).Scan(&scheduled, &checked)
+		err := s.db.QueryRow(r.Context(), mcpVisitStatisticsQuery, days).Scan(&scheduled, &checked)
 		return map[string]any{"days": days, "scheduled": scheduled, "checkedIn": checked}, err
 	default:
 		return nil, errMCP("알 수 없는 도구입니다: " + name)
