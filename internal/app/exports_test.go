@@ -76,3 +76,48 @@ func TestParseVisitExportFiltersRejectsUnusableValues(t *testing.T) {
 		t.Fatalf("status = %q, want it dropped", filters.status)
 	}
 }
+
+// The export cap is what stands between a wide period and a response that pulls
+// the whole table, so the request must never be able to lift it above the cap.
+func TestParseVisitExportFiltersClampsTheRowLimit(t *testing.T) {
+	for query, want := range map[string]int{
+		"":             visitExportRowLimit,
+		"limit=0":      visitExportRowLimit,
+		"limit=-5":     visitExportRowLimit,
+		"limit=abc":    visitExportRowLimit,
+		"limit=999999": visitExportRowLimit,
+		"limit=25":     25,
+	} {
+		if filters := parseVisitExportFilters(httptest.NewRequest(http.MethodGet, "/admin/visits.csv?"+query, nil)); filters.limit != want {
+			t.Fatalf("parseVisitExportFilters(%q).limit = %d, want %d", query, filters.limit, want)
+		}
+	}
+	if details := parseVisitExportFilters(httptest.NewRequest(http.MethodGet, "/admin/visits.csv?limit=25", nil)).details(); details["limit"] != 25 {
+		t.Fatalf("details() = %v, want the applied row limit", details)
+	}
+}
+
+// The notice is the only thing in a downloaded file that separates "these are
+// all the rows" from "the rest was cut", so it has to survive a CSV round trip
+// as a readable last line rather than an empty tail row.
+func TestExportTruncationNoticeIsTheLastReadableRow(t *testing.T) {
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	writeCSVRow(writer, []string{"id", "value"})
+	writeExportTruncationNotice(writer, 10000)
+	writer.Flush()
+
+	reader := csv.NewReader(strings.NewReader(buffer.String()))
+	reader.FieldsPerRecord = -1
+	records, err := reader.ReadAll()
+	if err != nil {
+		t.Fatalf("read back the written rows: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("rows = %d, want the header and the notice", len(records))
+	}
+	notice := records[1][0]
+	if !strings.HasPrefix(notice, "#") || !strings.Contains(notice, "10000") {
+		t.Fatalf("notice = %q, want a commented line naming the limit", notice)
+	}
+}
