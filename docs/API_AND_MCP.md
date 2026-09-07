@@ -58,6 +58,8 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 
 임시 비밀번호 상태(`mustChangePassword`)인 세션은 `/auth/me`, `/auth/password`, `/auth/logout` 외 모든 요청에 `403 password_change_required`를 받는다.
 
+요청 본문에 엔드포인트가 받지 않는 필드가 있으면 `400 invalid_json`과 함께 문제가 된 필드 이름을 돌려준다. 응답 객체를 그대로 다시 보내면 `createdAt` 같은 읽기 전용 필드가 거부되므로, 수정 요청은 해당 엔드포인트가 정의한 필드만 담아야 한다.
+
 존재하지 않는 API 경로는 `404 endpoint_not_found`, 지원하지 않는 HTTP method는 `405 method_not_allowed`를 다른 오류와 같은 `{"error":{"code","message"}}` 형태로 반환한다. 메시지에 요청한 method와 경로가 포함되므로 클라이언트 경로 오류를 바로 확인할 수 있다.
 
 공개 엔드포인트(로그인, 모바일 방문증, QR 이미지, 셀프 사전등록)에는 IP 단위 분당 요청 한도가 적용되며 초과 시 `429`와 `Retry-After`를 반환한다. 로그인은 추가로 IP·계정별 실패 잠금이 적용된다.

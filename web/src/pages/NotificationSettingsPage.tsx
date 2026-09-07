@@ -106,7 +106,15 @@ export function NotificationSettingsPage() {
     if (!ruleForm) return;
     setSaving(true); setError("");
     try {
-      const payload = { ...ruleForm, offsetMinutes: Number(ruleForm.offsetMinutes), id: undefined, apiConfigName: undefined };
+      // Built field by field: the edit form is seeded from the server's rule,
+      // which also carries createdAt/updatedAt, and echoing those back made
+      // every edit fail on the endpoint's strict field check.
+      const payload = {
+        name: ruleForm.name, event: ruleForm.event, audience: ruleForm.audience, channel: ruleForm.channel,
+        apiConfigId: ruleForm.apiConfigId ?? "", offsetMinutes: Number(ruleForm.offsetMinutes),
+        templateKey: ruleForm.templateKey, bodyTemplate: ruleForm.bodyTemplate,
+        subjectTemplate: ruleForm.subjectTemplate ?? "", locale: ruleForm.locale ?? "", enabled: ruleForm.enabled,
+      };
       if (ruleForm.id) await putJSON(`/api/v1/admin/notification-rules/${ruleForm.id}`, payload);
       else await postJSON("/api/v1/admin/notification-rules", payload);
       setRuleForm(null); setMessage("발송 규칙을 저장했습니다."); await load();

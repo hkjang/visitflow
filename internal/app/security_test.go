@@ -271,3 +271,26 @@ func TestUnknownAPIPathsAnswerInTheErrorEnvelope(t *testing.T) {
 		t.Fatalf("SPA route returned %d: %s", page.Code, page.Body.String())
 	}
 }
+
+func TestDecodeErrorMessageNamesTheField(t *testing.T) {
+	var target struct {
+		Name string `json:"name"`
+	}
+	decode := func(body string) string {
+		request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		response := httptest.NewRecorder()
+		if decodeJSON(response, request, &target) {
+			return ""
+		}
+		return response.Body.String()
+	}
+	if got := decode(`{"name":"a","createdAt":"2026-01-01"}`); !strings.Contains(got, "createdAt") {
+		t.Fatalf("unknown field not named: %s", got)
+	}
+	if got := decode(``); !strings.Contains(got, "비어 있습니다") {
+		t.Fatalf("empty body message: %s", got)
+	}
+	if got := decode(`{"name":`); !strings.Contains(got, "요청 형식") {
+		t.Fatalf("malformed body message: %s", got)
+	}
+}

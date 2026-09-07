@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -412,10 +413,33 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(dst); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "요청 형식을 확인하세요")
+		writeError(w, http.StatusBadRequest, "invalid_json", decodeErrorMessage(err))
 		return false
 	}
 	return true
+}
+
+// decodeErrorMessage names the field a request was rejected for. The endpoints
+// refuse unknown fields on purpose, but a blanket "check the format" leaves a
+// caller that echoed a server response back into a request with nothing to go
+// on. Only the caller's own key is quoted back, never a server type.
+func decodeErrorMessage(err error) string {
+	const unknownField = "json: unknown field "
+	if index := strings.Index(err.Error(), unknownField); index >= 0 {
+		field := strings.Trim(err.Error()[index+len(unknownField):], `"`)
+		if len(field) > 64 {
+			field = field[:64]
+		}
+		return "요청에 허용되지 않는 필드가 있습니다: " + field
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return "요청 본문이 너무 큽니다"
+	}
+	if errors.Is(err, io.EOF) {
+		return "요청 본문이 비어 있습니다"
+	}
+	return "요청 형식을 확인하세요"
 }
 
 func newID() string {

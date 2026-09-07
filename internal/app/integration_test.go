@@ -1170,6 +1170,52 @@ func TestEmailRuleMailsVisitorWithSubject(t *testing.T) {
 	}
 }
 
+// The admin console seeds its edit forms from the objects these endpoints
+// return, so a response has to be acceptable as the next request. When it is
+// not, every edit fails with a generic 400 and no clue which key is at fault.
+func TestEditFormsRoundTripServerResponses(t *testing.T) {
+	env := newTestEnv(t)
+	created := env.json(http.MethodPost, "/api/v1/admin/notification-rules", map[string]any{
+		"name": "확정 안내", "event": "visit_confirmed", "audience": "visitor", "channel": "sms",
+		"templateKey": "visitor_message", "bodyTemplate": "{{visitor}}님 {{start}}",
+	}, http.StatusCreated)
+	ruleID := fmt.Sprint(created["id"])
+
+	list := env.json(http.MethodGet, "/api/v1/admin/notification-rules", nil, http.StatusOK)
+	var rule map[string]any
+	for _, item := range list["items"].([]any) {
+		if entry := item.(map[string]any); fmt.Sprint(entry["id"]) == ruleID {
+			rule = entry
+		}
+	}
+	if rule == nil {
+		t.Fatal("rule missing from the list")
+	}
+	// What the console actually sends after opening the edit dialog.
+	payload := map[string]any{
+		"name": "확정 안내 (수정)", "event": rule["event"], "audience": rule["audience"], "channel": rule["channel"],
+		"apiConfigId": "", "offsetMinutes": rule["offsetMinutes"], "templateKey": rule["templateKey"],
+		"bodyTemplate": rule["bodyTemplate"], "subjectTemplate": "", "locale": "", "enabled": rule["enabled"],
+	}
+	env.json(http.MethodPut, "/api/v1/admin/notification-rules/"+ruleID, payload, http.StatusNoContent)
+
+	// Echoing the whole response back is still refused, but the message must say
+	// which field was rejected rather than only "check the format".
+	echoed := env.do(http.MethodPut, "/api/v1/admin/notification-rules/"+ruleID, rule)
+	if echoed.Code != http.StatusBadRequest {
+		t.Fatalf("unknown fields returned %d, want 400", echoed.Code)
+	}
+	if body := echoed.Body.String(); !strings.Contains(body, "허용되지 않는 필드") || !strings.Contains(body, "createdAt") {
+		t.Fatalf("400 does not name the offending field: %s", body)
+	}
+
+	// A visit type is edited the same way and its response is the request shape,
+	// so the whole object must round-trip unchanged.
+	types := env.json(http.MethodGet, "/api/v1/admin/visit-types", nil, http.StatusOK)
+	visitType := types["items"].([]any)[0].(map[string]any)
+	env.json(http.MethodPut, "/api/v1/admin/visit-types/"+fmt.Sprint(visitType["id"]), visitType, http.StatusOK)
+}
+
 func TestFailedNotificationCanBeRetried(t *testing.T) {
 	env := newTestEnv(t)
 	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)

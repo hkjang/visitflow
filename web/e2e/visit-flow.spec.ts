@@ -140,6 +140,26 @@ test.describe("visitor lifecycle", () => {
     await expect(page.getByText(`로비${suffix}-수정`).first()).toBeVisible();
   });
 
+  // The rule editor is seeded from the server's own rule object; sending that
+  // back verbatim used to fail the endpoint's strict field check.
+  test("creates and then edits a delivery rule", async ({ page }) => {
+    await login(page);
+    await page.goto("/admin/notification-settings");
+    const name = `규칙${Date.now() % 100000}`;
+    await page.getByRole("button", { name: "규칙 추가" }).click();
+    await page.getByLabel(/^규칙 이름/).fill(name);
+    await page.getByLabel(/^Template Key/).fill("e2e_rule");
+    await page.getByLabel(/^메시지 본문 템플릿/).fill("{{visitor}}님 {{start}} 방문 안내");
+    await page.getByRole("button", { name: "저장" }).click();
+    await expect(page.getByText(name).first()).toBeVisible();
+
+    await page.getByRole("row", { name: new RegExp(name) }).getByRole("button", { name: "수정" }).click();
+    await page.getByLabel(/^규칙 이름/).fill(`${name}-수정`);
+    await page.getByRole("button", { name: "저장" }).click();
+    await expect(page.getByText("발송 규칙을 저장했습니다.")).toBeVisible();
+    await expect(page.getByText(`${name}-수정`).first()).toBeVisible();
+  });
+
   test("prints the emergency roster with the current headcount", async ({ page }) => {
     await login(page);
     await page.goto("/lobby/roster");
