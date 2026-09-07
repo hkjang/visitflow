@@ -418,8 +418,17 @@ func (s *Server) queueApproverMailTx(ctx context.Context, tx pgx.Tx, visitID, vi
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT m.id,CASE WHEN m.delegate_until>now() THEN m.delegate_user_id END FROM visits v JOIN users m ON m.department_id=v.department_id
-		WHERE v.id=$1 AND m.active AND m.role='dept_manager'`, visitID)
+	// A visit inherits its department from its host, so a host with no department
+	// leaves the visit with none. Joining on the department then matched no one
+	// and the request waited in silence: no manager could see it either, since
+	// their queue is department scoped. Fall back to the people who can approve
+	// anything — security officers and administrators.
+	rows, err := tx.Query(ctx, `SELECT m.id,CASE WHEN m.delegate_until>now() THEN m.delegate_user_id END
+		FROM visits v JOIN users m ON (
+			(v.department_id IS NOT NULL AND m.department_id=v.department_id AND m.role='dept_manager')
+			OR (v.department_id IS NULL AND m.role IN ('security','admin','super_admin'))
+		)
+		WHERE v.id=$1 AND m.active`, visitID)
 	if err != nil {
 		return err
 	}

@@ -1216,6 +1216,67 @@ func TestEditFormsRoundTripServerResponses(t *testing.T) {
 	env.json(http.MethodPut, "/api/v1/admin/visit-types/"+fmt.Sprint(visitType["id"]), visitType, http.StatusOK)
 }
 
+// A visit whose host has no department belongs to no approval queue. It must
+// still reach somebody, or it waits until an administrator happens to look.
+func TestApprovalMailReachesSomeoneWithoutADepartment(t *testing.T) {
+	env := newTestEnv(t)
+	relay := startFakeSMTP(t)
+	env.enableSMTP(t, relay)
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE users SET email='admin@test.local' WHERE username='admin'`); err != nil {
+		t.Fatalf("email: %v", err)
+	}
+	department := env.json(http.MethodPost, "/api/v1/admin/organizations", map[string]string{"name": "승인부서"}, http.StatusOK)
+	departmentID := fmt.Sprint(department["id"])
+	env.createLocalUser("mgr", RoleDeptManager, departmentID)
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE users SET email='mgr@test.local',must_change_password=false WHERE username='mgr'`); err != nil {
+		t.Fatalf("email: %v", err)
+	}
+	env.createLocalUser("hostless", RoleUser, "")
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE users SET must_change_password=false WHERE username='hostless'`); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"visit.approval_enabled": "true"}}, http.StatusOK)
+
+	host := &testEnv{server: env.server, handler: env.handler, t: t}
+	host.login("hostless", testAdminPassword)
+	host.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+	var toAdmin int
+	if err := env.server.db.QueryRow(context.Background(), `SELECT count(*) FROM notifications WHERE channel='email' AND template_key='mail_approval_pending'`).Scan(&toAdmin); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if toAdmin == 0 {
+		t.Fatal("a departmentless pending visit notified nobody who can approve it")
+	}
+
+	// A visit that does have a department still goes to that department's manager
+	// and not to every administrator.
+	if _, err := env.server.db.Exec(context.Background(), `DELETE FROM notifications WHERE channel='email'`); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	env.createLocalUser("dept-host", RoleUser, departmentID)
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE users SET must_change_password=false WHERE username='dept-host'`); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	departmentHost := &testEnv{server: env.server, handler: env.handler, t: t}
+	departmentHost.login("dept-host", testAdminPassword)
+	departmentHost.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+	rows, err := env.server.db.Query(context.Background(), `SELECT recipient_encrypted FROM notifications WHERE channel='email' AND template_key='mail_approval_pending'`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	recipients := []string{}
+	for rows.Next() {
+		var encrypted string
+		if rows.Scan(&encrypted) == nil {
+			recipients = append(recipients, env.server.decryptOptional(encrypted))
+		}
+	}
+	if len(recipients) != 1 || recipients[0] != "mgr@test.local" {
+		t.Fatalf("department visit notified %v, want only the department manager", recipients)
+	}
+}
+
 func TestFailedNotificationCanBeRetried(t *testing.T) {
 	env := newTestEnv(t)
 	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
