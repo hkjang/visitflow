@@ -100,6 +100,46 @@ test.describe("visitor lifecycle", () => {
     await expect(kiosk.getByRole("alert")).toContainText("체크인되었습니다");
   });
 
+  // Master data is saved through per-resource endpoints. Deriving those names in
+  // the client once produced /admin/lobbys and every lobby save answered 404, so
+  // this drives the real create dialogs.
+  test("registers a site, a lobby and an organization from the admin console", async ({ page }) => {
+    await login(page);
+    await page.goto("/admin/resources");
+    const suffix = String(Date.now() % 100000);
+
+    await page.getByRole("button", { name: "추가" }).nth(0).click();
+    await expect(page.getByRole("heading", { name: "사업장 추가" })).toBeVisible();
+    await page.getByLabel(/^코드/).fill(`S${suffix}`);
+    await page.getByLabel(/^이름/).fill(`사업장${suffix}`);
+    await page.getByRole("button", { name: "저장" }).click();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.getByText(`사업장${suffix}`).first()).toBeVisible();
+
+    await page.getByRole("button", { name: "추가" }).nth(1).click();
+    await expect(page.getByRole("heading", { name: "로비 추가" })).toBeVisible();
+    await page.getByLabel(/^코드/).fill(`L${suffix}`);
+    await page.getByLabel(/^이름/).fill(`로비${suffix}`);
+    await page.getByRole("button", { name: "저장" }).click();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.getByText(`로비${suffix}`).first()).toBeVisible();
+
+    await page.getByRole("button", { name: "추가" }).nth(2).click();
+    await expect(page.getByRole("heading", { name: "조직 추가" })).toBeVisible();
+    await page.getByLabel(/^이름/).fill(`조직${suffix}`);
+    await page.getByRole("button", { name: "저장" }).click();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.getByText(`조직${suffix}`).first()).toBeVisible();
+
+    // Editing an existing lobby uses the same endpoint.
+    await page.getByText(`로비${suffix}`).first().click();
+    await expect(page.getByRole("heading", { name: "로비 수정" })).toBeVisible();
+    await page.getByLabel(/^이름/).fill(`로비${suffix}-수정`);
+    await page.getByRole("button", { name: "저장" }).click();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.getByText(`로비${suffix}-수정`).first()).toBeVisible();
+  });
+
   test("prints the emergency roster with the current headcount", async ({ page }) => {
     await login(page);
     await page.goto("/lobby/roster");

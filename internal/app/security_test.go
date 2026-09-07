@@ -226,3 +226,48 @@ func TestHashedAssetsAreImmutableAndCompressed(t *testing.T) {
 		t.Fatalf("the SPA document carries a per-request nonce and must not be cached: %q", got)
 	}
 }
+
+// A call to a path that does not exist must come back in the error envelope the
+// client parses. A bare chi 404 reaches the operator as "요청 실패 (404)" with no
+// hint of which path was wrong, which is how a misspelled admin endpoint stayed
+// unexplained.
+func TestUnknownAPIPathsAnswerInTheErrorEnvelope(t *testing.T) {
+	server := NewServer(nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), fstest.MapFS{
+		"index.html": {Data: []byte("<html><head></head><body>spa</body></html>")},
+	}, "test", "test", "test")
+	handler := server.Routes()
+
+	for _, target := range []struct {
+		method, path string
+	}{
+		{http.MethodPost, "/api/v1/admin/lobbys"},
+		{http.MethodGet, "/api/v1/does-not-exist"},
+		{http.MethodPost, "/mcp/extra"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(target.method, target.path, nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s %s returned %d, want 404", target.method, target.path, response.Code)
+		}
+		if got := response.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+			t.Fatalf("%s %s answered %q, want JSON", target.method, target.path, got)
+		}
+		if body := response.Body.String(); !strings.Contains(body, "endpoint_not_found") || !strings.Contains(body, target.path) {
+			t.Fatalf("%s %s body does not name the path: %s", target.method, target.path, body)
+		}
+	}
+
+	// A known path called with the wrong verb is a 405, also in the envelope.
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/v1/version", nil))
+	if response.Code != http.StatusMethodNotAllowed || !strings.Contains(response.Body.String(), "method_not_allowed") {
+		t.Fatalf("wrong verb returned %d: %s", response.Code, response.Body.String())
+	}
+
+	// Application routes still fall through to the single-page app.
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/admin/resources", nil))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "spa") {
+		t.Fatalf("SPA route returned %d: %s", page.Code, page.Body.String())
+	}
+}

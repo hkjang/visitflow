@@ -66,7 +66,10 @@ function Resources({ setError }: { setError: (v: string) => void }) {
   const { user: me } = useAuth();
   const [ref, setRef] = useState<ReferenceData | null>(null); const [users, setUsers] = useState<Record<string, unknown>[]>([]); const [open, setOpen] = useState<"site" | "lobby" | "department" | null>(null); const [form, setForm] = useState<Record<string, string>>({});
   const load = async () => { try { const [r, u] = await Promise.all([api<ReferenceData>("/api/v1/reference-data"), api<{ items: Record<string, unknown>[] }>("/api/v1/admin/users")]); setRef(r); setUsers(u.items); } catch (e) { setError(e instanceof Error ? e.message : "기준정보를 불러오지 못했습니다"); } }; useEffect(() => { void load(); }, []);
-  const save = async () => { if (!open) return; try { const { active, ...rest } = form; await postJSON(`/api/v1/admin/${open === "department" ? "organizations" : `${open}s`}`, open === "department" ? rest : { ...rest, active: active !== "false" }); setOpen(null); setForm({}); await load(); } catch (e) { setError(e instanceof Error ? e.message : "저장하지 못했습니다"); } };
+  // Endpoint names are spelled out rather than derived from the form kind:
+  // pluralising "lobby" produced /admin/lobbys and every save 404'd.
+  const resourceEndpoints: Record<"site" | "lobby" | "department", string> = { site: "sites", lobby: "lobbies", department: "organizations" };
+  const save = async () => { if (!open) return; try { const { active, ...rest } = form; await postJSON(`/api/v1/admin/${resourceEndpoints[open]}`, open === "department" ? rest : { ...rest, active: active !== "false" }); setOpen(null); setForm({}); await load(); } catch (e) { setError(e instanceof Error ? e.message : "저장하지 못했습니다"); } };
   const updateUser = async (id: string, patch: Record<string, unknown>) => { try { await patchJSON(`/api/v1/admin/users/${id}`, patch); await load(); } catch (e) { setError(e instanceof Error ? e.message : "사용자 권한을 변경하지 못했습니다"); } };
   // Existing rows open the same dialog pre-filled; the upsert endpoints key on id.
   const editSite = (x: Record<string, unknown>) => { setForm({ id: String(x.id), code: String(x.code ?? ""), name: String(x.name ?? ""), address: String(x.address ?? ""), mapUrl: String(x.mapUrl ?? ""), timezone: String(x.timezone ?? "Asia/Seoul"), active: "true" }); setOpen("site"); };

@@ -58,6 +58,8 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 
 임시 비밀번호 상태(`mustChangePassword`)인 세션은 `/auth/me`, `/auth/password`, `/auth/logout` 외 모든 요청에 `403 password_change_required`를 받는다.
 
+존재하지 않는 API 경로는 `404 endpoint_not_found`, 지원하지 않는 HTTP method는 `405 method_not_allowed`를 다른 오류와 같은 `{"error":{"code","message"}}` 형태로 반환한다. 메시지에 요청한 method와 경로가 포함되므로 클라이언트 경로 오류를 바로 확인할 수 있다.
+
 공개 엔드포인트(로그인, 모바일 방문증, QR 이미지, 셀프 사전등록)에는 IP 단위 분당 요청 한도가 적용되며 초과 시 `429`와 `Retry-After`를 반환한다. 로그인은 추가로 IP·계정별 실패 잠금이 적용된다.
 
 운영 지표는 `GET /metrics`에서 Prometheus 형식으로 제공한다. 관리자가 `security.metrics_token`을 설정한 뒤 `Authorization: Bearer <토큰>`으로 호출해야 하며, 설정 전에는 404를 반환한다.

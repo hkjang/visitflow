@@ -64,6 +64,14 @@ func NewServer(db *pgxpool.Pool, keys *platform.Keyring, logger *slog.Logger, we
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.NotFound(s.spaHandler().ServeHTTP)
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		if isAPIPath(r.URL.Path) {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "이 경로에서 지원하지 않는 HTTP method입니다: "+r.Method)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
 	r.Use(middleware.RequestID, s.resolveClientIP, s.recoverer, s.securityHeaders, s.accessLog,
 		middleware.Compress(5, "application/json", "text/html", "text/css", "text/plain", "text/csv", "application/javascript", "text/javascript", "image/svg+xml", "application/manifest+json"))
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -322,10 +330,23 @@ func init() {
 	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 }
 
+// isAPIPath marks the paths that must never fall through to the single-page
+// app. "/mcp/anything" belongs here too: serving HTML with 200 to a client that
+// mistyped the MCP endpoint hides the mistake.
+func isAPIPath(path string) bool {
+	return strings.HasPrefix(path, "/api/") || path == "/mcp" || strings.HasPrefix(path, "/mcp/")
+}
+
 func (s *Server) spaHandler() http.Handler {
 	assets := http.FileServer(http.FS(s.webFS))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/img/") || r.URL.Path == "/mcp" || r.URL.Path == "/metrics" {
+		if isAPIPath(r.URL.Path) {
+			// Answer in the shape clients parse; a bare text 404 surfaces to the
+			// user as an opaque "요청 실패 (404)".
+			writeError(w, http.StatusNotFound, "endpoint_not_found", "요청한 API 경로가 없습니다: "+r.Method+" "+r.URL.Path)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/img/") || r.URL.Path == "/metrics" {
 			http.NotFound(w, r)
 			return
 		}
