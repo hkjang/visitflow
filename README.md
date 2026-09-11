@@ -101,7 +101,7 @@ Issuer의 표준 Discovery 문서에서 Authorization/Token/JWKS Endpoint가 자
 
 MCP Tool은 `search_visits`, `get_today_visitors`, `get_current_visitors`, `get_visit`, `create_visit`, `cancel_visit`, `search_visitor_history`, `get_lobby_status`, `get_visit_statistics`를 제공한다. 도구별 Role·Scope와 사용자/부서/사업장 범위가 REST와 동일하게 적용된다.
 
-자세한 내용은 [API 및 MCP](docs/API_AND_MCP.md), [아키텍처](docs/ARCHITECTURE.md), [관리자 가이드](docs/ADMIN_GUIDE.md)를 참고한다.
+자세한 내용은 [API 및 MCP](docs/API_AND_MCP.md), [아키텍처](docs/ARCHITECTURE.md), [사용자 가이드](docs/USER_GUIDE.md)(PDF: [USER_GUIDE.pdf](docs/USER_GUIDE.pdf)), [관리자 가이드](docs/ADMIN_GUIDE.md)(PDF: [ADMIN_GUIDE.pdf](docs/ADMIN_GUIDE.pdf))를 참고한다.
 
 ## 백업과 복구
 
@@ -127,6 +127,8 @@ VISITFLOW_TEST_DSN='postgres://visitflow:visitflow@127.0.0.1:5432/visitflow?sslm
 cd web && npx playwright install --with-deps chromium
 VISITFLOW_BASE_URL=http://127.0.0.1:8080 npm run test:e2e
 ```
+
+가이드의 화면 캡처(`docs/assets/guide/*.png`)는 버릴 수 있는 인스턴스에 데모 데이터를 넣고 `cd web && npm run screenshots`로 다시 찍는다. 대상 주소와 관리자 계정은 `VISITFLOW_SCREENSHOT_URL`, `VISITFLOW_SCREENSHOT_ADMIN`, `VISITFLOW_SCREENSHOT_PASSWORD`로만 받으며 루프백이 아닌 주소는 `VISITFLOW_SCREENSHOT_ALLOW_REMOTE=1` 없이는 거부한다. PDF는 `aidev/tools/guide/md2pdf.mjs`로 만든다.
 
 ## 릴리스
 
