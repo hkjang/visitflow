@@ -1,13 +1,18 @@
 package app
 
 import (
+	"bytes"
 	"encoding/csv"
 	"errors"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/korean"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -49,7 +54,11 @@ func readVisitorImportRows(file multipart.File, header *multipart.FileHeader) ([
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	switch ext {
 	case ".csv":
-		reader := csv.NewReader(file)
+		data, err := io.ReadAll(file)
+		if err != nil {
+			return nil, errors.New("CSV 파일을 읽을 수 없습니다")
+		}
+		reader := csv.NewReader(bytes.NewReader(decodeSpreadsheetText(data)))
 		reader.FieldsPerRecord = -1
 		reader.LazyQuotes = true
 		rows, err := reader.ReadAll()
@@ -75,6 +84,22 @@ func readVisitorImportRows(file multipart.File, header *multipart.FileHeader) ([
 	default:
 		return nil, errors.New("지원 파일 형식은 .csv와 .xlsx입니다")
 	}
+}
+
+// decodeSpreadsheetText normalises what Excel actually produces. Korean Windows
+// saves "CSV (쉼표로 분리)" in CP949, not UTF-8, so a file exported from Excel
+// arrived as mojibake and failed with "이름(name) 열이 필요합니다" even though the
+// column was there. A UTF-8 byte-order mark is stripped for the same reason.
+func decodeSpreadsheetText(data []byte) []byte {
+	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
+	if utf8.Valid(data) {
+		return data
+	}
+	decoded, err := korean.EUCKR.NewDecoder().Bytes(data)
+	if err != nil {
+		return data
+	}
+	return decoded
 }
 
 func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
