@@ -119,6 +119,15 @@ func newServerForPool(t *testing.T, pool *pgxpool.Pool) *Server {
 
 func (e *testEnv) do(method, path string, body any) *httptest.ResponseRecorder {
 	e.t.Helper()
+	return e.doWithContext(context.Background(), method, path, body)
+}
+
+// doWithContext is do with a caller-supplied request context. httptest never
+// cancels a request on its own, so a handler that only returns when the client
+// goes away — the lobby SSE stream — needs a context with a deadline or it
+// blocks the whole package until go test's timeout kills it.
+func (e *testEnv) doWithContext(ctx context.Context, method, path string, body any) *httptest.ResponseRecorder {
+	e.t.Helper()
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -127,7 +136,7 @@ func (e *testEnv) do(method, path string, body any) *httptest.ResponseRecorder {
 		}
 		reader = strings.NewReader(string(encoded))
 	}
-	request := httptest.NewRequest(method, path, reader)
+	request := httptest.NewRequest(method, path, reader).WithContext(ctx)
 	request.RemoteAddr = "10.0.0.1:5000"
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
