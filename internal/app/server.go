@@ -40,6 +40,7 @@ type Server struct {
 	events        map[chan string]struct{}
 	publicLimiter *rateLimiter
 	metrics       *serverMetrics
+	violations    *violationRecorder
 
 	limitCacheMu      sync.Mutex
 	limitCacheValue   int
@@ -60,6 +61,7 @@ func NewServer(db *pgxpool.Pool, keys *platform.Keyring, logger *slog.Logger, we
 		events:        make(map[chan string]struct{}),
 		publicLimiter: newRateLimiter(time.Minute),
 		metrics:       newServerMetrics(),
+		violations:    newViolationRecorder(),
 	}
 }
 
@@ -103,6 +105,9 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/public/registrations/{token}", s.submitPublicRegistration)
 		})
 		r.With(s.publicRateLimit("kiosk")).Post("/kiosk/enroll", s.enrollKiosk)
+		// Browsers post policy violation reports without credentials, so this
+		// stays outside the session groups; it stores a bounded list in memory.
+		r.With(s.publicRateLimit("csp-report")).Post("/tracking/csp-report", s.receiveCSPReport)
 		// Lobby endpoints authenticate with either a staff session or a kiosk
 		// device cookie, so an unattended tablet never needs a person's login.
 		r.Group(func(r chi.Router) {
@@ -216,10 +221,14 @@ func (s *Server) Routes() http.Handler {
 				r.Put("/settings", s.updateSettings)
 				r.Post("/settings/oidc/test", s.testOIDC)
 				r.Post("/settings/smtp/test", s.testSMTP)
+				r.Get("/admin/tracking/violations", s.listTrackingViolations)
+				r.Delete("/admin/tracking/violations", s.clearTrackingViolations)
+				r.Post("/admin/tracking/allow", s.allowTrackingHost)
 			})
 		})
 	})
 	r.With(s.authenticate).Post("/mcp", s.mcp)
+	r.HandleFunc(momentoProxyPrefix+"/*", s.momentoProxy)
 	r.Handle("/*", s.spaHandler())
 	return r
 }
@@ -246,13 +255,30 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 // instead of allowing every inline style. Style attributes stay allowed because
 // MUI transitions and layout primitives set them per element.
 func contentSecurityPolicy(nonce string) string {
+	return pageContentSecurityPolicy(nonce, nil, nil, nil, false)
+}
+
+// pageContentSecurityPolicy builds the page policy with extra script, connect
+// and image sources. Scripts are never opened with 'unsafe-inline': a tracking
+// snippet gets a nonce instead (tracking.go), so switching tracking off leaves
+// nothing loosened behind.
+func pageContentSecurityPolicy(nonce string, scripts, connects, images []string, report bool) string {
 	styleElem := "'self'"
 	if nonce != "" {
 		styleElem = "'self' 'nonce-" + nonce + "'"
 	}
-	return "default-src 'self'; img-src 'self' data: blob:; style-src " + styleElem +
-		"; style-src-elem " + styleElem + "; style-src-attr 'unsafe-inline'; script-src 'self'; connect-src 'self'; " +
+	scriptSrc := strings.Join(append([]string{"'self'"}, scripts...), " ")
+	connectSrc := strings.Join(append([]string{"'self'"}, connects...), " ")
+	imgSrc := strings.Join(append([]string{"'self'", "data:", "blob:"}, images...), " ")
+	policy := "default-src 'self'; img-src " + imgSrc + "; style-src " + styleElem +
+		"; style-src-elem " + styleElem + "; style-src-attr 'unsafe-inline'; script-src " + scriptSrc + "; connect-src " + connectSrc + "; " +
 		"worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	if report {
+		// While tracking is on, ask the browser to say what it refused. That
+		// report is what turns a console error into a one-click fix.
+		policy += "; report-uri " + cspReportPath
+	}
+	return policy
 }
 
 // fallbackContentSecurityPolicy is used when the nonce could not be published
@@ -376,6 +402,13 @@ func (s *Server) spaHandler() http.Handler {
 			// Without the meta tag the UI cannot nonce its runtime stylesheets,
 			// so fall back rather than serving an unstyled page.
 			w.Header().Set("Content-Security-Policy", fallbackContentSecurityPolicy())
+		} else if tracking := s.trackingConfig(r.Context()); tracking.active(r.URL.Path) {
+			// The tracking snippet and the policy that admits it are decided
+			// together, so the policy only widens on a page that carries it.
+			if withSnippet, placed := injectTrackingSnippet(document, tracking.snippet(nonce), tracking.Placement); placed {
+				document = withSnippet
+				w.Header().Set("Content-Security-Policy", trackingContentSecurityPolicy(tracking, r.URL.Path, nonce))
+			}
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
