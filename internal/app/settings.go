@@ -214,7 +214,7 @@ func validateSettingValue(key, value string) string {
 		return "암호화 키 검증 값은 변경할 수 없습니다"
 	}
 	booleans := map[string]bool{
-		"auth.local_enabled": true, "oidc.enabled": true, "oidc.auto_provision": true,
+		"auth.local_enabled": true, "oidc.enabled": true, "oidc.auto_provision": true, "oidc.auto_login": true,
 		"visit.approval_enabled": true, "visit.single_use_qr": true, "visit.company_required": true,
 		"visit.self_registration_enabled": true, "smtp.enabled": true, "smtp.skip_tls_verify": true, "auth.password_reset_enabled": true,
 	}

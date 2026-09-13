@@ -1,7 +1,8 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { CircularProgress, Box } from "@mui/material";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./auth";
+import { beginSilentSso, shouldAttemptSilentSso } from "./silentSso";
 import { AppShell } from "./components/AppShell";
 import { PasswordChangeGate } from "./components/PasswordChangeGate";
 import { LoginPage } from "./pages/LoginPage";
@@ -30,7 +31,19 @@ const RosterPage = lazy(() => import("./pages/RosterPage").then((m) => ({ defaul
 const Spinner = () => <Box sx={{ minHeight: "60vh", display: "grid", placeItems: "center" }}><CircularProgress /></Box>;
 
 function Protected() {
-  const { user } = useAuth();
+  const { user, config } = useAuth();
+  const location = useLocation();
+  // Silent SSO is tried only from here: a signed-in-elsewhere person opening a
+  // protected page goes through Keycloak with prompt=none and comes back to
+  // the same address. Visitor pages, the kiosk and the login screen never
+  // trigger it. The decision is taken once when the guard mounts, so the
+  // attempt marker written by beginSilentSso cannot flip this render into the
+  // login screen while the browser is already on its way to the provider.
+  const [silent] = useState(() => !user && shouldAttemptSilentSso(config, location));
+  useEffect(() => {
+    if (silent) beginSilentSso(location.pathname + location.search + location.hash);
+  }, [silent, location.pathname, location.search, location.hash]);
+  if (silent) return <Spinner />;
   if (!user) return <Navigate to="/login" replace />;
   // A temporary password only unlocks the change-password dialog.
   return user.mustChangePassword ? <PasswordChangeGate /> : <AppShell />;

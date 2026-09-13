@@ -39,10 +39,13 @@ func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 	companyName, _ := s.getSetting(r.Context(), "general.company_name")
 	local, _ := s.getSetting(r.Context(), "auth.local_enabled")
 	oidcEnabled, _ := s.getSetting(r.Context(), "oidc.enabled")
+	// oidcAutoLogin tells the browser whether to try a silent sign-in before it
+	// renders the login screen; the server enforces the same setting itself.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"serviceName": serviceName, "companyName": companyName,
-		"localEnabled": local == "true", "oidcEnabled": oidcEnabled == "true", "passwordResetEnabled": s.passwordResetAvailable(r.Context()),
-		"version": map[string]string{"version": s.version, "commit": s.commit, "builtAt": s.builtAt},
+		"localEnabled": local == "true", "oidcEnabled": oidcEnabled == "true", "oidcAutoLogin": oidcEnabled == "true" && s.oidcAutoLogin(r.Context()),
+		"passwordResetEnabled": s.passwordResetAvailable(r.Context()),
+		"version":              map[string]string{"version": s.version, "commit": s.commit, "builtAt": s.builtAt},
 	})
 }
 
@@ -404,25 +407,72 @@ func (s *Server) oidcStart(w http.ResponseWriter, r *http.Request) {
 	state, _ := platform.RandomToken(32)
 	nonce, _ := platform.RandomToken(24)
 	verifier := oauth2.GenerateVerifier()
-	returnTo := r.URL.Query().Get("returnTo")
-	if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-		returnTo = "/"
-	}
-	_, err = s.db.Exec(r.Context(), `INSERT INTO oidc_states(state_hash,nonce,verifier,return_to,expires_at) VALUES($1,$2,$3,$4,now()+interval '10 minutes')`, s.keys.Digest(state), nonce, verifier, returnTo)
+	returnTo := oidcReturnTo(r.URL.Query().Get("returnTo"))
+	// prompt=none asks Keycloak to answer from an existing session only and
+	// never draws a screen. It is honoured solely when the administrator turned
+	// auto-login on, so nobody can change the flow by editing the address.
+	silent := oidcSilentRequested(r, s.oidcAutoLogin(r.Context()))
+	_, err = s.db.Exec(r.Context(), `INSERT INTO oidc_states(state_hash,nonce,verifier,return_to,silent,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '10 minutes')`, s.keys.Digest(state), nonce, verifier, returnTo, silent)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "oidc_state_failed", "SSO 요청을 시작하지 못했습니다")
 		return
 	}
 	cfg := oauth2.Config{ClientID: clientID, ClientSecret: secret, Endpoint: provider.Endpoint(), RedirectURL: s.publicBaseURL(r.Context(), r) + "/api/v1/auth/oidc/callback", Scopes: s.oidcScopes(r.Context())}
-	http.Redirect(w, r, cfg.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)), http.StatusFound)
+	options := []oauth2.AuthCodeOption{oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)}
+	if silent {
+		options = append(options, oauth2.SetAuthURLParam("prompt", "none"))
+	}
+	http.Redirect(w, r, cfg.AuthCodeURL(state, options...), http.StatusFound)
 }
 
+// oidcAutoLogin reports whether the administrator allowed silent sign-in.
+func (s *Server) oidcAutoLogin(ctx context.Context) bool {
+	v, _ := s.getSetting(ctx, "oidc.auto_login")
+	return v == "true"
+}
+
+// oidcSilentRequested decides whether a start request becomes a prompt=none
+// attempt. With auto-login off the request is quietly downgraded to an ordinary
+// login rather than rejected, so an old link keeps working.
+func oidcSilentRequested(r *http.Request, autoLogin bool) bool {
+	return autoLogin && r.URL.Query().Get("prompt") == "none"
+}
+
+// oidcReturnTo accepts only a same-origin path, so the login flow cannot be
+// used as a stepping stone to another site. Anything else lands on the home
+// screen. Browsers read "/\host" as "//host", hence the backslash check.
+func oidcReturnTo(raw string) string {
+	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.ContainsAny(raw, "\\\r\n") {
+		return "/"
+	}
+	if parsed, err := url.Parse(raw); err != nil || parsed.IsAbs() || parsed.Host != "" {
+		return "/"
+	}
+	return raw
+}
+
+// silentSSOMarker is appended to the login address when a silent attempt was
+// refused. The browser never retries on a page carrying it, so the refusal is
+// remembered even if its session storage was cleared in between.
+const silentSSOMarker = "/login?sso=none"
+
 func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
+	state := r.URL.Query().Get("state")
 	if e := r.URL.Query().Get("error"); e != "" {
+		// Keycloak reports a refusal as an error parameter. For a prompt=none
+		// attempt login_required simply means "no session there", which is an
+		// ordinary answer: show the login screen, marked so it is not retried.
+		var silent bool
+		if state != "" {
+			_ = s.db.QueryRow(r.Context(), `DELETE FROM oidc_states WHERE state_hash=$1 RETURNING silent`, s.keys.Digest(state)).Scan(&silent)
+		}
+		if silent {
+			http.Redirect(w, r, silentSSOMarker, http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, "/login?error="+url.QueryEscape(e), http.StatusFound)
 		return
 	}
-	state := r.URL.Query().Get("state")
 	var nonce, verifier, returnTo string
 	err := s.db.QueryRow(r.Context(), `DELETE FROM oidc_states WHERE state_hash=$1 AND expires_at>now() RETURNING nonce,verifier,return_to`, s.keys.Digest(state)).Scan(&nonce, &verifier, &returnTo)
 	if err != nil {
@@ -506,7 +556,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r.Context(), u.ID, "auth.login", "user", u.ID, clientIP(r), map[string]string{"source": "oidc"})
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	http.Redirect(w, r, oidcReturnTo(returnTo), http.StatusFound)
 }
 
 type oidcIdentityConflict string

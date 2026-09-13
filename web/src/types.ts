@@ -35,6 +35,8 @@ export interface AuthConfig {
   companyName: string;
   localEnabled: boolean;
   oidcEnabled: boolean;
+  /** True only when SSO is on and the administrator enabled silent sign-in. */
+  oidcAutoLogin?: boolean;
   passwordResetEnabled?: boolean;
   version: VersionInfo;
 }

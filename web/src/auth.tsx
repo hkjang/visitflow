@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, postJSON, setCSRF } from "./api";
+import { clearSilentSsoState, markSignedOut } from "./silentSso";
 import type { AuthConfig, User, VersionInfo } from "./types";
 
 interface AuthState {
@@ -44,6 +45,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setPhoneMasked(me.phoneMasked ?? "");
         setVersion(me.version);
         setCSRF(me.csrfToken);
+        // A live session lifts the silent-SSO suppression left by a sign-out.
+        clearSilentSsoState();
       } catch {
         setUser(null);
         setCSRF("");
@@ -63,6 +66,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [reload],
   );
   const logout = useCallback(async () => {
+    // Recorded before the session goes away: signing the user straight back in
+    // silently would make the sign-out look broken.
+    markSignedOut();
     try {
       await api<void>("/api/v1/auth/logout", { method: "POST" });
     } finally {
