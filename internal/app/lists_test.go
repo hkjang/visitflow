@@ -1,10 +1,13 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Every list endpoint scans its rows by hand, so a column added to the query
@@ -99,19 +102,27 @@ func TestSmallEndpointsRespond(t *testing.T) {
 		t.Fatalf("openapi document: %v", spec["openapi"])
 	}
 	// Every documented path must exist on the router, or the document sends
-	// integrators to endpoints that are not there.
-	routed := env.json(http.MethodGet, "/api/v1/version", nil, http.StatusOK)
-	_ = routed
+	// integrators to endpoints that are not there. Each probe carries a
+	// deadline: the lobby SSE stream only returns once its client goes away,
+	// and httptest never goes away by itself, so without one that single path
+	// stalls the whole package until go test's timeout kills it.
+	env.json(http.MethodGet, "/api/v1/version", nil, http.StatusOK)
+	probeRequest := func(method, path string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return env.doWithContext(ctx, method, "/api/v1"+strings.ReplaceAll(strings.ReplaceAll(path, "{", "x"), "}", ""), body)
+	}
 	for path := range paths {
 		if strings.HasPrefix(path, "/img/") {
 			continue
 		}
-		probe := env.do(http.MethodGet, "/api/v1"+strings.ReplaceAll(strings.ReplaceAll(path, "{", "x"), "}", ""), nil)
+		probe := probeRequest(http.MethodGet, path, nil)
 		if probe.Code == http.StatusNotFound && strings.Contains(probe.Body.String(), "endpoint_not_found") {
 			// GET may simply not be the documented verb; only a completely
 			// unrouted path answers endpoint_not_found for every verb.
 			for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
-				again := env.do(method, "/api/v1"+strings.ReplaceAll(strings.ReplaceAll(path, "{", "x"), "}", ""), map[string]any{})
+				again := probeRequest(method, path, map[string]any{})
 				if again.Code != http.StatusNotFound || !strings.Contains(again.Body.String(), "endpoint_not_found") {
 					probe = again
 					break
