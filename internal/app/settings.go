@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/mail"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -139,6 +141,10 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "locale_not_supported", "기본 언어는 지원 언어 목록에 포함되어야 합니다")
 		return
 	}
+	if message := trackingConfigFrom(effective).validate(); message != "" {
+		writeError(w, http.StatusBadRequest, "tracking_incomplete", message)
+		return
+	}
 	maskDays, _ := strconv.Atoi(effective("privacy.mask_after_days"))
 	destroyDays, _ := strconv.Atoi(effective("privacy.destroy_after_days"))
 	if maskDays >= destroyDays {
@@ -217,6 +223,7 @@ func validateSettingValue(key, value string) string {
 		"auth.local_enabled": true, "oidc.enabled": true, "oidc.auto_provision": true, "oidc.auto_login": true,
 		"visit.approval_enabled": true, "visit.single_use_qr": true, "visit.company_required": true,
 		"visit.self_registration_enabled": true, "smtp.enabled": true, "smtp.skip_tls_verify": true, "auth.password_reset_enabled": true,
+		"tracking.enabled": true, "tracking.include_admin": true, "tracking.momento_proxy": true,
 	}
 	if booleans[key] && value != "true" && value != "false" {
 		return key + " 값은 true 또는 false여야 합니다"
@@ -290,7 +297,23 @@ func validateSettingValue(key, value string) string {
 			seen[scope] = true
 		}
 	}
-	if key == "general.base_url" || key == "oidc.issuer_url" || key == "notification.webhook_url" {
+	if key == "tracking.provider" && !slices.Contains(trackingProviders, strings.ToLower(value)) {
+		return "추적 Provider는 " + strings.Join(trackingProviders, ", ") + " 중 하나여야 합니다"
+	}
+	if key == "tracking.placement" && strings.ToLower(value) != "head" && strings.ToLower(value) != "body" {
+		return "추적 코드 위치는 head 또는 body여야 합니다"
+	}
+	if key == "tracking.custom_snippet" && len(value) > trackingMaxSnippetBytes {
+		return fmt.Sprintf("추적 코드는 %d바이트를 넘을 수 없습니다", trackingMaxSnippetBytes)
+	}
+	if key == "tracking.allowed_hosts" {
+		for _, host := range allowedHostList(value) {
+			if !strings.HasPrefix(strings.ToLower(host), "http://") && !strings.HasPrefix(strings.ToLower(host), "https://") {
+				return "허용 출처는 https://host 형태로 입력하세요: " + host
+			}
+		}
+	}
+	if key == "general.base_url" || key == "oidc.issuer_url" || key == "notification.webhook_url" || key == "tracking.momento_url" || key == "tracking.matomo_url" {
 		if value == "" {
 			return ""
 		}

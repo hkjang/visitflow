@@ -53,6 +53,7 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 - `GET|POST /api/v1/admin/notification-apis|notification-rules` 및 항목별 `PUT|DELETE`. 규칙 `channel`은 `sms|mms|kakao|webhook|email`이며 `email`은 `subjectTemplate`을 받고 `apiConfigId` 없이 SMTP로 발송한다.
 - `GET|POST /api/v1/admin/guides`, `PUT|DELETE /api/v1/admin/guides/{id}`
 - `GET|PUT /api/v1/settings`
+- `POST /api/v1/tracking/csp-report` 방문 추적이 켜진 동안 브라우저가 보내는 콘텐츠 보안 정책 위반 신고(인증 불필요, 항상 204). `GET|DELETE /api/v1/admin/tracking/violations` 차단된 출처 목록 조회·비우기, `POST /api/v1/admin/tracking/allow` `{"origin":"https://host"}`를 `tracking.allowed_hosts`에 추가. `GET|HEAD|POST /momento/*`는 Momento Provider와 같은 오리진 프록시가 켜진 경우에만 수집기로 전달되고 그 외에는 404다.
 - `GET|POST /api/v1/api-keys`
 - `PATCH /api/v1/api-keys/{keyID}` 키 이름·Scope 변경
 
