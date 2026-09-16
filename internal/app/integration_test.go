@@ -1022,8 +1022,8 @@ func TestStatisticsBreakdowns(t *testing.T) {
 func (e *testEnv) enableSMTP(t *testing.T, server *fakeSMTP) {
 	t.Helper()
 	e.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{
-		"smtp.enabled": "true", "smtp.host": "127.0.0.1", "smtp.port": fmt.Sprint(server.port()), "smtp.security": "none",
-		"smtp.username": "relay", "smtp.password": "relay-secret", "smtp.from": "VisitFlow <visitflow@test.local>",
+		"mail.enabled": "true", "mail.smtp_host": "127.0.0.1", "mail.smtp_port": fmt.Sprint(server.port()), "mail.security": "none",
+		"mail.username": "relay", "mail.password": "relay-secret", "mail.from_address": "visitflow@test.local", "mail.from_name": "VisitFlow",
 	}}, http.StatusOK)
 }
 
@@ -1109,17 +1109,21 @@ func TestPersonalMailAlertsFollowPreferences(t *testing.T) {
 	env := newTestEnv(t)
 	relay := startFakeSMTP(t)
 	env.enableSMTP(t, relay)
-	env.json(http.MethodPatch, "/api/v1/profile", map[string]any{"displayName": "admin"}, http.StatusNoContent)
-	if _, err := env.server.db.Exec(context.Background(), `UPDATE users SET email='admin@test.local' WHERE username='admin'`); err != nil {
+	// The host is a different person from the administrator filing the visit on
+	// their behalf; nobody is mailed about what they did themselves.
+	hostID := env.createLocalUser("host", RoleUser, "")
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE users SET email='host@test.local' WHERE id=$1`, hostID); err != nil {
 		t.Fatalf("email: %v", err)
 	}
-	prefs := env.json(http.MethodGet, "/api/v1/profile/notifications", nil, http.StatusOK)
+	host := &testEnv{server: env.server, handler: env.handler, t: t}
+	host.login("host", testAdminPassword)
+	prefs := host.json(http.MethodGet, "/api/v1/profile/notifications", nil, http.StatusOK)
 	if prefs["smtpEnabled"] != true || prefs["hasEmail"] != true {
 		t.Fatalf("preferences endpoint state: %v", prefs)
 	}
 	// Opt out of arrival mails, keep confirmations.
-	env.json(http.MethodPut, "/api/v1/profile/notifications", map[string]any{"emailEnabled": true, "events": map[string]bool{"checked_in": false, "visit_confirmed": true}}, http.StatusOK)
-	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+	host.json(http.MethodPut, "/api/v1/profile/notifications", map[string]any{"emailEnabled": true, "events": map[string]bool{"checked_in": false, "visit_confirmed": true}}, http.StatusOK)
+	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), map[string]any{"hostUserId": hostID}), http.StatusCreated)
 	token := passTokenFrom(t, created)
 	env.json(http.MethodPost, "/api/v1/checkins", map[string]string{"token": token}, http.StatusCreated)
 	var confirmed, arrived int
@@ -1131,12 +1135,233 @@ func TestPersonalMailAlertsFollowPreferences(t *testing.T) {
 	}
 	// The delivery worker sends the queued mail through the relay.
 	env.server.processNotifications(context.Background())
-	if relay.count() != 1 || !strings.Contains(relay.last(), "To: admin@test.local") {
+	if relay.count() != 1 || !strings.Contains(relay.last(), "To: host@test.local") {
 		t.Fatalf("worker did not deliver the mail: %d messages, last %q", relay.count(), relay.last())
 	}
 	var status string
 	if err := env.server.db.QueryRow(context.Background(), `SELECT status FROM notifications WHERE channel='email'`).Scan(&status); err != nil || status != "sent" {
 		t.Fatalf("mail notification status %q %v", status, err)
+	}
+}
+
+// mailCounts returns how many e-mail rows each mail template has queued so far.
+func mailCounts(t *testing.T, env *testEnv) map[string]int {
+	t.Helper()
+	rows, err := env.server.db.Query(context.Background(), `SELECT template_key,count(*) FROM notifications WHERE channel='email' GROUP BY template_key`)
+	if err != nil {
+		t.Fatalf("count mails: %v", err)
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var key string
+		var n int
+		if rows.Scan(&key, &n) == nil {
+			counts[key] = n
+		}
+	}
+	return counts
+}
+
+// The mail standard's noise rules: one action on a visit yields one mail per
+// person however many visitors it has, nobody hears about their own action,
+// and the administrator can silence an event kind for everyone.
+func TestMailFoldsPartiesSkipsActorAndHonoursEventSwitches(t *testing.T) {
+	env := newTestEnv(t)
+	relay := startFakeSMTP(t)
+	env.enableSMTP(t, relay)
+	department := env.json(http.MethodPost, "/api/v1/admin/organizations", map[string]string{"name": "연구소"}, http.StatusOK)
+	departmentID := fmt.Sprint(department["id"])
+	managerID := env.createLocalUser("manager", RoleDeptManager, departmentID)
+	hostID := env.createLocalUser("host", RoleUser, departmentID)
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE users SET email=username||'@test.local' WHERE id IN ($1,$2)`, managerID, hostID); err != nil {
+		t.Fatalf("email: %v", err)
+	}
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"visit.approval_enabled": "true", "mail.base_url": "https://visit.test.local"}}, http.StatusOK)
+	party := map[string]any{"visitors": []map[string]any{
+		{"name": "김방문", "phone": "010-1111-0001", "company": "테스트상사", "consent": true},
+		{"name": "이동행", "phone": "010-1111-0002", "company": "테스트상사", "consent": true},
+		{"name": "박동행", "phone": "010-1111-0003", "company": "테스트상사", "consent": true},
+	}}
+	host := &testEnv{server: env.server, handler: env.handler, t: t}
+	host.login("host", testAdminPassword)
+	manager := &testEnv{server: env.server, handler: env.handler, t: t}
+	manager.login("manager", testAdminPassword)
+
+	// A three-visitor request reaches the department manager once.
+	created := host.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), party), http.StatusCreated)
+	visitID := fmt.Sprint(created["id"])
+	if counts := mailCounts(t, env); counts["mail_approval_pending"] != 1 || len(counts) != 1 {
+		t.Fatalf("approval request mails: %v, want one approval_pending", counts)
+	}
+	// Approving touches all three participants but the host gets one mail; the
+	// manager, who approved, gets none.
+	manager.json(http.MethodPost, "/api/v1/visits/"+visitID+"/approve", map[string]string{"reason": "ok"}, http.StatusNoContent)
+	if counts := mailCounts(t, env); counts["mail_visit_confirmed"] != 1 {
+		t.Fatalf("confirmation mails after approving a party of three: %v, want 1", counts)
+	}
+	env.server.processNotifications(context.Background())
+	confirmation := ""
+	for _, message := range relay.all() {
+		if strings.Contains(message, "To: host@test.local") {
+			confirmation = message
+		}
+	}
+	if !strings.Contains(confirmation, "3") || !strings.Contains(confirmation, "https://visit.test.local/visits?q="+fmt.Sprint(created["requestNo"])) {
+		t.Fatalf("confirmation mail lacks the head count or the link: %q", confirmation)
+	}
+	// The host cancelling their own visit is not news to them.
+	host.json(http.MethodPost, "/api/v1/visits/"+visitID+"/cancel", map[string]string{}, http.StatusNoContent)
+	if counts := mailCounts(t, env); counts["mail_visit_cancelled"] != 0 {
+		t.Fatalf("host was mailed about their own cancellation: %v", counts)
+	}
+	// An administrator cancelling the host's visit is — once per visit.
+	second := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), mergeMaps(party, map[string]any{"hostUserId": hostID})), http.StatusCreated)
+	env.json(http.MethodPost, "/api/v1/visits/"+fmt.Sprint(second["id"])+"/cancel", map[string]string{}, http.StatusNoContent)
+	if counts := mailCounts(t, env); counts["mail_visit_cancelled"] != 1 {
+		t.Fatalf("cancellation mails for a party of three: %v, want 1", counts)
+	}
+	// Switching an event kind off stops just that kind.
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"mail.notify_visit_cancelled": "false"}}, http.StatusOK)
+	third := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), mergeMaps(party, map[string]any{"hostUserId": hostID})), http.StatusCreated)
+	env.json(http.MethodPost, "/api/v1/visits/"+fmt.Sprint(third["id"])+"/cancel", map[string]string{}, http.StatusNoContent)
+	if counts := mailCounts(t, env); counts["mail_visit_cancelled"] != 1 || counts["mail_approval_pending"] != 3 {
+		t.Fatalf("mails after switching cancellations off: %v, want cancelled=1 approval_pending=3", counts)
+	}
+	if bad := env.do(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"mail.notify_visit_cancelled": "maybe"}}); bad.Code != http.StatusBadRequest {
+		t.Fatalf("non-boolean event switch accepted: %d", bad.Code)
+	}
+
+	// A dead relay fails the delivery, not the request, and the attempt is on record.
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"mail.smtp_port": "1"}}, http.StatusOK)
+	fourth := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), mergeMaps(party, map[string]any{"hostUserId": hostID})), http.StatusCreated)
+	env.server.processNotifications(context.Background())
+	var status, errorText string
+	if err := env.server.db.QueryRow(context.Background(), `SELECT status,COALESCE(error,'') FROM notifications WHERE visit_id=$1 AND channel='email'`, fmt.Sprint(fourth["id"])).Scan(&status, &errorText); err != nil {
+		t.Fatalf("delivery row: %v", err)
+	}
+	if status != "failed" || errorText == "" {
+		t.Fatalf("delivery through a dead relay recorded as %q %q", status, errorText)
+	}
+	// The administrator's delivery log shows the attempt with a masked address
+	// and the reason, and never the body.
+	log := env.json(http.MethodGet, "/api/v1/admin/notifications?status=failed", nil, http.StatusOK)
+	var entry map[string]any
+	for _, item := range log["items"].([]any) {
+		if candidate := item.(map[string]any); candidate["visitId"] == fmt.Sprint(fourth["id"]) {
+			entry = candidate
+		}
+	}
+	if entry == nil || entry["recipient"] != "m******@test.local" || entry["channel"] != "email" || entry["templateKey"] != "mail_approval_pending" || !strings.Contains(fmt.Sprint(entry["error"]), "연결") || !strings.Contains(fmt.Sprint(entry["subject"]), "승인 대기") {
+		t.Fatalf("delivery log entry: %v", entry)
+	}
+	if _, leaked := entry["body"]; leaked {
+		t.Fatal("delivery log exposes the mail body")
+	}
+}
+
+func mergeMaps(base, extra map[string]any) map[string]any {
+	merged := map[string]any{}
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range extra {
+		merged[key] = value
+	}
+	return merged
+}
+
+// The relay password is write-only: the settings API shows only that one is
+// set, the export leaves it out, and the audit trail records configured/empty.
+func TestMailPasswordIsNeverReadBack(t *testing.T) {
+	env := newTestEnv(t)
+	relay := startFakeSMTP(t)
+	env.enableSMTP(t, relay)
+	list := env.json(http.MethodGet, "/api/v1/settings", nil, http.StatusOK)
+	found := false
+	for _, item := range list["items"].([]any) {
+		entry := item.(map[string]any)
+		if entry["key"] == "mail.password" {
+			found = true
+			if entry["value"] == "relay-secret" || entry["configured"] != true || entry["secret"] != true {
+				t.Fatalf("password readable through the settings list: %v", entry)
+			}
+		}
+		if strings.HasPrefix(fmt.Sprint(entry["key"]), "smtp.") {
+			t.Fatalf("legacy key still listed: %v", entry)
+		}
+	}
+	if !found {
+		t.Fatal("mail.password missing from the settings list")
+	}
+	export := env.json(http.MethodGet, "/api/v1/settings/export", nil, http.StatusOK)
+	if _, leaked := export["settings"].(map[string]any)["mail.password"]; leaked {
+		t.Fatal("export contains the relay password")
+	}
+	var details string
+	if err := env.server.db.QueryRow(context.Background(), `SELECT details::text FROM audit_logs WHERE action='settings.update' ORDER BY created_at DESC LIMIT 1`).Scan(&details); err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if strings.Contains(details, "relay-secret") {
+		t.Fatalf("audit log carries the relay password: %s", details)
+	}
+	// The saved password still reaches the relay.
+	env.json(http.MethodPost, "/api/v1/settings/smtp/test", map[string]string{"to": "ops@test.local"}, http.StatusOK)
+	relay.mu.Lock()
+	auths := relay.auths
+	relay.mu.Unlock()
+	if len(auths) == 0 || !strings.Contains(auths[0], "cmVsYXktc2VjcmV0") {
+		t.Fatalf("relay did not receive the saved password: %v", auths)
+	}
+}
+
+// A fresh installation is off with the standard defaults; an installation that
+// had pointed the old smtp.* keys at a relay keeps that relay under the new names.
+func TestMailSettingsDefaultsAndLegacyMigration(t *testing.T) {
+	env := newTestEnv(t)
+	get := func(key string) string {
+		value, err := env.server.getSetting(context.Background(), key)
+		if err != nil {
+			t.Fatalf("%s: %v", key, err)
+		}
+		return value
+	}
+	for key, want := range map[string]string{"mail.enabled": "false", "mail.smtp_port": "25", "mail.security": "auto", "mail.timeout_seconds": "10", "mail.notify_checked_in": "true", "mail.smtp_host": ""} {
+		if got := get(key); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	var legacy int
+	if err := env.server.db.QueryRow(context.Background(), `SELECT count(*) FROM settings WHERE key LIKE 'smtp.%'`).Scan(&legacy); err != nil || legacy != 0 {
+		t.Fatalf("legacy smtp.* keys remain: %d %v", legacy, err)
+	}
+
+	// Replay the migration over an installation that had a relay configured.
+	migration, err := os.ReadFile("../database/migrations/0015_mail_standard.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	secret, _ := env.server.keys.Encrypt("relay-secret")
+	if _, err := env.server.db.Exec(context.Background(), `INSERT INTO settings(key,value,secret) VALUES
+		('smtp.enabled','true',false),('smtp.host','relay.intra',false),('smtp.port','587',false),('smtp.security','starttls',false),
+		('smtp.username','relay',false),('smtp.password',$1,true),('smtp.from','VisitFlow 안내 <visitflow@company.intra>',false),('smtp.skip_tls_verify','true',false)`, secret); err != nil {
+		t.Fatalf("seed legacy keys: %v", err)
+	}
+	if _, err := env.server.db.Exec(context.Background(), string(migration)); err != nil {
+		t.Fatalf("replay migration: %v", err)
+	}
+	env.server.invalidateSettings()
+	for key, want := range map[string]string{"mail.enabled": "true", "mail.smtp_host": "relay.intra", "mail.smtp_port": "587", "mail.security": "starttls", "mail.username": "relay", "mail.password": "relay-secret", "mail.from_address": "visitflow@company.intra", "mail.from_name": "VisitFlow 안내", "mail.skip_tls_verify": "true"} {
+		if got := get(key); got != want {
+			t.Fatalf("%s = %q after migration, want %q", key, got, want)
+		}
+	}
+	if err := env.server.db.QueryRow(context.Background(), `SELECT count(*) FROM settings WHERE key LIKE 'smtp.%'`).Scan(&legacy); err != nil || legacy != 0 {
+		t.Fatalf("legacy smtp.* keys remain after migration: %d %v", legacy, err)
+	}
+	cfg, enabled := env.server.smtpConfig(context.Background())
+	if !enabled || !strings.Contains(cfg.From, "<visitflow@company.intra>") || !strings.Contains(cfg.From, "VisitFlow") {
+		t.Fatalf("migrated config: %+v %v", cfg, enabled)
 	}
 }
 

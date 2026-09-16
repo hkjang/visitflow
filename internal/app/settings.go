@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hkjang/visitflow/internal/platform"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -125,8 +126,8 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "oidc_incomplete", "SSO 활성화에는 Issuer URL, Client ID, Client Secret이 필요합니다")
 		return
 	}
-	if effective("smtp.enabled") == "true" && (effective("smtp.host") == "" || effective("smtp.from") == "") {
-		writeError(w, http.StatusBadRequest, "smtp_incomplete", "SMTP를 켜려면 서버 주소와 발신자 주소가 필요합니다")
+	if effective("mail.enabled") == "true" && (effective("mail.smtp_host") == "" || effective("mail.from_address") == "") {
+		writeError(w, http.StatusBadRequest, "smtp_incomplete", "메일을 켜려면 SMTP 릴레이 주소와 발신자 주소가 필요합니다")
 		return
 	}
 	if effective("notification.provider") == "webhook" && effective("notification.webhook_url") == "" {
@@ -222,10 +223,10 @@ func validateSettingValue(key, value string) string {
 	booleans := map[string]bool{
 		"auth.local_enabled": true, "oidc.enabled": true, "oidc.auto_provision": true, "oidc.auto_login": true,
 		"visit.approval_enabled": true, "visit.single_use_qr": true, "visit.company_required": true,
-		"visit.self_registration_enabled": true, "smtp.enabled": true, "smtp.skip_tls_verify": true, "auth.password_reset_enabled": true,
+		"visit.self_registration_enabled": true, "mail.enabled": true, "mail.skip_tls_verify": true, "auth.password_reset_enabled": true,
 		"tracking.enabled": true, "tracking.include_admin": true, "tracking.momento_proxy": true,
 	}
-	if booleans[key] && value != "true" && value != "false" {
+	if (booleans[key] || strings.HasPrefix(key, "mail.notify_")) && value != "true" && value != "false" {
 		return key + " 값은 true 또는 false여야 합니다"
 	}
 	ranges := map[string][2]int{
@@ -237,7 +238,7 @@ func validateSettingValue(key, value string) string {
 		"security.login_max_attempts": {1, 100}, "security.login_lockout_minutes": {1, 1440},
 		"security.public_rate_limit_per_minute": {1, 100000},
 		"visit.approval_escalation_hours":       {1, 8760}, "visit.self_registration_hours": {1, 720},
-		"smtp.port": {1, 65535}, "auth.password_reset_minutes": {5, 1440},
+		"mail.smtp_port": {1, 65535}, "mail.timeout_seconds": {1, 120}, "auth.password_reset_minutes": {5, 1440},
 	}
 	if bounds, ok := ranges[key]; ok {
 		n, err := strconv.Atoi(value)
@@ -270,13 +271,16 @@ func validateSettingValue(key, value string) string {
 			}
 		}
 	}
-	if key == "smtp.security" && value != "starttls" && value != "tls" && value != "none" {
-		return "SMTP 보안 방식은 starttls, tls, none 중 하나여야 합니다"
+	if key == "mail.security" && !slices.Contains(platform.SMTPSecurityModes, strings.ToLower(value)) {
+		return "SMTP 보안 방식은 " + strings.Join(platform.SMTPSecurityModes, ", ") + " 중 하나여야 합니다"
 	}
-	if key == "smtp.from" && value != "" {
-		if _, err := mail.ParseAddress(value); err != nil {
-			return "발신자 주소 형식을 확인하세요. 예: VisitFlow <visitflow@company.intra>"
+	if key == "mail.from_address" && value != "" {
+		if parsed, err := mail.ParseAddress(value); err != nil || parsed.Name != "" {
+			return "발신자 주소는 주소만 입력하세요. 예: visitflow@company.intra (이름은 발신자 이름 칸에)"
 		}
+	}
+	if key == "mail.from_name" && strings.ContainsAny(value, "\r\n<>") {
+		return "발신자 이름에는 줄바꿈이나 < > 를 쓸 수 없습니다"
 	}
 	if key == "privacy.consent_policy_version" && (value == "" || len(value) > 32) {
 		return "동의 정책 버전은 1~32자로 입력하세요"
@@ -313,7 +317,7 @@ func validateSettingValue(key, value string) string {
 			}
 		}
 	}
-	if key == "general.base_url" || key == "oidc.issuer_url" || key == "notification.webhook_url" || key == "tracking.momento_url" || key == "tracking.matomo_url" {
+	if key == "general.base_url" || key == "mail.base_url" || key == "oidc.issuer_url" || key == "notification.webhook_url" || key == "tracking.momento_url" || key == "tracking.matomo_url" {
 		if value == "" {
 			return ""
 		}

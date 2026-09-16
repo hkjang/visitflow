@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -17,21 +18,71 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// smtpConfig reads the relay settings. enabled is false when the operator has
-// not switched mail on, which every caller must treat as "do nothing quietly".
+// smtpConfig reads the relay settings, whose keys follow the company-wide mail
+// standard (mail.enabled, mail.smtp_host, ...). enabled is false when the
+// operator has not switched mail on, which every caller must treat as "do
+// nothing quietly".
 func (s *Server) smtpConfig(ctx context.Context) (platform.SMTPConfig, bool) {
-	port, _ := strconv.Atoi(settingOr(s, ctx, "smtp.port", "587"))
-	cfg := platform.SMTPConfig{
-		Host:          settingOr(s, ctx, "smtp.host", ""),
-		Port:          port,
-		Username:      settingOr(s, ctx, "smtp.username", ""),
-		Password:      settingOr(s, ctx, "smtp.password", ""),
-		From:          settingOr(s, ctx, "smtp.from", ""),
-		Security:      settingOr(s, ctx, "smtp.security", "starttls"),
-		SkipTLSVerify: settingOr(s, ctx, "smtp.skip_tls_verify", "false") == "true",
-		Timeout:       15 * time.Second,
+	port, _ := strconv.Atoi(settingOr(s, ctx, "mail.smtp_port", "25"))
+	timeout, _ := strconv.Atoi(settingOr(s, ctx, "mail.timeout_seconds", "10"))
+	if timeout < 1 || timeout > 120 {
+		timeout = 10
 	}
-	return cfg, settingOr(s, ctx, "smtp.enabled", "false") == "true"
+	cfg := platform.SMTPConfig{
+		Host:          settingOr(s, ctx, "mail.smtp_host", ""),
+		Port:          port,
+		Username:      settingOr(s, ctx, "mail.username", ""),
+		Password:      settingOr(s, ctx, "mail.password", ""),
+		From:          mailFromHeader(settingOr(s, ctx, "mail.from_address", ""), settingOr(s, ctx, "mail.from_name", "")),
+		Security:      strings.ToLower(settingOr(s, ctx, "mail.security", "auto")),
+		SkipTLSVerify: settingOr(s, ctx, "mail.skip_tls_verify", "false") == "true",
+		Timeout:       time.Duration(timeout) * time.Second,
+	}
+	return cfg, settingOr(s, ctx, "mail.enabled", "false") == "true"
+}
+
+// mailFromHeader joins the sender address and display name into one header
+// value; a name with non-ASCII characters is encoded by net/mail.
+func mailFromHeader(address, name string) string {
+	address = strings.TrimSpace(address)
+	name = strings.TrimSpace(name)
+	if address == "" {
+		return ""
+	}
+	parsed, err := mail.ParseAddress(address)
+	if err != nil {
+		return address
+	}
+	if name != "" {
+		parsed.Name = name
+	}
+	return parsed.String()
+}
+
+// mailBaseURL is the address links inside mail point at. mail.base_url wins so
+// mail can name the address people reach from their desks even when the
+// service's own base URL is a gateway; it falls back to the general base URL
+// and, when a request is at hand, to the address the request came in on.
+func (s *Server) mailBaseURL(ctx context.Context, r *http.Request) string {
+	if base := strings.TrimRight(strings.TrimSpace(settingOr(s, ctx, "mail.base_url", "")), "/"); base != "" {
+		return base
+	}
+	return s.publicBaseURL(ctx, r)
+}
+
+// mailEventEnabled is the administrator's per-event switch (mail.notify_<event>).
+// A missing key counts as on, matching the shipped defaults.
+func (s *Server) mailEventEnabled(ctx context.Context, event string) bool {
+	return settingOr(s, ctx, "mail.notify_"+event, "true") == "true"
+}
+
+// mailActorID names the signed-in user behind ctx, or "" for background work.
+// Nobody is mailed about what they just did themselves.
+func mailActorID(ctx context.Context) string {
+	if u, ok := ctx.Value(userContextKey).(User); ok {
+		return u.ID
+	}
+	return ""
 }
 
 func maskEmail(value string) string {
@@ -61,11 +112,15 @@ func (s *Server) testSMTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	company := settingOr(s, r.Context(), "general.company_name", "VisitFlow")
+	sender := cfg.From
+	if parsed, err := mail.ParseAddress(cfg.From); err == nil {
+		sender = strings.TrimSpace(parsed.Name + " <" + parsed.Address + ">")
+	}
 	started := time.Now()
 	err := platform.SendMail(r.Context(), cfg, platform.Mail{
 		To:      []string{strings.TrimSpace(in.To)},
 		Subject: "[VisitFlow] SMTP 연결 테스트",
-		Body:    fmt.Sprintf("%s VisitFlow에서 보낸 SMTP 테스트 메일입니다.\n\n서버 %s:%d · 보안 %s · 발신 %s\n시각 %s", company, cfg.Host, cfg.Port, cfg.Security, cfg.From, time.Now().Format("2006-01-02 15:04:05")),
+		Body:    fmt.Sprintf("%s VisitFlow에서 보낸 SMTP 시험 메일입니다.\n\n릴레이 %s:%d · 보안 %s · 발신 %s\n시각 %s", company, cfg.Host, cfg.Port, cfg.Security, sender, time.Now().Format("2006-01-02 15:04:05")),
 	})
 	u, _ := userFrom(r)
 	result := map[string]any{"ok": err == nil, "durationMs": time.Since(started).Milliseconds(), "enabled": enabled, "to": maskEmail(strings.TrimSpace(in.To))}
@@ -111,7 +166,7 @@ func (s *Server) issuePasswordReset(ctx context.Context, r *http.Request, userID
 		return false, err
 	}
 	cfg, _ := s.smtpConfig(ctx)
-	link := strings.TrimRight(s.publicBaseURL(ctx, r), "/") + "/reset-password/" + token
+	link := strings.TrimRight(s.mailBaseURL(ctx, r), "/") + "/reset-password/" + token
 	company := settingOr(s, ctx, "general.company_name", "VisitFlow")
 	body := fmt.Sprintf("%s 님,\n\n%s VisitFlow 비밀번호 재설정 요청이 접수되었습니다. 아래 링크에서 새 비밀번호를 설정하세요.\n\n%s\n\n이 링크는 %d분 동안 한 번만 사용할 수 있습니다. 본인이 요청하지 않았다면 이 메일을 무시하세요. 기존 비밀번호는 바뀌지 않습니다.\n",
 		displayName, company, link, minutes)
@@ -336,14 +391,75 @@ var mailSubjects = map[string]string{
 	"approval_escalated": "[VisitFlow] 승인 지연 방문 {{requestNo}}",
 }
 
+// Visit-level events describe the whole party, so a visit with five visitors
+// produces one mail naming the primary visitor and the head count, not five.
 var mailBodies = map[string]string{
 	"checked_in":         "{{visitor}} ({{visitorCompany}}) 님이 {{checkedIn}}에 {{lobby}}에 도착해 입실했습니다.\n방문 {{requestNo}} · {{place}} · {{start}}~{{end}}",
 	"checked_out":        "{{visitor}} ({{visitorCompany}}) 님이 {{checkedOut}}에 퇴실했습니다.\n방문 {{requestNo}} · {{place}}",
-	"visit_confirmed":    "{{visitor}} ({{visitorCompany}}) 님의 방문이 확정되었습니다.\n일시 {{start}}~{{end}} · 장소 {{place}} · 방문번호 {{requestNo}}\n방문자에게 모바일 방문증이 발송됩니다.",
-	"visit_rejected":     "{{visitor}} ({{visitorCompany}}) 님의 방문 {{requestNo}} 이(가) 반려되었습니다.\n일시 {{start}}~{{end}} · 장소 {{place}}\n반려 사유는 내 방문 일정에서 확인하세요.",
-	"visit_cancelled":    "{{visitor}} ({{visitorCompany}}) 님의 방문 {{requestNo}} 이(가) 취소되었습니다.\n일시 {{start}}~{{end}} · 장소 {{place}}",
-	"approval_pending":   "{{host}} 담당 방문 {{requestNo}} 이(가) 승인을 기다립니다.\n방문자 {{visitor}} ({{visitorCompany}}) · 일시 {{start}}~{{end}} · 장소 {{place}}\n방문 승인 화면에서 검토하세요.",
-	"approval_escalated": "방문 {{requestNo}} 이(가) 설정된 시간 안에 승인되지 않았습니다.\n방문자 {{visitor}} ({{visitorCompany}}) · 담당 {{host}} · 일시 {{start}}~{{end}}\n방문 승인 화면에서 처리하세요.",
+	"visit_confirmed":    "{{visitor}} ({{visitorCompany}}) 님의 방문이 확정되었습니다.\n일시 {{start}}~{{end}} · 장소 {{place}} · 방문번호 {{requestNo}} · 방문자 {{visitorCount}}명\n방문자에게 모바일 방문증이 발송됩니다.",
+	"visit_rejected":     "{{visitor}} ({{visitorCompany}}) 님의 방문 {{requestNo}} 이(가) 반려되었습니다.\n일시 {{start}}~{{end}} · 장소 {{place}} · 방문자 {{visitorCount}}명\n반려 사유는 내 방문 일정에서 확인하세요.",
+	"visit_cancelled":    "{{visitor}} ({{visitorCompany}}) 님의 방문 {{requestNo}} 이(가) 취소되었습니다.\n일시 {{start}}~{{end}} · 장소 {{place}} · 방문자 {{visitorCount}}명",
+	"approval_pending":   "{{host}} 담당 방문 {{requestNo}} 이(가) 승인을 기다립니다.\n방문자 {{visitor}} ({{visitorCompany}}){{party}} · 일시 {{start}}~{{end}} · 장소 {{place}}\n방문 승인 화면에서 검토하세요.",
+	"approval_escalated": "방문 {{requestNo}} 이(가) 설정된 시간 안에 승인되지 않았습니다.\n방문자 {{visitor}} ({{visitorCompany}}){{party}} · 담당 {{host}} · 일시 {{start}}~{{end}}\n방문 승인 화면에서 처리하세요.",
+}
+
+// mailPerVisitEvents are the events that concern a visit as a whole. One
+// action on a visit (approve, reject, cancel) touches every participant, and
+// each participant queues the event; without folding them the host would get
+// one mail per visitor for a single decision. Arrivals and departures stay per
+// person because each scan is its own moment.
+var mailPerVisitEvents = map[string]bool{"visit_confirmed": true, "visit_rejected": true, "visit_cancelled": true, "approval_pending": true, "approval_escalated": true}
+
+// mailLinkPath is where the recipient acts on each event.
+func mailLinkPath(event, requestNo string) string {
+	switch event {
+	case "approval_pending", "approval_escalated":
+		return "/approvals"
+	default:
+		return "/visits?q=" + url.QueryEscape(requestNo)
+	}
+}
+
+// mailAlreadyQueuedTx reports whether the same recipient was already queued the
+// same visit-level event for this visit a moment ago — in this transaction or a
+// double-clicked one — so a party of five yields one mail.
+func (s *Server) mailAlreadyQueuedTx(ctx context.Context, tx pgx.Tx, visitID, event, recipient string) (bool, error) {
+	rows, err := tx.Query(ctx, `SELECT recipient_encrypted FROM notifications WHERE visit_id=$1 AND channel='email' AND template_key=$2 AND created_at>=now()-interval '1 minute'`, visitID, "mail_"+event)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var encrypted string
+		if rows.Scan(&encrypted) == nil && strings.EqualFold(s.decryptOptional(encrypted), recipient) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// mailVariablesTx extends the notification variables with what the mail
+// templates add: the party size and a link back into the app.
+func (s *Server) mailVariablesTx(ctx context.Context, tx pgx.Tx, visitID, event string, variables map[string]string) map[string]string {
+	extended := make(map[string]string, len(variables)+3)
+	for key, value := range variables {
+		extended[key] = value
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM visitor_visits WHERE visit_id=$1`, visitID).Scan(&count); err != nil || count < 1 {
+		count = 1
+	}
+	extended["visitorCount"] = strconv.Itoa(count)
+	// "외 N명" after the primary visitor, or nothing for a party of one.
+	extended["party"] = ""
+	if count > 1 {
+		extended["party"] = fmt.Sprintf(" 외 %d명", count-1)
+	}
+	extended["link"] = ""
+	if base := s.mailBaseURL(ctx, nil); base != "" {
+		extended["link"] = base + mailLinkPath(event, variables["requestNo"])
+	}
+	return extended
 }
 
 // queueMailTx enqueues one e-mail into the notification queue with channel
@@ -351,6 +467,9 @@ var mailBodies = map[string]string{
 func (s *Server) queueMailTx(ctx context.Context, tx pgx.Tx, visitID, visitorVisitID, event, recipient string, variables map[string]string) error {
 	subject := renderTemplate(mailSubjects[event], variables)
 	body := renderTemplate(mailBodies[event], variables)
+	if link := variables["link"]; link != "" {
+		body += "\n\n" + link
+	}
 	company := settingOr(s, ctx, "general.company_name", "")
 	if company != "" {
 		body += "\n\n— " + company + " VisitFlow"
@@ -380,7 +499,7 @@ func (s *Server) queueHostMailTx(ctx context.Context, tx pgx.Tx, data notificati
 	if _, enabled := s.smtpConfig(ctx); !enabled {
 		return nil
 	}
-	if _, known := mailSubjects[event]; !known || event == "approval_pending" {
+	if _, known := mailSubjects[event]; !known || event == "approval_pending" || !s.mailEventEnabled(ctx, event) {
 		return nil
 	}
 	var hostID string
@@ -388,18 +507,38 @@ func (s *Server) queueHostMailTx(ctx context.Context, tx pgx.Tx, data notificati
 	if err := tx.QueryRow(ctx, `SELECT h.id,CASE WHEN h.delegate_until>now() THEN h.delegate_user_id END FROM visits v JOIN users h ON h.id=v.host_user_id WHERE v.id=$1`, data.VisitID).Scan(&hostID, &delegateID); err != nil {
 		return err
 	}
-	variables := data.variables(eventAt)
 	recipients := []string{hostID}
 	if delegateID != nil && *delegateID != "" {
 		recipients = append(recipients, *delegateID)
 	}
+	return s.queueMailToUsersTx(ctx, tx, data, event, recipients, data.variables(eventAt))
+}
+
+// queueMailToUsersTx mails each user who wants the event, leaving out whoever
+// performed the action and anyone this visit already mailed for the same
+// visit-level event a moment ago.
+func (s *Server) queueMailToUsersTx(ctx context.Context, tx pgx.Tx, data notificationEventData, event string, userIDs []string, variables map[string]string) error {
+	actor := mailActorID(ctx)
+	variables = s.mailVariablesTx(ctx, tx, data.VisitID, event, variables)
 	seen := map[string]bool{}
-	for _, userID := range recipients {
-		email, wanted := s.mailRecipientTx(ctx, tx, userID, event)
-		if !wanted || seen[email] {
+	for _, userID := range userIDs {
+		if userID == actor {
 			continue
 		}
-		seen[email] = true
+		email, wanted := s.mailRecipientTx(ctx, tx, userID, event)
+		if !wanted || seen[strings.ToLower(email)] {
+			continue
+		}
+		seen[strings.ToLower(email)] = true
+		if mailPerVisitEvents[event] {
+			queued, err := s.mailAlreadyQueuedTx(ctx, tx, data.VisitID, event, email)
+			if err != nil {
+				return err
+			}
+			if queued {
+				continue
+			}
+		}
 		if err := s.queueMailTx(ctx, tx, data.VisitID, data.VisitorVisitID, event, email, variables); err != nil {
 			return err
 		}
@@ -411,7 +550,7 @@ func (s *Server) queueHostMailTx(ctx context.Context, tx pgx.Tx, data notificati
 // delegates) that a visit is waiting; security and administrators are not
 // spammed by default because they see the queue on their dashboard.
 func (s *Server) queueApproverMailTx(ctx context.Context, tx pgx.Tx, visitID, visitorVisitID string, eventAt time.Time) error {
-	if _, enabled := s.smtpConfig(ctx); !enabled {
+	if _, enabled := s.smtpConfig(ctx); !enabled || !s.mailEventEnabled(ctx, "approval_pending") {
 		return nil
 	}
 	data, err := s.notificationEventDataTx(ctx, tx, visitID, visitorVisitID)
@@ -444,19 +583,7 @@ func (s *Server) queueApproverMailTx(ctx context.Context, tx pgx.Tx, visitID, vi
 		}
 	}
 	rows.Close()
-	variables := data.variables(eventAt)
-	seen := map[string]bool{}
-	for _, userID := range ids {
-		email, wanted := s.mailRecipientTx(ctx, tx, userID, "approval_pending")
-		if !wanted || seen[email] {
-			continue
-		}
-		seen[email] = true
-		if err := s.queueMailTx(ctx, tx, visitID, visitorVisitID, "approval_pending", email, variables); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.queueMailToUsersTx(ctx, tx, data, "approval_pending", ids, data.variables(eventAt))
 }
 
 // sendQueuedMail is the worker-side delivery for channel "email".
