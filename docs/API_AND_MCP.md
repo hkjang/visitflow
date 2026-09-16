@@ -19,7 +19,7 @@ Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
 ## REST 대표 경로
 
 - `POST /api/v1/visits` 단일·단체 방문 신청
-- `POST /api/v1/visits/import/preview` CSV/XLSX 방문자 가져오기 검증
+- `POST /api/v1/visits/import/preview` CSV/XLSX 방문자 가져오기 검증. 첫 시트의 앞 10행 안에서 `이름`·`휴대전화` 열이 있는 행을 헤더로 삼고, `개인정보동의` 열은 `y/yes/true/1/O/✓/동의/예/네/확인` 같은 긍정 표기를 동의로 읽는다. 경고의 행 번호는 엑셀에서 보이는 행 번호다.
 - `GET /api/v1/visits` 사용자/부서/사업장 범위 방문 검색. `limit`과 `cursor`로 페이지를 넘기고 응답의 `nextCursor`·`hasMore`로 다음 페이지를 판단한다. `q`는 방문번호·담당자와 함께 동행자를 포함한 모든 방문자의 회사·이름·전화로 방문을 찾으며, 한 명만 검색어에 걸려도 `visitorCount`와 `primaryVisitor`는 그 방문의 참가자 전원을 기준으로 돌려준다.
 - `POST /api/v1/visits/{id}/approve|reject|cancel`, `POST /api/v1/visits/{id}/cancel-series` 이 회차부터 반복 일정 취소
 - `POST /api/v1/visitor-visits/{id}/cancel` 단체 방문의 방문자 개별 취소

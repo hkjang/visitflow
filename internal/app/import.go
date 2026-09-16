@@ -102,35 +102,90 @@ func decodeSpreadsheetText(data []byte) []byte {
 	return decoded
 }
 
+// importHeaderAliases maps the column names people actually type, lower-cased
+// with spaces, underscores and hyphens removed, onto the visitor fields.
+var importHeaderAliases = map[string]string{
+	"name": "name", "이름": "name", "방문자이름": "name", "성명": "name",
+	"phone": "phone", "mobile": "phone", "휴대전화": "phone", "전화번호": "phone", "휴대폰": "phone", "연락처": "phone",
+	"email": "email", "이메일": "email",
+	"company": "company", "회사": "company", "회사명": "company",
+	"title": "title", "직책": "title",
+	"vehicle": "vehicle", "차량번호": "vehicle",
+	"equipment": "equipment", "반입장비": "equipment",
+	"consent": "consent", "개인정보동의": "consent", "동의": "consent",
+	"locale": "locale", "언어": "locale", "language": "locale",
+}
+
+// importHeaderScanLimit bounds how far down a sheet the header row is looked
+// for, so a title line or two above the table does not reject the whole file.
+const importHeaderScanLimit = 10
+
+// importHeaders reads one row as the header line and returns the column index
+// of every recognised field.
+func importHeaders(row []string) map[string]int {
+	headers := map[string]int{}
+	for index, raw := range row {
+		key := strings.TrimPrefix(strings.TrimSpace(raw), "\ufeff")
+		key = strings.ToLower(strings.NewReplacer(" ", "", "_", "", "-", "").Replace(key))
+		if canonical := importHeaderAliases[key]; canonical != "" {
+			headers[canonical] = index
+		}
+	}
+	return headers
+}
+
+// importHeaderRow finds the row that carries both required columns. Sheets
+// exported from a shared template often start with a title or a blank line, so
+// the first row is not always the header. When no row within the scan limit
+// qualifies the first row is returned so the caller reports which column is
+// missing from it.
+func importHeaderRow(rows [][]string) (int, map[string]int) {
+	for index, row := range rows {
+		if index >= importHeaderScanLimit {
+			break
+		}
+		headers := importHeaders(row)
+		if _, hasName := headers["name"]; !hasName {
+			continue
+		}
+		if _, hasPhone := headers["phone"]; !hasPhone {
+			continue
+		}
+		return index, headers
+	}
+	return 0, importHeaders(rows[0])
+}
+
+// importConsent reads the consent column the way people fill it in: an English
+// yes, a Korean 예/동의, or the O/V/✓ marks Excel users put in a check column.
+func importConsent(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimRight(value, ".!。")
+	switch value {
+	case "y", "yes", "true", "t", "1", "o", "ok", "v", "✓", "✔", "☑", "○", "◯", "ㅇ",
+		"동의", "동의함", "동의합니다", "동의완료", "예", "네", "확인", "완료", "체크", "있음", "함", "수집동의", "개인정보동의":
+		return true
+	}
+	return false
+}
+
 func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 	if len(rows) < 2 {
 		return nil, nil, errors.New("헤더와 방문자 데이터가 필요합니다")
 	}
-	headers := map[string]int{}
-	aliases := map[string]string{
-		"name": "name", "이름": "name", "방문자이름": "name",
-		"phone": "phone", "mobile": "phone", "휴대전화": "phone", "전화번호": "phone",
-		"email": "email", "이메일": "email",
-		"company": "company", "회사": "company", "회사명": "company",
-		"title": "title", "직책": "title",
-		"vehicle": "vehicle", "차량번호": "vehicle",
-		"equipment": "equipment", "반입장비": "equipment",
-		"consent": "consent", "개인정보동의": "consent", "동의": "consent",
-		"locale": "locale", "언어": "locale", "language": "locale",
-	}
-	for index, raw := range rows[0] {
-		key := strings.TrimPrefix(strings.TrimSpace(raw), "\ufeff")
-		key = strings.ToLower(strings.NewReplacer(" ", "", "_", "", "-", "").Replace(key))
-		if canonical := aliases[key]; canonical != "" {
-			headers[canonical] = index
-		}
-	}
+	headerRow, headers := importHeaderRow(rows)
 	if _, ok := headers["name"]; !ok {
 		return nil, nil, errors.New("이름(name) 열이 필요합니다")
 	}
 	if _, ok := headers["phone"]; !ok {
 		return nil, nil, errors.New("휴대전화(phone) 열이 필요합니다")
 	}
+	if len(rows) <= headerRow+1 {
+		return nil, nil, errors.New("헤더와 방문자 데이터가 필요합니다")
+	}
+	// Warnings quote the row number the requester sees in Excel: the header is
+	// row headerRow+1 and the first visitor is the row after it.
+	rowNumber := func(rowIndex int) string { return strconv.Itoa(headerRow + rowIndex + 2) }
 	cell := func(row []string, key string) string {
 		index, ok := headers[key]
 		if !ok || index >= len(row) {
@@ -138,9 +193,9 @@ func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 		}
 		return strings.TrimSpace(row[index])
 	}
-	visitors := make([]VisitorInput, 0, len(rows)-1)
+	visitors := make([]VisitorInput, 0, len(rows)-headerRow-1)
 	warnings := []string{}
-	for rowIndex, row := range rows[1:] {
+	for rowIndex, row := range rows[headerRow+1:] {
 		name, phone := cell(row, "name"), cell(row, "phone")
 		if name == "" && phone == "" {
 			continue
@@ -148,13 +203,12 @@ func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 		if len(visitors) >= 100 {
 			return nil, nil, errors.New("한 번에 최대 100명의 방문자를 가져올 수 있습니다")
 		}
-		consentValue := strings.ToLower(cell(row, "consent"))
-		consent := consentValue == "y" || consentValue == "yes" || consentValue == "true" || consentValue == "1" || consentValue == "동의"
+		consent := importConsent(cell(row, "consent"))
 		if name == "" || len(normalizePhone(phone)) < 7 {
-			warnings = append(warnings, "행 "+strconv.Itoa(rowIndex+2)+": 이름 또는 휴대전화를 확인하세요")
+			warnings = append(warnings, "행 "+rowNumber(rowIndex)+": 이름 또는 휴대전화를 확인하세요")
 		}
 		if !consent {
-			warnings = append(warnings, "행 "+strconv.Itoa(rowIndex+2)+": 개인정보 동의 확인이 필요합니다")
+			warnings = append(warnings, "행 "+rowNumber(rowIndex)+": 개인정보 동의 확인이 필요합니다")
 		}
 		equipmentText := cell(row, "equipment")
 		equipment := []string{}
