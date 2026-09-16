@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -151,5 +152,87 @@ func TestVisitorImportAcceptsExcelExports(t *testing.T) {
 	var stored int
 	if err := env.server.db.QueryRow(context.Background(), `SELECT count(*) FROM visitors WHERE company='ABC테크'`).Scan(&stored); err != nil || stored != 1 {
 		t.Fatalf("company not stored as typed: %d %v", stored, err)
+	}
+}
+
+func TestImportConsentReadsKoreanAndCheckMarks(t *testing.T) {
+	for _, value := range []string{"y", "Yes", " TRUE ", "1", "O", "o", "ok", "V", "✓", "✔", "○", "ㅇ", "동의", "동의함", "동의합니다.", "예", "네", "확인", "완료", "체크", "있음"} {
+		if !importConsent(value) {
+			t.Errorf("%q should count as consent", value)
+		}
+	}
+	for _, value := range []string{"", "n", "no", "false", "0", "x", "X", "아니오", "미동의", "동의안함", "거부", "-", "?", "보류"} {
+		if importConsent(value) {
+			t.Errorf("%q must not count as consent", value)
+		}
+	}
+	// End to end through the parser: a sheet where the whole column is 예/O used
+	// to raise one consent warning per visitor.
+	visitors, warnings, err := visitorInputsFromRows([][]string{
+		{"이름", "휴대전화", "개인정보동의"},
+		{"홍길동", "010-1111-2222", "예"},
+		{"김철수", "010-3333-4444", "O"},
+		{"이영희", "010-5555-6666", "미동의"},
+	})
+	if err != nil || len(visitors) != 3 {
+		t.Fatalf("parse: %v %v", visitors, err)
+	}
+	if !visitors[0].Consent || !visitors[1].Consent || visitors[2].Consent {
+		t.Fatalf("consent flags: %v", visitors)
+	}
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "행 4:") {
+		t.Fatalf("expected one warning for row 4, got %v", warnings)
+	}
+}
+
+func TestImportFindsHeaderBelowTitleRows(t *testing.T) {
+	// A template with a title, a blank line, then the real header. The row
+	// numbers in warnings still match what the requester sees in Excel.
+	rows := [][]string{
+		{"2026년 9월 협력사 방문 명단"},
+		{},
+		{"이름", "휴대전화", "회사명", "개인정보동의"},
+		{"홍길동", "010-1111-2222", "ABC", "동의"},
+		{"김철수", "12", "ABC", "동의"},
+		{"", "", "", ""},
+		{"이영희", "010-5555-6666", "ABC", ""},
+	}
+	visitors, warnings, err := visitorInputsFromRows(rows)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(visitors) != 3 || visitors[0].Name != "홍길동" || visitors[0].Company != "ABC" || visitors[2].Name != "이영희" {
+		t.Fatalf("visitors: %v", visitors)
+	}
+	if len(warnings) != 2 || !strings.HasPrefix(warnings[0], "행 5:") || !strings.HasPrefix(warnings[1], "행 7:") {
+		t.Fatalf("warnings should quote Excel rows 5 and 7, got %v", warnings)
+	}
+
+	// The first row that has both required columns wins, so a normal sheet
+	// still reads its first row as the header and numbers rows from 2.
+	_, warnings, err = visitorInputsFromRows([][]string{{"이름", "휴대전화"}, {"홍길동", "1"}})
+	if err != nil || len(warnings) != 2 || !strings.HasPrefix(warnings[0], "행 2:") {
+		t.Fatalf("plain sheet: %v %v", warnings, err)
+	}
+
+	// A header found only after the scan limit is not used, and the rejection
+	// still names the column missing from the first row.
+	deep := make([][]string, 0, importHeaderScanLimit+2)
+	for i := 0; i < importHeaderScanLimit; i++ {
+		deep = append(deep, []string{"제목 " + strconv.Itoa(i)})
+	}
+	deep = append(deep, []string{"이름", "휴대전화"}, []string{"홍길동", "010-1111-2222"})
+	if _, _, err := visitorInputsFromRows(deep); err == nil || !strings.Contains(err.Error(), "이름(name)") {
+		t.Fatalf("header past the scan limit should be rejected, got %v", err)
+	}
+
+	// A title row followed by the header and nothing else is still "no data".
+	if _, _, err := visitorInputsFromRows([][]string{{"명단"}, {"이름", "휴대전화"}}); err == nil || !strings.Contains(err.Error(), "방문자 데이터") {
+		t.Fatalf("header without rows should be rejected, got %v", err)
+	}
+
+	// A row that has only one of the two required columns is not a header.
+	if _, _, err := visitorInputsFromRows([][]string{{"이름", "회사명"}, {"홍길동", "ABC"}}); err == nil || !strings.Contains(err.Error(), "휴대전화(phone)") {
+		t.Fatalf("missing phone column should be reported, got %v", err)
 	}
 }
