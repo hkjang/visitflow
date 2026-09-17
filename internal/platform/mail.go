@@ -13,19 +13,24 @@ import (
 	"time"
 )
 
-// SMTPConfig describes an on-premises relay. Corporate servers commonly speak
-// STARTTLS on 587 with LOGIN authentication, so both are supported natively
-// without an external dependency.
+// SMTPConfig describes an on-premises relay. The common case is port 25 with
+// no authentication and no TLS; STARTTLS, implicit TLS and LOGIN/PLAIN/CRAM-MD5
+// authentication are supported natively for the relays that want them.
 type SMTPConfig struct {
 	Host          string
 	Port          int
 	Username      string
 	Password      string
 	From          string
-	Security      string // "starttls", "tls" or "none"
+	Security      string // "auto", "starttls", "tls" or "none"
 	SkipTLSVerify bool
 	Timeout       time.Duration
 }
+
+// SMTPSecurityModes lists the accepted values of Security. "auto" upgrades to
+// STARTTLS when the relay advertises it and otherwise stays in cleartext, which
+// is what a freshly installed site should get without knowing its relay.
+var SMTPSecurityModes = []string{"auto", "none", "starttls", "tls"}
 
 type Mail struct {
 	To      []string
@@ -44,9 +49,9 @@ func (c SMTPConfig) Validate() error {
 		return errors.New("발신자 주소 형식을 확인하세요")
 	}
 	switch c.Security {
-	case "starttls", "tls", "none":
+	case "auto", "starttls", "tls", "none":
 	default:
-		return errors.New("보안 방식은 starttls, tls, none 중 하나여야 합니다")
+		return errors.New("보안 방식은 auto, none, starttls, tls 중 하나여야 합니다")
 	}
 	return nil
 }
@@ -106,19 +111,24 @@ func SendMail(ctx context.Context, cfg SMTPConfig, message Mail) error {
 	if err := client.Hello("visitflow"); err != nil {
 		return fmt.Errorf("SMTP EHLO 실패: %w", err)
 	}
-	if cfg.Security == "starttls" {
-		if ok, _ := client.Extension("STARTTLS"); !ok {
+	if cfg.Security == "starttls" || cfg.Security == "auto" {
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			if err := client.StartTLS(tlsConfig); err != nil {
+				return fmt.Errorf("STARTTLS 실패: %w", err)
+			}
+		} else if cfg.Security == "starttls" {
 			return errors.New("SMTP 서버가 STARTTLS를 지원하지 않습니다")
-		}
-		if err := client.StartTLS(tlsConfig); err != nil {
-			return fmt.Errorf("STARTTLS 실패: %w", err)
 		}
 	}
 	if cfg.Username != "" {
 		if ok, mechanisms := client.Extension("AUTH"); ok {
+			// PLAIN sends the password verbatim, so it is preferred only once the
+			// connection is actually encrypted — which under "auto" depends on
+			// what the relay offered, not on the configured mode.
+			_, encrypted := client.TLSConnectionState()
 			var auth smtp.Auth
 			switch {
-			case strings.Contains(mechanisms, "PLAIN") && cfg.Security != "none":
+			case strings.Contains(mechanisms, "PLAIN") && encrypted:
 				auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
 			case strings.Contains(mechanisms, "LOGIN"):
 				auth = &loginAuth{cfg.Username, cfg.Password}
@@ -126,7 +136,7 @@ func SendMail(ctx context.Context, cfg SMTPConfig, message Mail) error {
 				auth = smtp.CRAMMD5Auth(cfg.Username, cfg.Password)
 			case strings.Contains(mechanisms, "PLAIN"):
 				// Plain credentials without TLS: allowed only because the operator
-				// chose "none" for an isolated relay.
+				// chose a cleartext mode for an isolated relay.
 				auth = &plainInsecure{smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)}
 			default:
 				return fmt.Errorf("지원하는 SMTP 인증 방식이 없습니다: %s", mechanisms)

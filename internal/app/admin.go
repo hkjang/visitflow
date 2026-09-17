@@ -242,7 +242,7 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	}
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	rows, err := s.db.Query(r.Context(), `SELECT n.id,n.visit_id,n.channel,n.template_key,n.status,n.attempts,COALESCE(n.error,''),n.created_at,n.sent_at,n.recipient_encrypted,
-		COALESCE(na.name,'기존 Adapter'),COALESCE(nr.name,''),n.next_attempt_at
+		COALESCE(na.name,'기존 Adapter'),COALESCE(nr.name,''),n.next_attempt_at,n.metadata_encrypted
 		FROM notifications n LEFT JOIN notification_api_configs na ON na.id=n.api_config_id LEFT JOIN notification_rules nr ON nr.id=n.rule_id
 		WHERE ($1='' OR n.status=$1)
 		ORDER BY n.created_at DESC LIMIT $2`, status, limit)
@@ -253,19 +253,25 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, channel, key, status, errorText, recipientEnc, apiName, ruleName string
+		var id, channel, key, status, errorText, recipientEnc, apiName, ruleName, metadataEnc string
 		var visitID *string
 		var attempts int
 		var created, nextAttempt time.Time
 		var sent *time.Time
-		if rows.Scan(&id, &visitID, &channel, &key, &status, &attempts, &errorText, &created, &sent, &recipientEnc, &apiName, &ruleName, &nextAttempt) == nil {
+		if rows.Scan(&id, &visitID, &channel, &key, &status, &attempts, &errorText, &created, &sent, &recipientEnc, &apiName, &ruleName, &nextAttempt, &metadataEnc) == nil {
 			recipient := maskPhone(s.decryptOptional(recipientEnc))
+			item := map[string]any{"id": id, "visitId": visitID, "channel": channel, "templateKey": key, "status": status, "attempts": attempts, "error": errorText, "recipient": recipient, "apiConfigName": apiName, "ruleName": ruleName, "createdAt": created, "sentAt": sent, "nextAttemptAt": nextAttempt}
 			if channel == "webhook" {
-				recipient = "외부 시스템"
+				item["recipient"] = "외부 시스템"
 			} else if channel == "email" {
-				recipient = maskEmail(s.decryptOptional(recipientEnc))
+				// The mail record answers "what left the building": the subject,
+				// never the body.
+				item["recipient"] = maskEmail(s.decryptOptional(recipientEnc))
+				if metadata, err := parseNotificationMetadata(s, metadataEnc); err == nil {
+					item["subject"] = metadata["subject"]
+				}
 			}
-			items = append(items, map[string]any{"id": id, "visitId": visitID, "channel": channel, "templateKey": key, "status": status, "attempts": attempts, "error": errorText, "recipient": recipient, "apiConfigName": apiName, "ruleName": ruleName, "createdAt": created, "sentAt": sent, "nextAttemptAt": nextAttempt})
+			items = append(items, item)
 		}
 	}
 	if err := rows.Err(); err != nil {
