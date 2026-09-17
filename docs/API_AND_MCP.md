@@ -2,7 +2,7 @@
 
 ## 인증
 
-브라우저 Session 또는 프로필 메뉴에서 만든 개인 API 키를 사용한다.
+브라우저 Session 또는 프로필 메뉴에서 만든 개인 API 키를 사용한다. `/mcp`는 관리자가 켜 두었으면 Keycloak 액세스 토큰도 받는다(아래 "키 없이 SSO로 연결").
 
 ```http
 Authorization: Bearer vf_xxxxxxxxxxxxxxxxxxxxxxxxx
@@ -91,3 +91,21 @@ Authorization: Bearer vf_...
 `search_visits`와 `get_today_visitors`는 REST와 같은 `cursor` 페이지네이션을 지원하고 `create_visit`은 `visit_type_id`를 받는다. `get_visit_statistics`는 통계 화면과 같은 구간(`days`만큼을 사업장 시간대 기준 오늘까지, 기본 30·최대 366)을 세므로 요약 타일의 방문자 수·입실 수와 같은 값을 돌려주며, 아직 오지 않은 예약은 포함하지 않는다.
 
 개인정보는 마스킹하고 REST와 동일한 Role, API Scope, 사용자/부서/사업장 Scope를 적용한다. 변경 Tool은 감사 로그를 남긴다.
+
+### 키 없이 SSO로 연결
+
+관리자가 `MCP SSO(OAuth) 인증`을 켜 두었으면 개인 키 없이 MCP 클라이언트에 **URL 하나**만 주면 된다.
+
+```text
+https://visitflow.example.intra/mcp
+```
+
+클라이언트가 이 주소를 부르면 `401`과 `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp"`를 받고, 그 메타데이터에서 Keycloak(`authorization_servers`)을 찾아 스스로 로그인 화면을 띄운 뒤(PKCE) 액세스 토큰을 받아 같은 `Authorization: Bearer` 헤더로 붙인다. 이미 Keycloak에 로그인돼 있으면 화면은 거의 보이지 않는다. 프로필 → 내 API 키 화면 아래에 이 URL이 안내된다.
+
+- 서버는 같은 `Authorization: Bearer` 헤더에서 `vf_`로 시작하면 키, JWT 모양이면 Keycloak 토큰으로 가른다. 둘 다 아니면 지금처럼 거부한다.
+- 토큰은 **웹으로 한 번 로그인한 활성 계정**만 연다. 계정을 만들지 않으며, 그 계정의 Role과 부서·사업장 범위가 그대로 적용된다. 토큰의 role claim은 쓰지 않는다.
+- Scope는 관리자 설정 `mcp.oauth.scopes`(기본 `read mcp`)가 정하고 허용 개인 키 Scope를 넘지 않는다. 토큰의 `scope`에 `read`·`write`·`mcp`가 실려 오면 교집합만 준다.
+- 토큰은 `/mcp`에서만 받는다. REST 경로에 보내면 `401 authentication_required`다.
+- 메타데이터 `GET /.well-known/oauth-protected-resource`와 `…/mcp`는 인증 없이 맨 JSON(`resource`, `authorization_servers`, `bearer_methods_supported`, `scopes_supported`)을 돌려주고, 꺼져 있으면 `404`다.
+
+Keycloak 클라이언트·Audience 매퍼 설정과 거부 메시지별 조치는 [관리자 가이드 4절](ADMIN_GUIDE.md#키-없이-sso로-mcp-연결-oauth)을 본다.

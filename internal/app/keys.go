@@ -14,7 +14,7 @@ func (s *Server) apiKeyPolicy(w http.ResponseWriter, r *http.Request) {
 	allowed, _ := s.getSetting(r.Context(), "security.api_key_allowed_scopes")
 	days, _ := strconv.Atoi(settingOr(s, r.Context(), "security.api_key_days", "90"))
 	maxActive, _ := strconv.Atoi(settingOr(s, r.Context(), "security.api_key_max_active", "10"))
-	writeJSON(w, http.StatusOK, map[string]any{"allowedScopes": strings.Fields(allowed), "defaultExpiryDays": days, "maxActiveKeys": maxActive})
+	writeJSON(w, http.StatusOK, map[string]any{"allowedScopes": strings.Fields(allowed), "defaultExpiryDays": days, "maxActiveKeys": maxActive, "mcpOAuth": s.mcpOAuthInfo(r.Context(), r)})
 }
 
 func (s *Server) listAPIKeys(w http.ResponseWriter, r *http.Request) {

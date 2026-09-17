@@ -125,6 +125,10 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "oidc_incomplete", "SSO 활성화에는 Issuer URL, Client ID, Client Secret이 필요합니다")
 		return
 	}
+	if effective("mcp.oauth.enabled") == "true" && effective("oidc.issuer_url") == "" {
+		writeError(w, http.StatusBadRequest, "mcp_oauth_incomplete", "MCP SSO(OAuth) 인증을 켜려면 Keycloak Issuer URL이 필요합니다")
+		return
+	}
 	if effective("smtp.enabled") == "true" && (effective("smtp.host") == "" || effective("smtp.from") == "") {
 		writeError(w, http.StatusBadRequest, "smtp_incomplete", "SMTP를 켜려면 서버 주소와 발신자 주소가 필요합니다")
 		return
@@ -223,7 +227,7 @@ func validateSettingValue(key, value string) string {
 		"auth.local_enabled": true, "oidc.enabled": true, "oidc.auto_provision": true, "oidc.auto_login": true,
 		"visit.approval_enabled": true, "visit.single_use_qr": true, "visit.company_required": true,
 		"visit.self_registration_enabled": true, "smtp.enabled": true, "smtp.skip_tls_verify": true, "auth.password_reset_enabled": true,
-		"tracking.enabled": true, "tracking.include_admin": true, "tracking.momento_proxy": true,
+		"tracking.enabled": true, "tracking.include_admin": true, "tracking.momento_proxy": true, "mcp.oauth.enabled": true,
 	}
 	if booleans[key] && value != "true" && value != "false" {
 		return key + " 값은 true 또는 false여야 합니다"
@@ -295,6 +299,36 @@ func validateSettingValue(key, value string) string {
 				return "허용 키 범위는 read, write, mcp를 공백으로 구분해 입력하세요"
 			}
 			seen[scope] = true
+		}
+	}
+	if key == "mcp.oauth.resource" && value != "" {
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || strings.TrimRight(parsed.Path, "/") != mcpPath || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return "MCP 리소스 식별자는 클라이언트가 접속하는 공개 주소에 /mcp를 붙인 http(s) URL이어야 합니다. 예: https://visit.company.intra/mcp"
+		}
+	}
+	if key == "mcp.oauth.audience" {
+		parts := strings.Fields(value)
+		if len(parts) > 50 {
+			return "허용 대상은 50개까지 적을 수 있습니다"
+		}
+		for _, audience := range parts {
+			if len(audience) > 256 {
+				return "허용 대상 값이 너무 깁니다: " + audience[:32] + "…"
+			}
+		}
+	}
+	if key == "mcp.oauth.scopes" {
+		parts := strings.Fields(value)
+		seen := map[string]bool{}
+		for _, scope := range parts {
+			if seen[scope] || !slices.Contains(mcpScopeVocabulary, scope) {
+				return "SSO 토큰 범위는 read, write, mcp를 공백으로 구분해 입력하세요"
+			}
+			seen[scope] = true
+		}
+		if !seen["mcp"] {
+			return "SSO 토큰 범위에는 mcp가 있어야 MCP에 연결할 수 있습니다"
 		}
 	}
 	if key == "tracking.provider" && !slices.Contains(trackingProviders, strings.ToLower(value)) {

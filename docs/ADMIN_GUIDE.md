@@ -82,7 +82,7 @@ curl -s http://127.0.0.1:8080/readyz
 | 탭 | 설정 |
 |---|---|
 | 일반 | 서비스 이름, 회사/조직명, 외부 기준 URL, 기본 언어(`ko`, `en`, `ja`, `zh`), 지원 언어. |
-| Keycloak SSO | Issuer URL, Client ID, Client Secret, 그룹 매핑, 연결 테스트, 활성화, Keycloak 세션이 있으면 자동 로그인(4절). |
+| Keycloak SSO | Issuer URL, Client ID, Client Secret, 그룹 매핑, 연결 테스트, 활성화, Keycloak 세션이 있으면 자동 로그인, MCP를 Keycloak 토큰으로 열기(OAuth)(4절). |
 | 방문 · QR 정책 | 승인 사용, 회사명 필수, 조기 체크인 허용(분), 미방문 유예(분), 자동 퇴실 시각, QR 1회 사용, Dynamic QR 주기, 방문자 사전등록 사용·링크 유효 시간, 승인 지연 에스컬레이션 시간. |
 | 기존 알림 Adapter | `log`/Webhook 호환 설정(부록의 계약). 문자 API·발송 규칙은 별도 메뉴에 있다. |
 | 메일 (SMTP) | 서버·포트·보안 방식(`starttls`/`tls`/`none`)·계정·발신자, `TLS 인증서 검증 생략`, `테스트 메일 발송`, `로컬 계정 메일 비밀번호 재설정`. |
@@ -219,6 +219,65 @@ Issuer의 표준 Discovery 문서에서 Authorization/Token/JWKS Endpoint가 자
 
 보안 · 키 탭에서 허용 범위(`read`, `write`, `mcp`), 만료, 회전 유예, 활성 키 개수를 정하면 사용자가 프로필 → 내 API 키에서 그 범위 안에서 키를 만든다. 원문은 서버에 저장하지 않으므로 복구할 수 없고 회전으로만 교체한다. 도구별 Role·Scope는 [API 및 MCP](API_AND_MCP.md)를 본다.
 
+#### 키 없이 SSO로 MCP 연결 (OAuth)
+
+MCP 인가 규격(2025-06-18 이후)은 OAuth 2.1이다. 이 기능을 켜면 MCP 클라이언트(Claude, Cursor 등)에 개인 키 대신 **URL 하나**만 주면 클라이언트가 스스로 Keycloak 로그인을 띄우고 액세스 토큰을 받아 `/mcp`에 붙인다. 개인 키는 그대로 동작하며, 키가 없는 자동화 스크립트나 폐쇄망은 계속 키를 쓴다. 기본값은 꺼짐이라 새로 설치한 곳은 아무것도 달라지지 않는다.
+
+VisitFlow는 **리소스 서버**다 — 로그인은 Keycloak이 하고 VisitFlow는 토큰을 검사만 한다. `/authorize`·`/token`·동적 클라이언트 등록은 없고, 토큰을 저장하거나 세션으로 바꾸지 않으며 요청마다 검사한다. 토큰으로 계정을 만들지 않고, 정지된 계정을 열지 않으며, 토큰의 role claim으로 권한을 올리지 않는다. OAuth 토큰은 `/mcp`에서만 받는다 — REST·관리 API는 지금처럼 키와 세션만 받는다.
+
+**설정 (시스템 설정 → Keycloak SSO 탭, 아래쪽 카드)**
+
+| 키 | 기본값 | 뜻 |
+|---|---|---|
+| `mcp.oauth.enabled` | `false` | 켜기 스위치. Keycloak Issuer URL이 비어 있으면 저장이 거부된다(`mcp_oauth_incomplete`). |
+| `mcp.oauth.resource` | 빈 값 | 리소스 식별자. 비우면 `일반 → 외부 기준 URL` + `/mcp`, 그것도 비면 요청의 Host로 만든다(마지막 수단 — 프록시 뒤라면 외부 기준 URL을 반드시 채운다). 채울 때는 클라이언트가 실제로 접속하는 공개 HTTPS 주소에 `/mcp`를 붙인 값이어야 한다. |
+| `mcp.oauth.audience` | 빈 값 | 공백 구분 허용 대상. 토큰의 `aud` 또는 `azp`가 이 목록에 있으면 이 서버용 토큰으로 본다(Audience 매퍼 없이 쓰는 호환 경로). |
+| `mcp.oauth.scopes` | `read mcp` | SSO로 들어온 사용자에게 주는 범위. `mcp`는 필수이며, 보안 · 키 탭의 허용 개인 키 Scope를 넘지 않는다. 토큰의 `scope`에 `read`·`write`·`mcp`가 실려 오면 그 교집합만 준다. |
+| (재사용) `oidc.issuer_url` · `oidc.client_id` | Keycloak SSO 설정 | 발급자와 웹 로그인 클라이언트. 웹 클라이언트에 발급된 토큰은 항상 이 앱의 것으로 본다. |
+
+카드에는 MCP URL과 메타데이터 주소가 복사 버튼과 함께 표시된다. 사용자는 프로필 → 내 API 키 화면 아래의 "키 없이 SSO로 연결하기" 안내에서 같은 URL을 본다.
+
+**Keycloak 쪽 할 일**
+
+1. MCP 클라이언트용 **공개(public) 클라이언트**를 만든다(예: `claude-mcp`). Client authentication 끔, Standard Flow 켬, PKCE Method `S256`, Direct Access Grants·Implicit·Service accounts 끔. 웹 로그인 클라이언트(`oidc.client_id`)와 **다른** 클라이언트다.
+2. Valid Redirect URIs에 쓰는 MCP 클라이언트의 콜백을 정확히 적는다 — Claude는 `https://claude.ai/api/mcp/auth_callback`, 로컬 클라이언트는 `http://127.0.0.1:*/callback` 류. `*` 하나로 다 여는 것은 금지.
+3. 대상 바인딩은 둘 중 하나:
+   - **정식 경로** — 그 클라이언트(또는 전용 client scope)에 Audience 매퍼: Mapper type `Audience`, Included Custom Audience = 리소스 식별자(예 `https://visit.company.intra/mcp`), Add to access token 켬, Add to ID token 끔.
+   - **호환 경로** — 매퍼 없이 이 앱의 `mcp.oauth.audience`에 클라이언트 ID(`claude-mcp`)를 적는다. 실제 Keycloak 26은 `aud`에 `account`만 싣고 클라이언트 ID는 `azp`에 담으므로 이 경로가 가장 빠르다.
+4. (선택) 클라이언트가 메타데이터의 `scopes_supported`(`read mcp`)를 그대로 요청하면 Keycloak은 모르는 scope를 `invalid_scope`로 거부할 수 있다. 그럴 때는 realm에 `read`·`mcp` 이름의 Client scope를 만들어 그 클라이언트의 Optional scope로 붙인다. 붙이면 토큰의 `scope`에 실려 오고 VisitFlow는 관리자 범위와의 교집합만 준다.
+5. 액세스 토큰 수명은 짧게(5분 안팎). VisitFlow는 introspection을 하지 않으므로 Keycloak에서 로그아웃하거나 사용자를 비활성화해도 **이미 발급된 토큰은 만료까지 산다** — 즉시 끊어야 하면 VisitFlow 쪽에서 계정을 비활성화한다(계정 조회는 요청마다 한다).
+
+**확인 (curl)**
+
+```bash
+# 1. 메타데이터 — 인증 없이 맨 JSON. 꺼져 있으면 404.
+curl -s https://visit.company.intra/.well-known/oauth-protected-resource/mcp
+# {"resource":"https://visit.company.intra/mcp","authorization_servers":["https://keycloak.intra/realms/company"],
+#  "bearer_methods_supported":["header"],"scopes_supported":["read","mcp"],"resource_name":"VisitFlow MCP"}
+
+# 2. 토큰 없는 /mcp 는 401 과 함께 어디로 가야 하는지 알려 준다. REST 401 에는 이 헤더가 없다.
+curl -si -X POST https://visit.company.intra/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -i www-authenticate
+# WWW-Authenticate: Bearer realm="VisitFlow", resource_metadata="https://visit.company.intra/.well-known/oauth-protected-resource/mcp"
+
+# 3. Keycloak 에서 받은 액세스 토큰으로 tools/list
+curl -s -X POST https://visit.company.intra/mcp -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+**거부 메시지별 조치** — 클라이언트에는 아래 메시지가, 서버 로그에는 `mcp oauth token refused`와 함께 어느 검사가 실패했는지(`cause=`: 서명·발급자·만료·nbf·대상·계정)가 남는다.
+
+| 응답 | 뜻 | 조치 |
+|---|---|---|
+| 404 `mcp_oauth_disabled` (메타데이터) | 스위치가 꺼져 있거나 Issuer가 비어 있다 | Keycloak SSO 탭에서 켜고 Issuer URL을 채운다. 로그 `mcp oauth is enabled but oidc.issuer_url is empty`도 같은 뜻이다. |
+| 401 `authentication_required` (토큰을 보냈는데) | 꺼져 있어 토큰이 키처럼 취급됐다 | 위와 같다. 켜져 있지 않은 설치는 토큰에 대해 아무 말도 하지 않는다. |
+| 401 `invalid_token` `…유효하지 않습니다(서명·발급자·만료)` | 서명 검증 실패, 다른 realm, 만료, 아직 유효하지 않음(nbf), HS256·none 알고리즘 | 로그의 `cause`를 본다. 다른 realm이면 Issuer URL을, 만료면 클라이언트에서 다시 로그인한다. |
+| 401 `invalid_token` `ID 토큰은 MCP 자격이 아닙니다` | 클라이언트가 액세스 토큰 대신 ID 토큰을 보냈다 | 클라이언트 설정을 확인한다. |
+| 401 `invalid_token` `…이 서버를 위해 발급된 것이 아닙니다(aud=[account], azp="claude-mcp")` | 다른 앱용 토큰이거나 대상 바인딩이 아직 없다 | 메시지가 말하는 대로 `mcp.oauth.audience`에 그 `azp`를 적거나 Audience 매퍼에 리소스 식별자를 넣는다. 리소스 식별자가 메타데이터의 `resource`와 같은지 본다. |
+| 401 `account_not_registered` | 토큰의 `sub`(또는 `preferred_username`)에 해당하는 활성 계정이 없다 | 그 사용자가 웹으로 한 번 로그인한다(`SSO 사용자 자동 생성`이 꺼져 있으면 관리자가 먼저 등록). 비활성 계정은 사용자 · RBAC에서 다시 활성화한다. |
+| 401 `oidc_discovery_failed` | Keycloak Discovery/JWKS를 읽지 못했다 | 네트워크·Issuer URL을 본다. 실패는 5초 동안 기억했다가 다시 시도한다. |
+| 403 `insufficient_scope` | 유효 범위에 `mcp`가 없다 | `mcp.oauth.scopes`와 허용 개인 키 Scope에 `mcp`가 있는지, 토큰의 `scope`가 `read`만 싣고 있지 않은지 본다. |
+
 ## 5. 운영
 
 ### 관리 Dashboard와 통계
@@ -302,6 +361,7 @@ curl -s http://127.0.0.1:8080/readyz   # schemaVersion == expectedSchemaVersion,
 | 아침에 방문자가 자동 퇴실됨 | 사업장 시간대, 방문 · QR 정책 → 자동 퇴실 시각 | 사업장 시간대가 실제와 다르다. IANA 이름(예 `Asia/Seoul`)으로 고친다. |
 | 통계 타일과 그래프 숫자가 다름 | 사업장 시간대 | 모든 집계는 사업장 현지 날짜 기준이다. 시간대를 바꾸면 그날부터 일치한다. |
 | 메일이 안 감 | 메일 (SMTP) → `테스트 메일 발송`, 로그 `password reset mail failed` | 보안 방식·포트·인증 조합과 사설 인증서(`TLS 인증서 검증 생략`)를 확인. |
+| MCP 클라이언트가 로그인 뒤에도 `SSO 토큰이 이 서버를 위해 발급된 것이 아닙니다` | 로그 `mcp oauth token refused` 의 `cause=` | 메시지의 `azp`를 `mcp.oauth.audience`에 적거나 Audience 매퍼에 리소스 식별자를 넣는다(4절 `키 없이 SSO로 MCP 연결`). |
 | SSO 로그인 후 `SSO 요청이 만료되었거나 유효하지 않습니다` | Keycloak Redirect URI, 프록시 헤더 | 콜백 URL이 `https://서비스주소/api/v1/auth/oidc/callback`과 정확히 같은지, `X-Forwarded-Host`/`Proto`가 오는지 확인. |
 | 로그 `panic` | 요청 ID로 앞뒤 로그 | 요청은 500으로 끝나고 프로세스는 계속 돈다. 재현 경로와 함께 이슈로 남긴다. |
 
@@ -312,6 +372,7 @@ curl -s http://127.0.0.1:8080/readyz   # schemaVersion == expectedSchemaVersion,
 - **리버스 프록시**: 보안 · 키 탭의 `신뢰할 Reverse Proxy`에 프록시 주소를 IP 또는 CIDR로 등록한다(사내 대역 전체는 `private`). 등록한 주소에서 도착한 요청만 `X-Forwarded-For`를 읽어 실제 접속 IP를 로그인 잠금, 공개 API 요청 한도, 동의 기록, 감사 로그에 사용하고, 나머지 요청은 헤더를 무시하고 TCP 접속 주소를 쓴다. 값을 비워 두면 어떤 요청에서도 헤더를 신뢰하지 않으므로 프록시 없이 노출된 설치에서 헤더를 위조해 잠금과 요청 한도를 우회할 수 없다.
 - **접근 보호**: 로그인 실패는 요청 IP와 계정 각각 집계한다. 계정은 설정한 횟수, IP는 그 10배를 넘기면 잠금 시간 동안 `429`와 `Retry-After`를 반환하고 감사 로그에 `auth.login_locked`를 남긴다. 잠금 정보는 데이터베이스에 있어 재시작·다중 노드에서도 유지된다. 모바일 방문증, MMS용 QR 이미지, 셀프 사전등록, 로그인 엔드포인트에는 IP 단위 분당 요청 한도를 적용해 토큰 열거를 차단한다.
 - **QR과 개인정보**: QR에는 개인정보가 없고 랜덤 토큰 + HMAC 조회만 한다. 1회 사용과 Dynamic 주기는 방문 · QR 정책 탭에서 켜고, 재발급 시 이전 QR 폐기와 재사용(Replay) 감지는 항상 동작한다. 개인정보는 AES-256-GCM으로 필드 암호화되고 전화번호는 HMAC 색인으로만 검색된다. 목록은 마스킹되며 파기 기간이 지나면 자동 대체된다.
+- **MCP SSO(OAuth)**: 켜면 `/mcp`는 개인 키 외에 Keycloak 액세스 토큰도 받는다. 토큰은 서명·발급자·만료·nbf·대상(`aud`/`azp`)을 검사하고 ID 토큰·`cnf` 토큰·HS256 서명을 거부하며, 등록된 활성 계정만 통과시키고 범위는 관리자 설정이 정한다. REST 경로에는 어디에도 토큰을 받지 않는다(4절).
 - **인증 연동**: Keycloak OIDC(4절). 로컬 로그인을 끄면 `로컬 로그인이 비활성화되어 있습니다`가 표시된다. 로컬 로그인을 끄기 전에 SSO로 `super_admin` 하나가 로그인되는지 반드시 확인한다.
 - **세션·키 폐기**: 퇴직·유출 시 사용자 · RBAC 표의 `세션 종료`가 세션과 개인 API 키를 모두 폐기한다. 키오스크 기기 토큰은 방문 유형 · 키오스크에서 폐기한다.
 - **방문 추적과 CSP**: 방문 추적 탭의 스니펫은 요청마다 nonce를 받아 실행되며 정책에 `'unsafe-inline'`을 넣지 않는다(3절 `방문 추적 스크립트`). Momento는 같은 오리진 프록시를 기본으로 써서 외부 출처가 정책에 등장하지 않게 한다. 차단 신고 경로 `/api/v1/tracking/csp-report`는 인증 없이 받지만 메모리의 출처 목록 100개 외에는 아무것도 저장하지 않는다.
