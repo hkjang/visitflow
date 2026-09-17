@@ -149,3 +149,46 @@ func TestSmallEndpointsRespond(t *testing.T) {
 		t.Fatalf("session survived logout: %d", after.Code)
 	}
 }
+
+// TestRequestHelperEndsAStuckHandler pins the suite's own safety net: a
+// request made through the helpers carries a deadline that reaches the
+// handler, and the helper names the request that stalled instead of leaving
+// the package to die at go test's timeout. Runs without PostgreSQL.
+func TestRequestHelperEndsAStuckHandler(t *testing.T) {
+	stuck := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Behaves like the lobby SSE stream: returns only when the client goes.
+		<-r.Context().Done()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	env := &testEnv{handler: stuck, t: t}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	response := env.doWithContext(ctx, http.MethodGet, "/api/v1/lobby/stream", nil)
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("stuck handler held the request for %s; the deadline did not reach it", elapsed)
+	}
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("stuck handler answered %d", response.Code)
+	}
+	reason := requestTimedOut(ctx, http.MethodGet, "/api/v1/lobby/stream")
+	if !strings.Contains(reason, "GET /api/v1/lobby/stream") || !strings.Contains(reason, testRequestTimeout.String()) {
+		t.Fatalf("timeout reason does not name the request and the limit: %q", reason)
+	}
+
+	// A request that completes, and one whose test merely ended, are not
+	// reported as stuck: only the deadline is the helper's business.
+	done, finish := env.requestContext()
+	defer finish()
+	if reason := requestTimedOut(done, http.MethodGet, "/api/v1/version"); reason != "" {
+		t.Fatalf("completed request reported as stuck: %q", reason)
+	}
+	cancelled, stop := context.WithCancel(t.Context())
+	stop()
+	if reason := requestTimedOut(cancelled, http.MethodGet, "/api/v1/version"); reason != "" {
+		t.Fatalf("cancelled request reported as stuck: %q", reason)
+	}
+	if deadline, ok := done.Deadline(); !ok || time.Until(deadline) > testRequestTimeout {
+		t.Fatalf("helper request context has no deadline within %s", testRequestTimeout)
+	}
+}

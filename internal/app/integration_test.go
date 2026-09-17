@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -117,9 +118,37 @@ func newServerForPool(t *testing.T, pool *pgxpool.Pool) *Server {
 	return server
 }
 
+// testRequestTimeout bounds a single request made through do or doForwarded.
+// No request in this suite takes more than a few seconds, so a request that is
+// still running at this point is stuck. Failing that one test — with the path
+// that stalled — beats letting the whole package run into go test's timeout,
+// where the only diagnosis is a stack dump of every goroutine.
+const testRequestTimeout = 30 * time.Second
+
+// requestContext derives a request context from the test's own, so a request
+// is cancelled either when it stalls or when its test has already ended.
+func (e *testEnv) requestContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(e.t.Context(), testRequestTimeout)
+}
+
+// requestTimedOut reports why a request should fail its test, or "" if its
+// context simply ran to completion.
+func requestTimedOut(ctx context.Context, method, path string) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Sprintf("%s %s did not finish within %s; the handler is stuck", method, path, testRequestTimeout)
+	}
+	return ""
+}
+
 func (e *testEnv) do(method, path string, body any) *httptest.ResponseRecorder {
 	e.t.Helper()
-	return e.doWithContext(context.Background(), method, path, body)
+	ctx, cancel := e.requestContext()
+	defer cancel()
+	response := e.doWithContext(ctx, method, path, body)
+	if reason := requestTimedOut(ctx, method, path); reason != "" {
+		e.t.Fatal(reason)
+	}
+	return response
 }
 
 // doWithContext is do with a caller-supplied request context. httptest never
@@ -159,12 +188,17 @@ func (e *testEnv) doWithContext(ctx context.Context, method, path string, body a
 // what an attacker does to spread throttled attempts over many counters.
 func (e *testEnv) doForwarded(method, path, forwardedFor string) *httptest.ResponseRecorder {
 	e.t.Helper()
-	request := httptest.NewRequest(method, path, nil)
+	ctx, cancel := e.requestContext()
+	defer cancel()
+	request := httptest.NewRequest(method, path, nil).WithContext(ctx)
 	request.RemoteAddr = "10.0.0.1:5000"
 	request.Header.Set("X-Forwarded-For", forwardedFor)
 	request.Header.Set("X-Real-IP", forwardedFor)
 	response := httptest.NewRecorder()
 	e.handler.ServeHTTP(response, request)
+	if reason := requestTimedOut(ctx, method, path); reason != "" {
+		e.t.Fatal(reason)
+	}
 	return response
 }
 
