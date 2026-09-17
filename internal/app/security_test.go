@@ -90,6 +90,34 @@ func TestBestAcceptLanguagePrefersHighestQuality(t *testing.T) {
 	}
 }
 
+// RFC 7231 §5.3.1: q=0 means the language is not acceptable, q ranges over
+// 0..1, and anything else is malformed. None of these may promote a language
+// the client refused or beat one it actually asked for.
+func TestBestAcceptLanguageHonoursQualityEdgeCases(t *testing.T) {
+	allowed := map[string]bool{"ko": true, "en": true}
+	for header, want := range map[string]string{
+		"ko;q=0, en;q=0.5":      "en", // refused language loses to a wanted one
+		"ko;q=0":                "",   // only refused languages: nothing acceptable
+		"ko;q=0.000, en":        "en",
+		"ko;q=0, en;q=0":        "",
+		"ko;q=2, en;q=1":        "ko", // over 1 clamps to 1, order breaks the tie
+		"en;q=1, ko;q=2":        "en",
+		"ko;q=abc, en;q=0.3":    "en", // malformed weight is dropped, not treated as 1
+		"ko;q=-1, en;q=0.3":     "en",
+		"ko;q=NaN, en;q=0.3":    "en",
+		"ko;q=abc":              "",
+		"ko;Q=0.2, en;Q=0.9":    "en", // parameter name is case-insensitive
+		"ko; q = 0.2 , en;q=.9": "en", // tolerates whitespace and a bare fraction
+		"ko;level=1, en;q=0.9":  "ko", // unknown parameters do not change the weight
+		"*;q=0.5, en;q=0.4":     "en", // wildcard is not a supported locale
+		"ko;q=0.5;q=0":          "",   // the last q wins
+	} {
+		if got := bestAcceptLanguage(header, allowed); got != want {
+			t.Fatalf("bestAcceptLanguage(%q) = %q, want %q", header, got, want)
+		}
+	}
+}
+
 func TestVisitCursorRoundTrip(t *testing.T) {
 	item := VisitSummary{ID: "1f3a", StartAt: time.Date(2026, 9, 2, 10, 30, 0, 0, time.UTC)}
 	timestamp, id, ok := decodeVisitCursor(encodeVisitCursor(item))

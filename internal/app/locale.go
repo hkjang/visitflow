@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,6 +75,29 @@ func (s *Server) negotiateLocale(ctx context.Context, requested, stored, acceptL
 	return supported[0]
 }
 
+// acceptLanguageWeight reads the q parameter of one Accept-Language entry
+// (RFC 7231 §5.3.1). A missing q means 1. q=0 says the language is not
+// acceptable at all, so the entry is dropped rather than ranked last — a
+// header of "ko;q=0, en;q=0.5" must pick en, not ko. A weight above 1 cannot
+// mean anything other than "fully acceptable" and is clamped; a negative or
+// unparseable weight is malformed, and the entry is dropped instead of being
+// quietly promoted to the top of the list.
+func acceptLanguageWeight(params []string) (float64, bool) {
+	weight := 1.0
+	for _, param := range params {
+		name, value, found := strings.Cut(strings.TrimSpace(param), "=")
+		if !found || !strings.EqualFold(strings.TrimSpace(name), "q") {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || parsed < 0 || math.IsNaN(parsed) {
+			return 0, false
+		}
+		weight = min(parsed, 1)
+	}
+	return weight, weight > 0
+}
+
 type localeWeight struct {
 	locale string
 	weight float64
@@ -88,14 +112,9 @@ func bestAcceptLanguage(header string, allowed map[string]bool) string {
 		if locale == "" || !allowed[locale] {
 			continue
 		}
-		weight := 1.0
-		for _, field := range fields[1:] {
-			field = strings.TrimSpace(field)
-			if strings.HasPrefix(field, "q=") {
-				if parsed, err := strconv.ParseFloat(strings.TrimPrefix(field, "q="), 64); err == nil {
-					weight = parsed
-				}
-			}
+		weight, ok := acceptLanguageWeight(fields[1:])
+		if !ok {
+			continue
 		}
 		candidates = append(candidates, localeWeight{locale: locale, weight: weight, order: index})
 	}
