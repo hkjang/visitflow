@@ -48,7 +48,7 @@ export function KeysPage() {
     [editing, setEditing] = useState<string | null>(null),
     [name, setName] = useState("내 연동 키"),
     [scopes, setScopes] = useState(["read", "mcp"]),
-    [policy, setPolicy] = useState<{ allowedScopes: string[]; defaultExpiryDays: number; maxActiveKeys: number }>({ allowedScopes: ["read", "write", "mcp"], defaultExpiryDays: 90, maxActiveKeys: 10 }),
+    [policy, setPolicy] = useState<{ allowedScopes: string[]; defaultExpiryDays: number; maxActiveKeys: number; mcpOAuth?: { enabled: boolean; resource: string; metadataUrl: string; scopes: string[] } }>({ allowedScopes: ["read", "write", "mcp"], defaultExpiryDays: 90, maxActiveKeys: 10 }),
     [revealed, setRevealed] = useState<{ key: string; message: string } | null>(
       null,
     ),
@@ -206,6 +206,12 @@ export function KeysPage() {
         MCP Endpoint: <code>{window.location.origin}/mcp</code> · Authorization:{" "}
         <code>Bearer vf_…</code>
       </Typography>
+      {policy.mcpOAuth?.enabled && (
+        <Alert severity="info" sx={{ mt: 2 }} action={<Button color="inherit" size="small" onClick={() => void navigator.clipboard.writeText(policy.mcpOAuth?.resource ?? "").catch(() => undefined)}>URL 복사</Button>}>
+          <strong>키 없이 SSO로 연결하기</strong> — Claude·Cursor 같은 MCP 클라이언트에 키 대신{" "}
+          <code>{policy.mcpOAuth.resource}</code> 만 넣으세요. 클라이언트가 Keycloak 로그인 화면을 띄우고 토큰을 받아 오며, 이 계정의 권한과 관리자가 정한 범위({policy.mcpOAuth.scopes.join(", ")})로 MCP 도구를 씁니다. 이미 Keycloak에 로그인돼 있으면 화면은 거의 보이지 않습니다.
+        </Alert>
+      )}
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)}>
         <DialogTitle>{editing ? "개인 API 키 권한 변경" : "개인 API 키 만들기"}</DialogTitle>
         <DialogContent>

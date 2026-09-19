@@ -12,6 +12,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hkjang/visitflow/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -162,8 +163,16 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 				return
 			}
 		}
+		// unauthorized answers a 401. On /mcp with SSO tokens enabled it also
+		// says where to sign in (mcpoauth.go); everywhere else it is unchanged.
+		unauthorized := func(code, message string, tokenPresented bool) {
+			s.mcpChallenge(r.Context(), w, r.URL.Path, tokenPresented)
+			writeError(w, http.StatusUnauthorized, code, message)
+		}
+		bearerPresented := false
 		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 			raw := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+			bearerPresented = raw != ""
 			if strings.HasPrefix(raw, "vf_") {
 				var keyID string
 				digest := s.keys.Digest(raw)
@@ -178,22 +187,12 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 					Scan(&u.ID, &u.Username, &u.DisplayName, &u.Email, &u.EmployeeID, &u.Role, &u.Source, &u.LastLoginAt,
 						&keyID, &apiScopes, &u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil, &u.ApprovalDelegate)
 				if err != nil {
-					writeError(w, http.StatusUnauthorized, "invalid_api_key", "API 키가 유효하지 않습니다")
+					unauthorized("invalid_api_key", "API 키가 유효하지 않습니다", true)
 					return
 				}
 				_, _ = s.db.Exec(r.Context(), `UPDATE api_keys SET last_used_at=now() WHERE id=$1 AND (last_used_at IS NULL OR last_used_at<now()-interval '1 minute')`, keyID)
 				allowedValue, _ := s.getSetting(r.Context(), "security.api_key_allowed_scopes")
-				allowed := map[string]bool{}
-				for _, scope := range strings.Fields(allowedValue) {
-					allowed[scope] = true
-				}
-				filtered := apiScopes[:0]
-				for _, scope := range apiScopes {
-					if allowed[scope] {
-						filtered = append(filtered, scope)
-					}
-				}
-				apiScopes = filtered
+				apiScopes = filterAllowedScopes(apiScopes, allowedValue)
 				apiKeyAuth = true
 				readRequest := r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions
 				if r.URL.Path != "/mcp" && readRequest && !containsString(apiScopes, "read") {
@@ -204,12 +203,30 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 					writeError(w, http.StatusForbidden, "insufficient_scope", "write 범위가 있는 API 키가 필요합니다")
 					return
 				}
+			} else if r.URL.Path == mcpPath && looksLikeJWT(raw) {
+				// A Keycloak access token, accepted on the MCP path only and only
+				// when the administrator turned it on; otherwise it falls through
+				// to the same refusal a stray bearer always got.
+				if cfg := s.mcpOAuthConfig(r.Context()); cfg.active() {
+					principal, scopes, refusal := s.mcpOAuthPrincipal(r.Context(), cfg, raw)
+					if refusal != nil {
+						// The client hears what to do; the log keeps which check
+						// failed (signature, issuer, expiry, audience, account…).
+						s.logger.Warn("mcp oauth token refused", "code", refusal.code, "cause", refusal.cause, "request_id", middleware.GetReqID(r.Context()))
+						if refusal.status == http.StatusUnauthorized {
+							s.mcpChallenge(r.Context(), w, r.URL.Path, true)
+						}
+						writeError(w, refusal.status, refusal.code, refusal.message)
+						return
+					}
+					u, apiScopes, apiKeyAuth = principal, scopes, true
+				}
 			}
 		}
 		if !apiKeyAuth {
 			cookie, err := r.Cookie(sessionCookie)
 			if err != nil || cookie.Value == "" {
-				writeError(w, http.StatusUnauthorized, "authentication_required", "로그인이 필요합니다")
+				unauthorized("authentication_required", "로그인이 필요합니다", bearerPresented)
 				return
 			}
 			// Session, CSRF token and the user's scope come back in a single query.
@@ -222,7 +239,7 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 					&csrf, &u.DepartmentID, &u.SiteScope, &u.DelegateUserID, &u.DelegateUntil, &u.ApprovalDelegate, &u.MustChangePassword)
 			if err != nil {
 				http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
-				writeError(w, http.StatusUnauthorized, "session_expired", "세션이 만료되었습니다")
+				unauthorized("session_expired", "세션이 만료되었습니다", bearerPresented)
 				return
 			}
 			// A temporary password only opens the door to replacing itself.

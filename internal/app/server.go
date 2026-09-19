@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hkjang/visitflow/internal/database"
@@ -52,6 +53,12 @@ type Server struct {
 
 	settingsMu    sync.RWMutex
 	settingsCache map[string]cachedSetting
+
+	// Discovery for MCP SSO tokens, cached per issuer (mcpoauth.go).
+	oauthMu        sync.Mutex
+	oauthProviders map[string]*oidc.Provider
+	oauthInFlight  map[string]*oauthDiscovery
+	oauthFailure   *oauthDiscoveryFailure
 }
 
 func NewServer(db *pgxpool.Pool, keys *platform.Keyring, logger *slog.Logger, webFS fs.FS, version, commit, builtAt string) *Server {
@@ -227,7 +234,11 @@ func (s *Server) Routes() http.Handler {
 			})
 		})
 	})
-	r.With(s.authenticate).Post("/mcp", s.mcp)
+	r.With(s.authenticate).Post(mcpPath, s.mcp)
+	// RFC 9728: where an MCP client without a key goes to sign in. Served on
+	// both the bare path and the endpoint-specific one, without a session.
+	r.Get(mcpMetadataPath, s.protectedResourceMetadata)
+	r.Get(mcpMetadataPath+mcpPath, s.protectedResourceMetadata)
 	r.HandleFunc(momentoProxyPrefix+"/*", s.momentoProxy)
 	r.Handle("/*", s.spaHandler())
 	return r
