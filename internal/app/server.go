@@ -57,6 +57,7 @@ type Server struct {
 	// Discovery for MCP SSO tokens, cached per issuer (mcpoauth.go).
 	oauthMu        sync.Mutex
 	oauthProviders map[string]*oidc.Provider
+	oauthInFlight  map[string]*oauthDiscovery
 	oauthFailure   *oauthDiscoveryFailure
 }
 

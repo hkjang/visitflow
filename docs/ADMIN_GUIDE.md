@@ -229,8 +229,8 @@ VisitFlow는 **리소스 서버**다 — 로그인은 Keycloak이 하고 VisitFl
 
 | 키 | 기본값 | 뜻 |
 |---|---|---|
-| `mcp.oauth.enabled` | `false` | 켜기 스위치. Keycloak Issuer URL이 비어 있으면 저장이 거부된다(`mcp_oauth_incomplete`). |
-| `mcp.oauth.resource` | 빈 값 | 리소스 식별자. 비우면 `일반 → 외부 기준 URL` + `/mcp`, 그것도 비면 요청의 Host로 만든다(마지막 수단 — 프록시 뒤라면 외부 기준 URL을 반드시 채운다). 채울 때는 클라이언트가 실제로 접속하는 공개 HTTPS 주소에 `/mcp`를 붙인 값이어야 한다. |
+| `mcp.oauth.enabled` | `false` | 켜기 스위치. Keycloak Issuer URL이 비어 있거나, 리소스 식별자와 `일반 → 외부 기준 URL`이 둘 다 비어 있으면 저장이 거부된다(`mcp_oauth_incomplete`). |
+| `mcp.oauth.resource` | 빈 값 | 리소스 식별자. 비우면 `일반 → 외부 기준 URL` + `/mcp`를 쓴다. 요청의 `Host`·`X-Forwarded-Host`는 **절대 쓰지 않는다** — 누구나 붙일 수 있는 헤더라 다른 리소스 서버용 토큰이 통과할 수 있기 때문이며, 둘 다 비어 있으면 기능은 꺼진 것으로 동작한다(메타데이터 404, 토큰 거부, 로그 `neither mcp.oauth.resource nor general.base_url is set`). 채울 때는 클라이언트가 실제로 접속하는 공개 HTTPS 주소에 `/mcp`를 붙인 값이어야 한다. |
 | `mcp.oauth.audience` | 빈 값 | 공백 구분 허용 대상. 토큰의 `aud` 또는 `azp`가 이 목록에 있으면 이 서버용 토큰으로 본다(Audience 매퍼 없이 쓰는 호환 경로). |
 | `mcp.oauth.scopes` | `read mcp` | SSO로 들어온 사용자에게 주는 범위. `mcp`는 필수이며, 보안 · 키 탭의 허용 개인 키 Scope를 넘지 않는다. 토큰의 `scope`에 `read`·`write`·`mcp`가 실려 오면 그 교집합만 준다. |
 | (재사용) `oidc.issuer_url` · `oidc.client_id` | Keycloak SSO 설정 | 발급자와 웹 로그인 클라이언트. 웹 클라이언트에 발급된 토큰은 항상 이 앱의 것으로 본다. |
@@ -269,7 +269,7 @@ curl -s -X POST https://visit.company.intra/mcp -H "Authorization: Bearer $TOKEN
 
 | 응답 | 뜻 | 조치 |
 |---|---|---|
-| 404 `mcp_oauth_disabled` (메타데이터) | 스위치가 꺼져 있거나 Issuer가 비어 있다 | Keycloak SSO 탭에서 켜고 Issuer URL을 채운다. 로그 `mcp oauth is enabled but oidc.issuer_url is empty`도 같은 뜻이다. |
+| 404 `mcp_oauth_disabled` (메타데이터) | 스위치가 꺼져 있거나, Issuer가 비어 있거나, 리소스 식별자와 외부 기준 URL이 둘 다 비어 있다 | Keycloak SSO 탭에서 켜고 Issuer URL을 채우고, 리소스 식별자나 일반 탭의 외부 기준 URL을 채운다. 로그 `mcp oauth is enabled but oidc.issuer_url is empty` / `…neither mcp.oauth.resource nor general.base_url is set`도 같은 뜻이다. |
 | 401 `authentication_required` (토큰을 보냈는데) | 꺼져 있어 토큰이 키처럼 취급됐다 | 위와 같다. 켜져 있지 않은 설치는 토큰에 대해 아무 말도 하지 않는다. |
 | 401 `invalid_token` `…유효하지 않습니다(서명·발급자·만료)` | 서명 검증 실패, 다른 realm, 만료, 아직 유효하지 않음(nbf), HS256·none 알고리즘 | 로그의 `cause`를 본다. 다른 realm이면 Issuer URL을, 만료면 클라이언트에서 다시 로그인한다. |
 | 401 `invalid_token` `ID 토큰은 MCP 자격이 아닙니다` | 클라이언트가 액세스 토큰 대신 ID 토큰을 보냈다 | 클라이언트 설정을 확인한다. |

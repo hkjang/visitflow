@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
@@ -9,13 +10,18 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coreos/go-oidc/v3/oidc"
 )
 
 // MCP over SSO. The authorization flow — PKCE, the redirect, the code exchange
@@ -476,6 +482,201 @@ func TestMCPOAuthRefusalWhenKeycloakIsUnreachable(t *testing.T) {
 	// client to the issuer in the first place, and it needs no round trip.
 	if metadata := env.mcpWithoutSession(http.MethodGet, mcpMetadataPath+mcpPath); metadata.Code != http.StatusOK {
 		t.Fatalf("metadata while the issuer is down: %d", metadata.Code)
+	}
+}
+
+// mcpForwarded posts one MCP request with the given bearer as a reverse proxy
+// would forward it, naming a host of the sender's choosing.
+func (e *testEnv) mcpForwarded(bearer, host string) *httptest.ResponseRecorder {
+	e.t.Helper()
+	ctx, cancel := e.requestContext()
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, "https://"+host+mcpPath, strings.NewReader(mcpListTools)).WithContext(ctx)
+	request.Host = host
+	request.RemoteAddr = "10.0.0.1:5000"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Forwarded-Host", host)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	if bearer != "" {
+		request.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	response := httptest.NewRecorder()
+	e.handler.ServeHTTP(response, request)
+	return response
+}
+
+func TestMCPOAuthResourceComesFromConfigurationNeverTheRequestHost(t *testing.T) {
+	env := newTestEnv(t)
+	idp := newFakeIDP(t)
+	env.createSSOUser("member", idp.server.URL, "subject-member", RoleUser, true)
+	// The host a stranger chooses: anybody can send Host and X-Forwarded-Host,
+	// and a token for that other resource server in the realm is a real token.
+	const forged = "other-resource.intra"
+	forgedToken := idp.sign(t, idp.accessToken("subject-member", "https://"+forged+mcpPath, nil))
+
+	// With neither the resource nor the public base URL configured there is
+	// nothing a token's aud could be checked against, so enabling is refused.
+	incomplete := env.do(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{
+		"oidc.enabled": "true", "oidc.issuer_url": idp.server.URL, "oidc.client_id": "visitflow-web", "oidc.client_secret": "test-secret",
+		"general.base_url": "", "mcp.oauth.resource": "", "mcp.oauth.enabled": "true",
+	}})
+	if incomplete.Code != http.StatusBadRequest || !strings.Contains(incomplete.Body.String(), "mcp_oauth_incomplete") {
+		t.Fatalf("enabling without a resource identifier was accepted: %d %s", incomplete.Code, incomplete.Body.String())
+	}
+	// An imported or hand-edited settings table can still hold that
+	// combination. Then the feature is inactive — it does not fall back to
+	// the request's host.
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{
+		"oidc.enabled": "true", "oidc.issuer_url": idp.server.URL, "oidc.client_id": "visitflow-web", "oidc.client_secret": "test-secret", "general.base_url": "",
+	}}, http.StatusOK)
+	if _, err := env.server.db.Exec(context.Background(), `UPDATE settings SET value='true' WHERE key='mcp.oauth.enabled'`); err != nil {
+		t.Fatalf("enable in the table: %v", err)
+	}
+	env.server.invalidateSettings()
+	if metadata := env.mcpWithoutSession(http.MethodGet, mcpMetadataPath+mcpPath); metadata.Code != http.StatusNotFound {
+		t.Fatalf("metadata without a configured resource: %d %s", metadata.Code, metadata.Body.String())
+	}
+	forgedHost := env.mcpForwarded(forgedToken, forged)
+	if forgedHost.Code != http.StatusUnauthorized || forgedHost.Header().Get("WWW-Authenticate") != "" {
+		t.Fatalf("a token whose aud matches the forwarded host opened MCP: %d %q %s", forgedHost.Code, forgedHost.Header().Get("WWW-Authenticate"), forgedHost.Body.String())
+	}
+	policy := env.json(http.MethodGet, "/api/v1/api-key-policy", nil, http.StatusOK)
+	if info, _ := policy["mcpOAuth"].(map[string]any); info["enabled"] != false || info["resource"] != "" {
+		t.Fatalf("the key page was told SSO is on without a resource: %v", policy["mcpOAuth"])
+	}
+
+	// Once the public base URL is set the resource is that and only that: the
+	// forged host is still not accepted, and neither the challenge nor the
+	// metadata ever names it.
+	env.json(http.MethodPut, "/api/v1/settings", map[string]any{"settings": map[string]string{"general.base_url": "https://visit.example.test"}}, http.StatusOK)
+	stillForged := env.mcpForwarded(forgedToken, forged)
+	if stillForged.Code != http.StatusUnauthorized || !strings.Contains(stillForged.Body.String(), "발급된 것이 아닙니다") {
+		t.Fatalf("a token for another resource opened MCP behind a forged host: %d %s", stillForged.Code, stillForged.Body.String())
+	}
+	if header := stillForged.Header().Get("WWW-Authenticate"); strings.Contains(header, forged) || !strings.Contains(header, `resource_metadata="https://visit.example.test/.well-known/oauth-protected-resource/mcp"`) {
+		t.Fatalf("the challenge followed the request host: %q", header)
+	}
+	if opened := env.mcpForwarded(idp.sign(t, idp.accessToken("subject-member", "https://visit.example.test/mcp", nil)), forged); opened.Code != http.StatusOK {
+		t.Fatalf("a token for the configured resource was refused behind a proxy: %d %s", opened.Code, opened.Body.String())
+	}
+	ctx, cancel := env.requestContext()
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "https://"+forged+mcpMetadataPath+mcpPath, nil).WithContext(ctx)
+	request.Host = forged
+	request.Header.Set("X-Forwarded-Host", forged)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	response := httptest.NewRecorder()
+	env.handler.ServeHTTP(response, request)
+	var metadata struct {
+		Resource string `json:"resource"`
+	}
+	_ = json.Unmarshal(response.Body.Bytes(), &metadata)
+	if response.Code != http.StatusOK || metadata.Resource != "https://visit.example.test/mcp" {
+		t.Fatalf("metadata followed the request host: %d %s", response.Code, response.Body.String())
+	}
+}
+
+// stalledIssuer answers discovery only once released, and counts the requests
+// it saw. It needs no database: the discovery cache is the unit under test.
+type stalledIssuer struct {
+	server   *httptest.Server
+	release  chan struct{}
+	requests atomic.Int32
+}
+
+func newStalledIssuer(t *testing.T) *stalledIssuer {
+	t.Helper()
+	issuer := &stalledIssuer{release: make(chan struct{})}
+	issuer.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		issuer.requests.Add(1)
+		select {
+		case <-issuer.release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"issuer": issuer.server.URL, "authorization_endpoint": issuer.server.URL + "/auth", "token_endpoint": issuer.server.URL + "/token", "jwks_uri": issuer.server.URL + "/certs"})
+	}))
+	t.Cleanup(issuer.server.Close)
+	return issuer
+}
+
+func TestMCPOAuthDiscoveryIsNotSerializedAndHonoursCancellation(t *testing.T) {
+	server := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	stalled := newStalledIssuer(t)
+	healthy := newFakeIDP(t)
+	const promptly = 2 * time.Second
+
+	// One request waits on a Keycloak that does not answer…
+	type outcome struct {
+		provider *oidc.Provider
+		err      error
+	}
+	first := make(chan outcome, 1)
+	go func() {
+		provider, err := server.mcpOAuthProvider(t.Context(), stalled.server.URL)
+		first <- outcome{provider, err}
+	}()
+	deadline := time.Now().Add(promptly)
+	for stalled.requests.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("discovery of the stalled issuer never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// …and while it does, discovery of a different issuer is not queued
+	// behind it: the round trip happens outside the lock.
+	started := time.Now()
+	if _, err := server.mcpOAuthProvider(t.Context(), healthy.server.URL); err != nil {
+		t.Fatalf("healthy issuer: %v", err)
+	}
+	if time.Since(started) > promptly {
+		t.Fatalf("a healthy issuer waited %s behind a stalled one", time.Since(started))
+	}
+	// A second request for the stalled issuer joins the discovery already in
+	// flight rather than starting another, and stops waiting the moment its
+	// own context ends — the caller has gone; nothing is gained by holding on.
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	started = time.Now()
+	_, err := server.mcpOAuthProvider(ctx, stalled.server.URL)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a cancelled request did not return its context error: %v", err)
+	}
+	if time.Since(started) > promptly {
+		t.Fatalf("a cancelled request kept waiting on discovery for %s", time.Since(started))
+	}
+	if n := stalled.requests.Load(); n != 1 {
+		t.Fatalf("the stalled issuer saw %d discovery requests, want the one in flight", n)
+	}
+	select {
+	case done := <-first:
+		t.Fatalf("the first request returned before discovery finished: %v", done.err)
+	default:
+	}
+	// When the discovery does finish it serves the request still waiting and
+	// fills the cache for everyone after, including the caller that gave up.
+	close(stalled.release)
+	select {
+	case done := <-first:
+		if done.err != nil || done.provider == nil {
+			t.Fatalf("first request after release: %v", done.err)
+		}
+	case <-time.After(promptly):
+		t.Fatal("the first request did not return once discovery finished")
+	}
+	started = time.Now()
+	if provider, err := server.mcpOAuthProvider(t.Context(), stalled.server.URL); err != nil || provider == nil || time.Since(started) > time.Second {
+		t.Fatalf("cached provider: %v after %s", err, time.Since(started))
+	}
+	if n := stalled.requests.Load(); n != 1 {
+		t.Fatalf("the cached issuer was discovered again: %d requests", n)
+	}
+	server.oauthMu.Lock()
+	inFlight := len(server.oauthInFlight)
+	server.oauthMu.Unlock()
+	if inFlight != 0 {
+		t.Fatalf("%d discoveries still recorded as in flight", inFlight)
 	}
 }
 

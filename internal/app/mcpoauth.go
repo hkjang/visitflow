@@ -54,8 +54,12 @@ type mcpOAuthConfig struct {
 	// ClientID is the web sign-in's client. A token Keycloak issued to it is
 	// for this application by definition, so it is accepted as an audience.
 	ClientID string
-	// Resource is the configured identifier; empty means derive it from the
-	// public base URL (or, last of all, from the request).
+	// Resource is the identifier this deployment claims for its MCP endpoint —
+	// what the metadata advertises and what a token's aud must name. It is
+	// mcp.oauth.resource, else the public base URL setting plus /mcp, and
+	// nothing else: the request's own Host or X-Forwarded-Host is never used,
+	// because anybody can set that header and a token minted for some other
+	// resource server in the realm would then pass the audience check.
 	Resource string
 	// Audiences are further accepted aud/azp values the administrator named.
 	Audiences []string
@@ -81,31 +85,30 @@ func (s *Server) mcpOAuthConfig(ctx context.Context) mcpOAuthConfig {
 		Audiences: strings.Fields(audience),
 		Scopes:    strings.Fields(scopes),
 	}
+	if cfg.Resource == "" {
+		// publicBaseURL is called without a request on purpose: with no
+		// base URL configured it returns "" rather than the request's host.
+		if base := s.publicBaseURL(ctx, nil); base != "" {
+			cfg.Resource = base + mcpPath
+		}
+	}
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"read", "mcp"}
 	}
+	// Saving refuses these combinations, but an imported or hand-edited
+	// settings table can still hold them; behave as if off and say why.
 	if cfg.Enabled && cfg.Issuer == "" {
-		// Saving refuses this combination, but an imported or hand-edited
-		// settings table can still hold it; behave as if off and say why.
 		s.logger.Warn("mcp oauth is enabled but oidc.issuer_url is empty; SSO tokens are not accepted")
+	}
+	if cfg.Enabled && cfg.Resource == "" {
+		s.logger.Warn("mcp oauth is enabled but neither mcp.oauth.resource nor general.base_url is set; SSO tokens are not accepted")
 	}
 	return cfg
 }
 
-// active reports whether SSO tokens are accepted at all: the switch is on and
-// the authorization server is known.
-func (c mcpOAuthConfig) active() bool { return c.Enabled && c.Issuer != "" }
-
-// mcpResource is the identifier this deployment claims for its MCP endpoint —
-// what the metadata advertises and what a token's aud must name. It comes from
-// mcp.oauth.resource, else the public base URL setting; the request's own host
-// is the last resort, since anybody can set that header.
-func (s *Server) mcpResource(ctx context.Context, r *http.Request, cfg mcpOAuthConfig) string {
-	if cfg.Resource != "" {
-		return cfg.Resource
-	}
-	return s.publicBaseURL(ctx, r) + mcpPath
-}
+// active reports whether SSO tokens are accepted at all: the switch is on, the
+// authorization server is known and the resource identifier is configured.
+func (c mcpOAuthConfig) active() bool { return c.Enabled && c.Issuer != "" && c.Resource != "" }
 
 // mcpMetadataURL is where a refused client is sent to learn the above.
 func mcpMetadataURL(resource string) string {
@@ -124,30 +127,73 @@ func looksLikeJWT(token string) bool {
 // request would put Keycloak's latency in front of every MCP call. go-oidc
 // refetches the key set on an unknown key id, so rotation needs no cache
 // invalidation here, and a changed issuer setting simply misses the cache.
+//
+// The round trip itself happens outside the lock: the lock only guards the
+// cache, the negative cache and the table of discoveries in flight. Requests
+// for the same issuer share one in-flight discovery rather than each starting
+// their own, and a request whose context ends stops waiting at once — the
+// discovery it was waiting on carries on in its own goroutine and fills the
+// cache for the next caller. A stalled Keycloak therefore costs each request
+// at most its own deadline, and never holds other issuers or the lock.
 func (s *Server) mcpOAuthProvider(ctx context.Context, issuer string) (*oidc.Provider, error) {
 	s.oauthMu.Lock()
-	defer s.oauthMu.Unlock()
 	if provider := s.oauthProviders[issuer]; provider != nil {
+		s.oauthMu.Unlock()
 		return provider, nil
 	}
 	if s.oauthFailure != nil && issuer == s.oauthFailure.issuer && time.Now().Before(s.oauthFailure.until) {
+		s.oauthMu.Unlock()
 		return nil, s.oauthFailure.err
 	}
-	// The provider keeps this context for later key fetches, so it must
-	// outlive the request that created it, and it must carry a client with
-	// a deadline so a stalled Keycloak cannot hold an MCP request forever.
+	flight := s.oauthInFlight[issuer]
+	if flight == nil {
+		flight = &oauthDiscovery{done: make(chan struct{})}
+		if s.oauthInFlight == nil {
+			s.oauthInFlight = map[string]*oauthDiscovery{}
+		}
+		s.oauthInFlight[issuer] = flight
+		go s.discoverOAuthProvider(issuer, flight)
+	}
+	s.oauthMu.Unlock()
+	select {
+	case <-flight.done:
+		return flight.provider, flight.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// discoverOAuthProvider performs one discovery for an issuer and records the
+// outcome. It runs in its own goroutine so no request context and no lock is
+// held across the round trip.
+func (s *Server) discoverOAuthProvider(issuer string, flight *oauthDiscovery) {
+	// The provider keeps this context for later key fetches, so it is the
+	// server's lifetime rather than any request's, and it carries a client
+	// with a deadline so a stalled Keycloak cannot hold a fetch forever.
 	client := &http.Client{Timeout: mcpOAuthDiscoveryLimit}
-	provider, err := oidc.NewProvider(oidc.ClientContext(context.WithoutCancel(ctx), client), issuer)
+	provider, err := oidc.NewProvider(oidc.ClientContext(context.Background(), client), issuer)
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
 	if err != nil {
 		s.oauthFailure = &oauthDiscoveryFailure{issuer: issuer, err: err, until: time.Now().Add(mcpOAuthDiscoveryRetry)}
-		return nil, err
+	} else {
+		if s.oauthProviders == nil {
+			s.oauthProviders = map[string]*oidc.Provider{}
+		}
+		s.oauthProviders[issuer] = provider
+		s.oauthFailure = nil
 	}
-	if s.oauthProviders == nil {
-		s.oauthProviders = map[string]*oidc.Provider{}
-	}
-	s.oauthProviders[issuer] = provider
-	s.oauthFailure = nil
-	return provider, nil
+	delete(s.oauthInFlight, issuer)
+	flight.provider, flight.err = provider, err
+	close(flight.done)
+}
+
+// oauthDiscovery is one discovery in flight: waiters select on done, and the
+// result is set before done is closed.
+type oauthDiscovery struct {
+	done     chan struct{}
+	provider *oidc.Provider
+	err      error
 }
 
 type oauthDiscoveryFailure struct {
@@ -173,7 +219,7 @@ func refuseToken(code, message string, cause error) *mcpOAuthRefusal {
 
 // mcpOAuthPrincipal turns a bearer access token into the user it stands for
 // and the scopes that user receives, or says exactly why it will not.
-func (s *Server) mcpOAuthPrincipal(ctx context.Context, r *http.Request, cfg mcpOAuthConfig, token string) (User, []string, *mcpOAuthRefusal) {
+func (s *Server) mcpOAuthPrincipal(ctx context.Context, cfg mcpOAuthConfig, token string) (User, []string, *mcpOAuthRefusal) {
 	provider, err := s.mcpOAuthProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return User{}, nil, refuseToken("oidc_discovery_failed",
@@ -215,8 +261,9 @@ func (s *Server) mcpOAuthPrincipal(ctx context.Context, r *http.Request, cfg mcp
 	// and the client id in azp, so both are compared against the resource,
 	// the administrator's list and the web client. Anything else is a token
 	// for some other application in the realm, which is exactly what RFC
-	// 8707 exists to keep out.
-	resource := s.mcpResource(ctx, r, cfg)
+	// 8707 exists to keep out. The resource comes from configuration only
+	// (mcpOAuthConfig), never from the request.
+	resource := cfg.Resource
 	accepted := append([]string{resource}, cfg.Audiences...)
 	if cfg.ClientID != "" {
 		accepted = append(accepted, cfg.ClientID)
@@ -302,16 +349,18 @@ func filterAllowedScopes(scopes []string, allowedValue string) []string {
 
 // mcpChallenge turns a 401 on /mcp into an invitation: the client reads
 // resource_metadata and starts the OAuth flow from there. It is set on the MCP
-// path only — a REST 401 carrying it would send browsers somewhere wrong.
-func (s *Server) mcpChallenge(w http.ResponseWriter, r *http.Request, tokenPresented bool) {
-	if r.URL.Path != mcpPath {
+// path only — a REST 401 carrying it would send browsers somewhere wrong. It
+// takes the path rather than the request so the header can only ever name
+// the configured resource, never the request's host.
+func (s *Server) mcpChallenge(ctx context.Context, w http.ResponseWriter, path string, tokenPresented bool) {
+	if path != mcpPath {
 		return
 	}
-	cfg := s.mcpOAuthConfig(r.Context())
+	cfg := s.mcpOAuthConfig(ctx)
 	if !cfg.active() {
 		return
 	}
-	header := fmt.Sprintf(`Bearer realm="VisitFlow", resource_metadata=%q`, mcpMetadataURL(s.mcpResource(r.Context(), r, cfg)))
+	header := fmt.Sprintf(`Bearer realm="VisitFlow", resource_metadata=%q`, mcpMetadataURL(cfg.Resource))
 	if tokenPresented {
 		header += `, error="invalid_token"`
 	}
@@ -321,7 +370,8 @@ func (s *Server) mcpChallenge(w http.ResponseWriter, r *http.Request, tokenPrese
 // protectedResourceMetadata is RFC 9728: the document a refused MCP client
 // reads to find the authorization server. Public by design — it says where to
 // sign in, not who is signed in — and a bare document rather than this API's
-// error envelope, because the reader is an OAuth library.
+// error envelope, because the reader is an OAuth library. The request is used
+// for its context only; the resource it names is the configured one.
 func (s *Server) protectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	// Browser-hosted MCP clients read this cross-origin.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -336,7 +386,7 @@ func (s *Server) protectedResourceMetadata(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"resource":                 s.mcpResource(r.Context(), r, cfg),
+		"resource":                 cfg.Resource,
 		"authorization_servers":    []string{cfg.Issuer},
 		"bearer_methods_supported": []string{"header"},
 		"scopes_supported":         cfg.Scopes,
@@ -346,9 +396,13 @@ func (s *Server) protectedResourceMetadata(w http.ResponseWriter, r *http.Reques
 
 // mcpOAuthInfo is what the key page and the settings screen show a person so
 // they can connect with nothing but the URL: whether SSO is on and where the
-// endpoint and its metadata live.
-func (s *Server) mcpOAuthInfo(ctx context.Context, r *http.Request) map[string]any {
+// endpoint and its metadata live. With no resource configured there is no URL
+// to show, and enabled is false because no token could be accepted.
+func (s *Server) mcpOAuthInfo(ctx context.Context) map[string]any {
 	cfg := s.mcpOAuthConfig(ctx)
-	resource := s.mcpResource(ctx, r, cfg)
-	return map[string]any{"enabled": cfg.active(), "resource": resource, "metadataUrl": mcpMetadataURL(resource), "scopes": cfg.Scopes}
+	metadataURL := ""
+	if cfg.Resource != "" {
+		metadataURL = mcpMetadataURL(cfg.Resource)
+	}
+	return map[string]any{"enabled": cfg.active(), "resource": cfg.Resource, "metadataUrl": metadataURL, "scopes": cfg.Scopes}
 }

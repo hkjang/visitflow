@@ -166,7 +166,7 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 		// unauthorized answers a 401. On /mcp with SSO tokens enabled it also
 		// says where to sign in (mcpoauth.go); everywhere else it is unchanged.
 		unauthorized := func(code, message string, tokenPresented bool) {
-			s.mcpChallenge(w, r, tokenPresented)
+			s.mcpChallenge(r.Context(), w, r.URL.Path, tokenPresented)
 			writeError(w, http.StatusUnauthorized, code, message)
 		}
 		bearerPresented := false
@@ -208,13 +208,13 @@ func (s *Server) authenticated(next http.Handler, allowKiosk bool) http.Handler 
 				// when the administrator turned it on; otherwise it falls through
 				// to the same refusal a stray bearer always got.
 				if cfg := s.mcpOAuthConfig(r.Context()); cfg.active() {
-					principal, scopes, refusal := s.mcpOAuthPrincipal(r.Context(), r, cfg, raw)
+					principal, scopes, refusal := s.mcpOAuthPrincipal(r.Context(), cfg, raw)
 					if refusal != nil {
 						// The client hears what to do; the log keeps which check
 						// failed (signature, issuer, expiry, audience, account…).
 						s.logger.Warn("mcp oauth token refused", "code", refusal.code, "cause", refusal.cause, "request_id", middleware.GetReqID(r.Context()))
 						if refusal.status == http.StatusUnauthorized {
-							s.mcpChallenge(w, r, true)
+							s.mcpChallenge(r.Context(), w, r.URL.Path, true)
 						}
 						writeError(w, refusal.status, refusal.code, refusal.message)
 						return

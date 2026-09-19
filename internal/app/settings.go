@@ -129,6 +129,13 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "mcp_oauth_incomplete", "MCP SSO(OAuth) 인증을 켜려면 Keycloak Issuer URL이 필요합니다")
 		return
 	}
+	// The resource identifier a token's aud must name comes from configuration
+	// only — never from the request's Host — so without one there is nothing
+	// a token could be checked against.
+	if effective("mcp.oauth.enabled") == "true" && effective("mcp.oauth.resource") == "" && effective("general.base_url") == "" {
+		writeError(w, http.StatusBadRequest, "mcp_oauth_incomplete", "MCP SSO(OAuth) 인증을 켜려면 MCP 리소스 식별자 또는 일반 탭의 외부 기준 URL이 필요합니다")
+		return
+	}
 	if effective("smtp.enabled") == "true" && (effective("smtp.host") == "" || effective("smtp.from") == "") {
 		writeError(w, http.StatusBadRequest, "smtp_incomplete", "SMTP를 켜려면 서버 주소와 발신자 주소가 필요합니다")
 		return
