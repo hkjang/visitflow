@@ -83,26 +83,51 @@ func TestVisitorImportAcceptsExcelExports(t *testing.T) {
 		t.Fatalf("CP949 import: %v", visitors)
 	}
 
-	// XLSX straight from Excel.
+	// XLSX straight from Excel. Rows 3 and 4 hold the phone as a number, which
+	// is what Excel stores when the cell is typed without a leading apostrophe:
+	// the leading 0 is gone, and a scientific number format turns it into
+	// 1.012345678E+09. Both must come back as 01012345678 without a warning.
 	book := excelize.NewFile()
 	defer book.Close()
 	sheet := book.GetSheetName(0)
 	for index, row := range [][]string{
 		{"이름", "휴대전화", "회사명", "개인정보동의"},
 		{"이영희", "010-5555-6666", "델타", "동의"},
+		{"박숫자", "", "델타", "동의"},
+		{"최지수", "", "델타", "동의"},
 	} {
 		for column, value := range row {
 			cell, _ := excelize.CoordinatesToCellName(column+1, index+1)
 			_ = book.SetCellValue(sheet, cell, value)
 		}
 	}
+	if err := book.SetCellValue(sheet, "B3", 1012345678); err != nil {
+		t.Fatalf("numeric phone cell: %v", err)
+	}
+	scientific := "0.000000000E+00"
+	style, err := book.NewStyle(&excelize.Style{CustomNumFmt: &scientific})
+	if err != nil {
+		t.Fatalf("scientific style: %v", err)
+	}
+	if err := book.SetCellValue(sheet, "B4", 1012345678); err != nil {
+		t.Fatalf("numeric phone cell: %v", err)
+	}
+	if err := book.SetCellStyle(sheet, "B4", "B4", style); err != nil {
+		t.Fatalf("scientific phone cell: %v", err)
+	}
 	var xlsx bytes.Buffer
 	if err := book.Write(&xlsx); err != nil {
 		t.Fatalf("write xlsx: %v", err)
 	}
-	visitors, _ = importedVisitors(t, uploadImport(t, env, "visitors.xlsx", xlsx.Bytes()))
-	if len(visitors) != 1 || visitors[0]["name"] != "이영희" {
+	visitors, warnings = importedVisitors(t, uploadImport(t, env, "visitors.xlsx", xlsx.Bytes()))
+	if len(visitors) != 3 || visitors[0]["name"] != "이영희" || visitors[0]["phone"] != "010-5555-6666" {
 		t.Fatalf("XLSX import: %v", visitors)
+	}
+	if visitors[1]["phone"] != "01012345678" || visitors[2]["phone"] != "01012345678" {
+		t.Fatalf("numeric phone cells should be restored to 01012345678, got %v / %v", visitors[1]["phone"], visitors[2]["phone"])
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("restored phones must not warn, got %v", warnings)
 	}
 
 	// A missing consent column is a warning, not a rejection: the requester
@@ -152,6 +177,69 @@ func TestVisitorImportAcceptsExcelExports(t *testing.T) {
 	var stored int
 	if err := env.server.db.QueryRow(context.Background(), `SELECT count(*) FROM visitors WHERE company='ABC테크'`).Scan(&stored); err != nil || stored != 1 {
 		t.Fatalf("company not stored as typed: %d %v", stored, err)
+	}
+}
+
+func TestImportPhoneRestoresLeadingZeroFromNumericCells(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		// Excel stored the cell as a number and dropped the leading 0.
+		{"1012345678", "01012345678"},
+		{"3112345678", "03112345678"},
+		{"21234567", "021234567"},
+		// A scientific number format keeps every digit here, so it is restored.
+		{"1.012345678E+09", "01012345678"},
+		{"1.012345678e9", "01012345678"},
+		{"1.012345678E9", "01012345678"},
+		{"3.112345678E+09", "03112345678"},
+		// Already a phone number as typed: untouched byte for byte.
+		{"01012345678", "01012345678"},
+		{"010-1234-5678", "010-1234-5678"},
+		{"010 1234 5678", "010 1234 5678"},
+		{"+82 10 1234 5678", "+82 10 1234 5678"},
+		{"+821012345678", "+821012345678"},
+		// Outside the 8-10 digit window: an international number without +, or
+		// something too short to be a phone at all.
+		{"21012345678", "21012345678"},
+		{"821012345678", "821012345678"},
+		{"2.1012345678E+10", "21012345678"},
+		{"1234567", "1234567"},
+		{"12", "12"},
+		{"", ""},
+		// A truncated mantissa cannot be restored: 1.01E+09 would become
+		// 01010000000, a wrong number stored silently. Leave it for the warning.
+		{"1.01E+09", "1.01E+09"},
+		{"1.0123E+09", "1.0123E+09"},
+		{"1.01234567E+09", "1.01234567E+09"},
+		// Not an integer, or too large to be exact: untouched.
+		{"1.0123456785E+09", "1.0123456785E+09"},
+		{"1.012345678E+15", "1.012345678E+15"},
+		{"1E+09", "1E+09"},
+		{"abc", "abc"},
+	} {
+		if got := importPhone(tc.in); got != tc.want {
+			t.Errorf("importPhone(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	// Through the parser: the numeric cell is stored restored and does not warn,
+	// while other columns are untouched.
+	visitors, warnings, err := visitorInputsFromRows([][]string{
+		{"이름", "휴대전화", "회사명", "개인정보동의"},
+		{"홍길동", "1012345678", "1012345678", "동의"},
+		{"김철수", "1.012345678E+09", "ABC", "동의"},
+		{"이영희", "1.01E+09", "ABC", "동의"},
+	})
+	if err != nil || len(visitors) != 3 {
+		t.Fatalf("parse: %v %v", visitors, err)
+	}
+	if visitors[0].Phone != "01012345678" || visitors[1].Phone != "01012345678" || visitors[2].Phone != "1.01E+09" {
+		t.Fatalf("phones: %q %q %q", visitors[0].Phone, visitors[1].Phone, visitors[2].Phone)
+	}
+	if visitors[0].Company != "1012345678" {
+		t.Fatalf("company column must not be touched, got %q", visitors[0].Company)
+	}
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "행 4:") {
+		t.Fatalf("only the truncated row should warn, got %v", warnings)
 	}
 }
 

@@ -5,9 +5,11 @@ import (
 	"encoding/csv"
 	"errors"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -169,6 +171,44 @@ func importConsent(value string) bool {
 	return false
 }
 
+// importScientific matches the scientific notation Excel gives a numeric cell
+// under a "0.00E+00" style format: a mantissa with an optional fraction and an
+// exponent.
+var importScientific = regexp.MustCompile(`^(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$`)
+
+// importPhone repairs a phone cell that Excel stored as a number. A number cell
+// loses its leading 0 (01012345678 becomes 1012345678, which passes the length
+// check and would be saved as a wrong number), and a scientific format renders
+// it as 1.012345678E+09. Only 8–10 digit values without a leading 0 are
+// prefixed, so an international number (821012345678) or a short extension is
+// left alone; a value that already looks like a phone number is returned byte
+// for byte. Scientific notation is expanded only when the mantissa carries every
+// digit of the integer — a truncated 1.01E+09 would otherwise be saved as
+// 01010000000, so it is left as is and falls through to the existing warning.
+func importPhone(value string) string {
+	if match := importScientific.FindStringSubmatch(value); match != nil {
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil || parsed <= 0 || parsed >= 1e15 || parsed != math.Trunc(parsed) {
+			return value
+		}
+		integer := strconv.FormatInt(int64(parsed), 10)
+		mantissa := strings.TrimLeft(match[1]+match[2], "0")
+		if len(mantissa) < len(integer) {
+			return value
+		}
+		value = integer
+	}
+	if len(value) < 8 || len(value) > 10 || value[0] == '0' {
+		return value
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return value
+		}
+	}
+	return "0" + value
+}
+
 func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 	if len(rows) < 2 {
 		return nil, nil, errors.New("헤더와 방문자 데이터가 필요합니다")
@@ -196,7 +236,7 @@ func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 	visitors := make([]VisitorInput, 0, len(rows)-headerRow-1)
 	warnings := []string{}
 	for rowIndex, row := range rows[headerRow+1:] {
-		name, phone := cell(row, "name"), cell(row, "phone")
+		name, phone := cell(row, "name"), importPhone(cell(row, "phone"))
 		if name == "" && phone == "" {
 			continue
 		}
