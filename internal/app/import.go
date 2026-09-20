@@ -184,7 +184,8 @@ var importScientific = regexp.MustCompile(`^(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$`)
 // left alone; a value that already looks like a phone number is returned byte
 // for byte. Scientific notation is expanded only when the mantissa carries every
 // digit of the integer — a truncated 1.01E+09 would otherwise be saved as
-// 01010000000, so it is left as is and falls through to the existing warning.
+// 01010000000, so it is left as is for the caller to warn about unresolved
+// scientific notation.
 func importPhone(value string) string {
 	if match := importScientific.FindStringSubmatch(value); match != nil {
 		parsed, err := strconv.ParseFloat(value, 64)
@@ -244,7 +245,11 @@ func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 			return nil, nil, errors.New("한 번에 최대 100명의 방문자를 가져올 수 있습니다")
 		}
 		consent := importConsent(cell(row, "consent"))
-		if name == "" || len(normalizePhone(phone)) < 7 {
+		scientific := importScientific.MatchString(phone)
+		if scientific {
+			warnings = append(warnings, "행 "+rowNumber(rowIndex)+": 휴대전화가 지수 표기로 남아 정확한 번호를 확인할 수 없습니다. 원본 번호를 확인하고 텍스트 형식으로 다시 입력하세요")
+		}
+		if name == "" || (!scientific && len(normalizePhone(phone)) < 7) {
 			warnings = append(warnings, "행 "+rowNumber(rowIndex)+": 이름 또는 휴대전화를 확인하세요")
 		}
 		if !consent {

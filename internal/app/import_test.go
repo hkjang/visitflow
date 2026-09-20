@@ -3,11 +3,13 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,7 +32,9 @@ func uploadImport(t *testing.T, env *testEnv, filename string, content []byte) *
 	if err := writer.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/visits/import/preview", &body)
+	ctx, cancel := env.requestContext()
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/visits/import/preview", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	request.Header.Set("X-CSRF-Token", env.csrf)
 	request.RemoteAddr = "10.0.0.1:5000"
@@ -39,6 +43,9 @@ func uploadImport(t *testing.T, env *testEnv, filename string, content []byte) *
 	}
 	response := httptest.NewRecorder()
 	env.handler.ServeHTTP(response, request)
+	if reason := requestTimedOut(ctx, request.Method, request.URL.Path); reason != "" {
+		t.Fatal(reason)
+	}
 	return response
 }
 
@@ -59,6 +66,24 @@ func importedVisitors(t *testing.T, response *httptest.ResponseRecorder) ([]map[
 
 func TestVisitorImportAcceptsExcelExports(t *testing.T) {
 	env := newTestEnv(t)
+	for filename, content := range scientificPhoneFiles(t) {
+		t.Run(filename, func(t *testing.T) {
+			visitors, warnings := importedVisitors(t, uploadImport(t, env, filename, content))
+			data, err := json.Marshal(visitors)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var inputs []VisitorInput
+			if err := json.Unmarshal(data, &inputs); err != nil {
+				t.Fatal(err)
+			}
+			texts := make([]string, len(warnings))
+			for i, warning := range warnings {
+				texts[i] = warning.(string)
+			}
+			checkScientificPhonePreview(t, inputs, texts)
+		})
+	}
 	header := "이름,휴대전화,회사명,반입장비,개인정보동의\n"
 	rows := "홍길동,010-1234-5678,ABC테크,노트북;카메라,동의\n김철수,010-9876-5432,XYZ,,동의\n"
 
@@ -210,6 +235,7 @@ func TestImportPhoneRestoresLeadingZeroFromNumericCells(t *testing.T) {
 		{"1.01E+09", "1.01E+09"},
 		{"1.0123E+09", "1.0123E+09"},
 		{"1.01234567E+09", "1.01234567E+09"},
+		{"1.01234568E+09", "1.01234568E+09"},
 		// Not an integer, or too large to be exact: untouched.
 		{"1.0123456785E+09", "1.0123456785E+09"},
 		{"1.012345678E+15", "1.012345678E+15"},
@@ -322,5 +348,147 @@ func TestImportFindsHeaderBelowTitleRows(t *testing.T) {
 	// A row that has only one of the two required columns is not a header.
 	if _, _, err := visitorInputsFromRows([][]string{{"이름", "회사명"}, {"홍길동", "ABC"}}); err == nil || !strings.Contains(err.Error(), "휴대전화(phone)") {
 		t.Fatalf("missing phone column should be reported, got %v", err)
+	}
+}
+
+// The CSV contains Excel's displayed values; the workbook produces those same
+// values from numeric cells with real scientific number formats.
+func scientificPhoneFiles(t *testing.T) map[string][]byte {
+	t.Helper()
+	rows := [][]string{
+		{"협력사 방문 명단"}, {"", "", "", ""},
+		{"이름", "휴대전화", "회사명", "개인정보동의"},
+		{"숫자", "1012345678", "1012345678", "동의"},
+		{"정밀", "1.012345678E+09", "ABC", "동의"},
+		{"짧음", "1.01E+09", "ABC", "동의"},
+		{"중간", "1.0123E+09", "ABC", "동의"},
+		{"반올림", "1.01234568E+09", "ABC", "동의"},
+		{"", "", "", ""},
+		{"", "1.01E+09", "ABC", ""},
+		{"접두사", "01012345678", "ABC", "동의"},
+		{"하이픈", "010-1234-5678", "ABC", "동의"},
+		{"공백", "010 1234 5678", "ABC", "동의"},
+		{"국제", "+82 10 1234 5678", "ABC", "동의"},
+	}
+	var csvData bytes.Buffer
+	writer := csv.NewWriter(&csvData)
+	if err := writer.WriteAll(rows); err != nil {
+		t.Fatal(err)
+	}
+	book := excelize.NewFile()
+	defer book.Close()
+	sheet := book.GetSheetName(0)
+	for i, row := range rows {
+		for j, value := range row {
+			cell, err := excelize.CoordinatesToCellName(j+1, i+1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := book.SetCellValue(sheet, cell, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for row, format := range map[int]string{4: "", 5: "0.000000000E+00", 6: "0.00E+00", 7: "0.0000E+00", 8: "0.00000000E+00", 10: "0.00E+00"} {
+		cell := fmt.Sprintf("B%d", row)
+		if err := book.SetCellValue(sheet, cell, 1012345678); err != nil {
+			t.Fatal(err)
+		}
+		if format != "" {
+			style, err := book.NewStyle(&excelize.Style{CustomNumFmt: &format})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := book.SetCellStyle(sheet, cell, cell, style); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var xlsx bytes.Buffer
+	if err := book.Write(&xlsx); err != nil {
+		t.Fatal(err)
+	}
+	return map[string][]byte{"scientific.csv": csvData.Bytes(), "scientific.xlsx": xlsx.Bytes()}
+}
+
+func checkScientificPhonePreview(t *testing.T, visitors []VisitorInput, warnings []string) {
+	t.Helper()
+	wantPhones := []string{"01012345678", "01012345678", "1.01E+09", "1.0123E+09", "1.01234568E+09", "1.01E+09", "01012345678", "010-1234-5678", "010 1234 5678", "+82 10 1234 5678"}
+	if len(visitors) != len(wantPhones) {
+		t.Fatalf("visitors: %v", visitors)
+	}
+	for i, want := range wantPhones {
+		if visitors[i].Phone != want {
+			t.Errorf("visitor %d phone = %q, want %q", i, visitors[i].Phone, want)
+		}
+		company := "ABC"
+		if i == 0 {
+			company = "1012345678"
+		}
+		if visitors[i].Company != company {
+			t.Errorf("visitor %d company = %q", i, visitors[i].Company)
+		}
+	}
+	wantWarnings := []string{}
+	for _, row := range []int{6, 7, 8, 10} {
+		wantWarnings = append(wantWarnings, fmt.Sprintf("행 %d: 휴대전화가 지수 표기로 남아 정확한 번호를 확인할 수 없습니다. 원본 번호를 확인하고 텍스트 형식으로 다시 입력하세요", row))
+	}
+	wantWarnings = append(wantWarnings, "행 10: 이름 또는 휴대전화를 확인하세요", "행 10: 개인정보 동의 확인이 필요합니다")
+	if !reflect.DeepEqual(warnings, wantWarnings) {
+		t.Errorf("warnings = %v, want %v", warnings, wantWarnings)
+	}
+}
+
+func TestImportScientificPhoneFiles(t *testing.T) {
+	for filename, content := range scientificPhoneFiles(t) {
+		t.Run(filename, func(t *testing.T) {
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			part, err := writer.CreateFormFile("file", filename)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := part.Write(content); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			form, err := multipart.NewReader(&body, writer.Boundary()).ReadForm(maxVisitorImportSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer form.RemoveAll()
+			header := form.File["file"][0]
+			file, err := header.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			rows, err := readVisitorImportRows(file, header)
+			if err != nil {
+				t.Fatal(err)
+			}
+			visitors, warnings, err := visitorInputsFromRows(rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkScientificPhonePreview(t, visitors, warnings)
+		})
+	}
+}
+
+func TestImportScientificPhonesKeepVisitorLimit(t *testing.T) {
+	rows := [][]string{{"이름", "휴대전화", "개인정보동의"}}
+	for i := 0; i < 100; i++ {
+		rows = append(rows, []string{}, []string{"방문자", "1.0123E+09", "동의"})
+	}
+	visitors, warnings, err := visitorInputsFromRows(rows)
+	if err != nil || len(visitors) != 100 || len(warnings) != 100 {
+		t.Fatalf("100 visitors: count=%d warnings=%d error=%v", len(visitors), len(warnings), err)
+	}
+	rows = append(rows, []string{"추가 방문자", "1.0123E+09", "동의"})
+	if _, _, err := visitorInputsFromRows(rows); err == nil || err.Error() != "한 번에 최대 100명의 방문자를 가져올 수 있습니다" {
+		t.Fatalf("101 visitors: %v", err)
 	}
 }
