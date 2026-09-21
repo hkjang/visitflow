@@ -85,6 +85,7 @@ export interface ReferenceData {
   locales?: string[];
   defaultLocale?: string;
   selfRegistrationEnabled?: boolean;
+  companyRequired?: boolean;
 }
 
 export interface FrequentVisitor {

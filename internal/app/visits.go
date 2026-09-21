@@ -136,6 +136,7 @@ func (s *Server) referenceData(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sites": sites, "lobbies": lobbies, "departments": departments, "hosts": hosts,
 		"visitTypes": visitTypes, "locales": s.supportedLocales(r.Context()), "defaultLocale": s.defaultLocale(r.Context()),
+		"companyRequired":         settingOr(s, r.Context(), "visit.company_required", "false") == "true",
 		"selfRegistrationEnabled": settingOr(s, r.Context(), "visit.self_registration_enabled", "true") == "true",
 	})
 }
