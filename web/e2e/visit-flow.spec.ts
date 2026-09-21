@@ -167,3 +167,112 @@ test.describe("visitor lifecycle", () => {
     await expect(page.getByText(/총 \d+명/)).toBeVisible();
   });
 });
+
+for (const path of ["/visits/new", "/lobby/walk-in"]) {
+  test(`company policy blocks missing companies and permits registration on ${path}`, async ({ page }) => {
+    await login(page);
+    const original = await page.evaluate(async () => {
+      const response = await fetch("/api/v1/settings");
+      if (!response.ok) throw new Error("settings read failed");
+      const data = await response.json();
+      return data.items.find((item: { key: string }) => item.key === "visit.company_required").value as string;
+    });
+    const setPolicy = async (value: string) => {
+      const status = await page.evaluate(async (value) => {
+        const me = await fetch("/api/v1/auth/me").then((r) => r.json());
+        const response = await fetch("/api/v1/settings", {
+          method: "PUT", headers: { "Content-Type": "application/json", "X-CSRF-Token": me.csrfToken },
+          body: JSON.stringify({ settings: { "visit.company_required": value } }),
+        });
+        return response.status;
+      }, value);
+      expect(status).toBe(200);
+    };
+    const openForm = async () => {
+      const referenceResponse = page.waitForResponse((r) => r.url().endsWith("/api/v1/reference-data"));
+      await page.goto(path);
+      const reference = await (await referenceResponse).json();
+      await page.getByLabel(/^방문 목적/).fill("회사 정책 E2E");
+      if (path === "/lobby/walk-in") {
+        await page.getByLabel(/^방문 담당자 검색/).fill(reference.hosts[0].name);
+        await page.getByRole("option").first().click();
+      }
+      await page.getByLabel(/^이름/).first().fill("정책방문자");
+      await page.getByLabel(/^휴대전화/).first().fill("01012345678");
+      return reference;
+    };
+    const submit = page.getByRole("main").getByRole("button", { name: path === "/visits/new" ? "방문 신청 제출" : "현장 방문 등록", exact: true });
+    try {
+      await setPolicy("true");
+      expect((await openForm()).companyRequired).toBe(true);
+      const companies = page.getByLabel(/^회사명/);
+      await expect(companies.first()).toHaveAttribute("required", "");
+      await expect(page.getByText("현재 정책상 회사명은 필수입니다").first()).toBeVisible();
+      await expect(submit).toBeDisabled();
+      await companies.first().fill("   ");
+      await expect(submit).toBeDisabled();
+      await companies.first().fill("정상회사");
+      await expect(submit).toBeEnabled();
+      await page.getByRole("button", { name: "방문자 추가" }).click();
+      await page.getByLabel(/^이름/).nth(1).fill("동행방문자");
+      await page.getByLabel(/^휴대전화/).nth(1).fill("01098765432");
+      await expect(companies.nth(1)).toHaveAttribute("required", "");
+      await expect(submit).toBeDisabled();
+      await companies.nth(1).fill("동행회사");
+      await expect(submit).toBeEnabled();
+      const imported = page.waitForResponse((r) => r.url().endsWith("/api/v1/visits/import/preview"));
+      await page.locator('input[type="file"]').setInputFiles({
+        name: "company-policy.csv", mimeType: "text/csv",
+        buffer: Buffer.from("이름,휴대전화,회사명,개인정보동의\n파일대표,01012345678,파일회사,예\n파일동행,01098765432,,예\n"),
+      });
+      expect((await imported).status()).toBe(200);
+      await expect(page.getByLabel(/^이름/).nth(1)).toHaveValue("파일동행");
+      await expect(companies.first()).toHaveValue("파일회사");
+      await expect(companies.nth(1)).toHaveValue("");
+      await expect(submit).toBeDisabled();
+      await companies.nth(1).fill("파일동행회사");
+      await expect(submit).toBeEnabled();
+      await submit.click();
+      await expect(page.getByRole("heading", { name: "방문 등록 완료" })).toBeVisible();
+      if (path === "/visits/new") {
+        const templateName = `회사 정책 템플릿 ${Date.now()}`;
+        await page.evaluate(async (name) => {
+          const me = await fetch("/api/v1/auth/me").then((r) => r.json());
+          const create = async (url: string, body: unknown) => {
+            const response = await fetch(url, {
+              method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": me.csrfToken },
+              body: JSON.stringify(body),
+            });
+            if (response.status !== 201) throw new Error(`fixture creation failed: ${response.status}`);
+            return response.json();
+          };
+          const visitor = await create("/api/v1/frequent-visitors", {
+            name: "템플릿방문자", phone: `010${Date.now().toString().slice(-8)}`, company: "", consent: true, equipment: [],
+          });
+          await create("/api/v1/visit-templates", {
+            name, payload: { purpose: "템플릿 회사 정책" }, frequentVisitorIds: [visitor.id],
+          });
+        }, templateName);
+        await page.goto("/templates");
+        await page.locator(".MuiCard-root").filter({ hasText: templateName })
+          .getByRole("button", { name: "이 템플릿으로 신청" }).click();
+        await expect(page.getByLabel(/^이름/).first()).toHaveValue("템플릿방문자");
+        await expect(companies.first()).toHaveValue("");
+        await expect(submit).toBeDisabled();
+        await companies.first().fill("템플릿회사");
+        await expect(submit).toBeEnabled();
+        await submit.click();
+        await expect(page.getByRole("heading", { name: "방문 등록 완료" })).toBeVisible();
+      }
+      await setPolicy("false");
+      expect((await openForm()).companyRequired).toBe(false);
+      await expect(companies.first()).not.toHaveAttribute("required");
+      await expect(page.getByText("현재 정책상 회사명은 필수입니다")).toHaveCount(0);
+      await expect(submit).toBeEnabled();
+      await submit.click();
+      await expect(page.getByRole("heading", { name: "방문 등록 완료" })).toBeVisible();
+    } finally {
+      await setPolicy(original);
+    }
+  });
+}
