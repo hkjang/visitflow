@@ -846,6 +846,35 @@ func TestParticipantCancelAndSeriesCancel(t *testing.T) {
 	}
 }
 
+// 방문자 수와 반복 예약이 만드는 전체 일정 수의 상한. 신청 화면
+// (web/src/visitors.ts)이 같은 경계를 미리 보여주므로, 서버 상한을 옮기면 화면과
+// 어긋난다. 두 상한을 여기서 고정한다.
+func TestVisitorCountAndRecurrenceLimits(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	visitors := func(count int) []map[string]any {
+		list := make([]map[string]any, 0, count)
+		for i := range count {
+			list = append(list, map[string]any{"name": fmt.Sprintf("방문자%d", i+1), "phone": fmt.Sprintf("010-1000-%04d", i+1), "company": "테스트상사", "consent": true})
+		}
+		return list
+	}
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{"visitors": visitors(100)}), http.StatusCreated)
+	over := env.do(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{"visitors": visitors(101)}))
+	if over.Code != http.StatusBadRequest || !strings.Contains(over.Body.String(), "required_fields") {
+		t.Fatalf("방문자 101명이 %d 로 응답했다: %s", over.Code, over.Body.String())
+	}
+	// 방문자 10명이면 50회까지가 500건이고, 화면이 안내하던 52회는 520건이라 거절된다.
+	weekly := func(occurrences int) map[string]any {
+		return map[string]any{"visitors": visitors(10), "recurrence": map[string]any{"frequency": "weekly", "occurrences": occurrences}}
+	}
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, weekly(50)), http.StatusCreated)
+	tooMany := env.do(http.MethodPost, "/api/v1/visits", visitBody(siteID, weekly(51)))
+	if tooMany.Code != http.StatusBadRequest || !strings.Contains(tooMany.Body.String(), "invalid_recurrence") {
+		t.Fatalf("방문자 10명 51회 반복이 %d 로 응답했다: %s", tooMany.Code, tooMany.Body.String())
+	}
+}
+
 func TestManualCheckInAndRejectionDetail(t *testing.T) {
 	env := newTestEnv(t)
 	siteID := env.siteID()
