@@ -18,6 +18,26 @@ export function visitorFieldErrors(visitor: VisitorCheck): VisitorFieldErrors {
   };
 }
 
+// 한 신청에 담을 수 있는 방문자 수. 서버 createVisitRecord 는 101명부터
+// required_fields 로 거절한다.
+export const maxVisitors = 100;
+// 반복 예약이 만드는 전체 방문 일정 수의 상한. 서버는
+// occurrences*len(Visitors) 가 이 값을 넘으면 invalid_recurrence 로 거절한다.
+export const maxRecurringSchedules = 500;
+
+export function visitorCountError(count: number): string {
+  return count > maxVisitors ? `방문자는 최대 ${maxVisitors}명까지 등록할 수 있습니다` : "";
+}
+
+// 반복 횟수 자체의 2~52회 범위는 입력칸이 이미 좁혀 두므로, 여기서는 방문자 수에
+// 따라 달라지는 전체 일정 상한만 본다. 화면의 "최대 52회" 안내는 방문자가 한
+// 명일 때만 맞고, 10명이면 실제 상한은 50회다.
+export function recurrenceError(visitorCount: number, occurrences: number): string {
+  if (visitorCount < 1 || occurrences * visitorCount <= maxRecurringSchedules) return "";
+  const allowed = Math.floor(maxRecurringSchedules / visitorCount);
+  return `방문자 ${visitorCount}명이면 반복 예약은 최대 ${allowed}회까지 가능합니다 (전체 방문 일정 ${maxRecurringSchedules}건 상한)`;
+}
+
 // 제출 버튼과 submit() 가드가 읽는 값. 칸에 붙는 안내와 어긋나지 않도록
 // 같은 visitorFieldErrors 결과에서만 만든다.
 export function visitorsError(visitors: VisitorCheck[]): string {
