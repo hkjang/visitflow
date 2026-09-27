@@ -39,10 +39,22 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
   const [purpose, setPurpose] = useState(""); const [placeDetail, setPlaceDetail] = useState(""); const [notes, setNotes] = useState(""); const [visitors, setVisitors] = useState<VisitorDraft[]>([blankVisitor()]);
   const [repeatWeekly, setRepeatWeekly] = useState(false); const [repeatCount, setRepeatCount] = useState(2); const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState(false); const [templateLoading, setTemplateLoading] = useState(false); const [error, setError] = useState(""); const [created, setCreated] = useState<{ requestNo: string; status: string; passUrls?: string[] } | null>(null);
+  // 기준 정보 실패는 닫을 수 있는 error Alert 과 따로 둔다: 사업장·로비·부서·방문 유형이
+  // 전부 비고 siteId 가 "" 라 제출이 영구히 잠기는데, 하나뿐인 Alert 을 닫으면 이유도
+  // 복구 수단도 없는 빈 양식만 남기 때문이다.
+  const [refError, setRefError] = useState(""); const [refLoading, setRefLoading] = useState(true);
   const { user } = useAuth();
   const siteScope = user?.role === "lobby" ? (user.siteScope ?? []) : [];
   const sites = (ref?.sites ?? []).filter((x) => siteScope.length === 0 || siteScope.includes(x.id));
-  useEffect(() => { api<ReferenceData>("/api/v1/reference-data").then((x) => { setRef(x); const first = x.sites.find((site) => siteScope.length === 0 || siteScope.includes(site.id)); if (first) setSiteId(first.id); }).catch((e) => setError(e.message)); }, []);
+  const loadReference = async () => {
+    setRefLoading(true);
+    try {
+      const x = await api<ReferenceData>("/api/v1/reference-data");
+      setRef(x); const first = x.sites.find((site) => siteScope.length === 0 || siteScope.includes(site.id)); if (first) setSiteId(first.id);
+      setRefError("");
+    } catch (e) { setRefError(e instanceof Error ? e.message : "기준 정보를 불러오지 못했습니다"); } finally { setRefLoading(false); }
+  };
+  useEffect(() => { void loadReference(); }, []);
   useEffect(() => {
     if (walkIn) return undefined;
     const templateID = sessionStorage.getItem("visitflow_template_id");
@@ -106,7 +118,7 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
     } catch (e) { setError(e instanceof Error ? e.message : "방문자 파일을 읽지 못했습니다"); }
   };
   if (created) return <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 900, mx: "auto" }}><Card><CardContent sx={{ p: { xs: 3, md: 6 }, textAlign: "center" }}><Box sx={{ width: 72, height: 72, borderRadius: "50%", bgcolor: "#E4F3EC", color: "success.main", display: "grid", placeItems: "center", mx: "auto", fontSize: 34 }}>✓</Box><Typography variant="h4" sx={{ mt: 2 }}>방문 등록 완료</Typography><Typography color="text.secondary" sx={{ mt: 1 }}>방문번호 <strong>{created.requestNo}</strong> · 상태 {created.status}</Typography>{created.passUrls?.map((url) => <Paper key={url} variant="outlined" sx={{ mt: 2, p: 1.5, display: "flex", alignItems: "center", gap: 1, wordBreak: "break-all" }}><Typography variant="body2" sx={{ flex: 1 }}>{url}</Typography><IconButton onClick={() => void navigator.clipboard.writeText(url)}><ContentCopyRounded /></IconButton></Paper>)}<Alert severity="info" sx={{ mt: 3, textAlign: "left" }}>{walkIn ? "현장 방문자를 즉시 체크인하고 담당자 도착 알림을 대기열에 등록했습니다." : created.status === "PENDING_APPROVAL" ? "승인 완료 후 방문자별 QR 방문증이 발급되고 알림 큐에 등록됩니다." : "방문자별 모바일 방문증이 발급되었고 관리자가 설정한 메시지 발송 규칙에 등록됩니다."}</Alert><Stack direction="row" justifyContent="center" spacing={1} mt={3}><Button onClick={() => navigate(walkIn ? "/lobby" : "/visits")}>목록으로</Button><Button variant="contained" onClick={() => window.location.reload()}>새로 등록</Button></Stack></CardContent></Card></Box>;
-  return <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1100, mx: "auto" }}><PageHeader eyebrow={walkIn ? "WALK-IN" : "NEW VISIT"} title={walkIn ? "현장 방문 등록" : "방문 신청"} description={walkIn ? "예약 없이 도착한 방문자를 담당자와 연결해 등록합니다." : "여러 방문자도 한 번에 등록하고 각각 고유한 QR 방문증을 발급합니다."} />{error && <Alert severity="error" onClose={() => setError("")} sx={{ mb: 2 }}>{error}</Alert>}{templateLoading && <Alert severity="info" sx={{ mb: 2 }}>선택한 템플릿과 자주 방문자를 불러오는 중입니다.</Alert>}
+  return <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1100, mx: "auto" }}><PageHeader eyebrow={walkIn ? "WALK-IN" : "NEW VISIT"} title={walkIn ? "현장 방문 등록" : "방문 신청"} description={walkIn ? "예약 없이 도착한 방문자를 담당자와 연결해 등록합니다." : "여러 방문자도 한 번에 등록하고 각각 고유한 QR 방문증을 발급합니다."} />{error && <Alert severity="error" onClose={() => setError("")} sx={{ mb: 2 }}>{error}</Alert>}{refError && <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" size="small" disabled={refLoading} onClick={() => void loadReference()}>다시 불러오기</Button>}>{refLoading ? "기준 정보를 다시 불러오는 중입니다." : `기준 정보(사업장·로비·부서·방문 유형)를 불러오지 못해 양식을 채울 수 없습니다. 입력한 내용은 그대로 두고 다시 불러오기를 눌러 주세요. ${refError}`}</Alert>}{templateLoading && <Alert severity="info" sx={{ mb: 2 }}>선택한 템플릿과 자주 방문자를 불러오는 중입니다.</Alert>}
     <Card sx={{ opacity: templateLoading ? 0.65 : 1, pointerEvents: templateLoading ? "none" : "auto" }}><CardContent sx={{ p: { xs: 2, md: 4 } }}><Typography variant="h6">방문 일정</Typography><Typography variant="body2" color="text.secondary" mb={3}>언제, 어디에서, 누구를 만나는지 입력하세요.</Typography><Grid container spacing={2}>
       <Grid size={{ xs: 12, md: 6 }}><TextField select fullWidth required label="사업장" value={siteId} onChange={(e) => setSiteId(e.target.value)}>{sites.map((x) => <MenuItem key={x.id} value={x.id}>{x.name} · {x.address}</MenuItem>)}</TextField></Grid>
       <Grid size={{ xs: 12, md: 6 }}><TextField select fullWidth label="로비" value={lobbyId} onChange={(e) => setLobbyId(e.target.value)}>{siteLobbies.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField></Grid>
