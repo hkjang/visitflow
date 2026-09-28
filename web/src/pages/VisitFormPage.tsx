@@ -10,7 +10,7 @@ import { api, postJSON } from "../api";
 import type { FrequentVisitor, ReferenceData, VisitTemplate } from "../types";
 import { localeNames, type Locale } from "../i18n";
 import { scheduleError } from "../schedule";
-import { maxVisitors, recurrenceError, visitorCountError, visitorFieldErrors, visitorsError } from "../visitors";
+import { maxVisitors, recurrenceError, submitBlockReason, visitorCountError, visitorFieldErrors, visitorsError } from "../visitors";
 import { PageHeader } from "../components/AdminUI";
 import { useAuth } from "../auth";
 
@@ -81,8 +81,13 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
   }, [walkIn]);
   const visitTypes = ref?.visitTypes ?? [];
   const selectedType = visitTypes.find((x) => x.id === visitTypeId);
-  const checklistSatisfied = (!selectedType?.requiresNda || checklist.nda === true) && (!selectedType?.requiresSafetyBriefing || checklist.safetyBriefing === true);
-  const declarationsSatisfied = visitors.every((visitor) => (!selectedType?.requiresVehicle || visitor.vehicle.trim() !== "") && (!selectedType?.requiresEquipment || visitor.equipment.trim() !== ""));
+  // 체크리스트·차량/장비·개인정보 동의·현장 담당자는 제출 버튼을 이유 없이 잠그던
+  // 조건이다. 버튼 disabled·submit() 가드·화면 안내가 모두 이 값 하나만 읽는다.
+  const blockReason = submitBlockReason({
+    visitors, requiresNda: selectedType?.requiresNda === true, requiresSafetyBriefing: selectedType?.requiresSafetyBriefing === true,
+    requiresVehicle: selectedType?.requiresVehicle === true, requiresEquipment: selectedType?.requiresEquipment === true,
+    checklistNda: checklist.nda === true, checklistSafetyBriefing: checklist.safetyBriefing === true, walkIn, hostUserId,
+  });
   const companyRequired = ref?.companyRequired === true;
   const companiesSatisfied = !companyRequired || visitors.every((visitor) => visitor.company.trim() !== "");
   const scheduleMessage = scheduleError(startAt, endAt);
@@ -101,6 +106,7 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
     if (visitorMessage) { setError(visitorMessage); return; }
     if (visitorCountMessage) { setError(visitorCountMessage); return; }
     if (recurrenceMessage) { setError(recurrenceMessage); return; }
+    if (blockReason) { setError(blockReason); return; }
     setBusy(true); setError("");
     try {
       const body = { siteId, lobbyId, departmentId, hostUserId: walkIn ? hostUserId : undefined, visitTypeId: visitTypeId || undefined, checklist: selectedType ? checklist : undefined, startAt: new Date(startAt).toISOString(), endAt: new Date(endAt).toISOString(), purpose, placeDetail, notes, recurrence: !walkIn && repeatWeekly ? { frequency: "weekly", occurrences: repeatCount } : undefined, visitors: visitors.map((v) => ({ ...v, equipment: v.equipment.split(",").map((x) => x.trim()).filter(Boolean) })) };
@@ -136,6 +142,6 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
       <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth required label="이름" value={visitor.name} onChange={(e) => updateVisitor(index, { name: e.target.value })} error={fieldErrors.name !== ""} helperText={fieldErrors.name || undefined} /></Grid><Grid size={{ xs: 12, md: 4 }}><TextField fullWidth required label="휴대전화" value={visitor.phone} onChange={(e) => updateVisitor(index, { phone: e.target.value })} placeholder="010-0000-0000" error={fieldErrors.phone !== ""} helperText={fieldErrors.phone || undefined} /></Grid><Grid size={{ xs: 12, md: 4 }}><TextField fullWidth required={companyRequired} helperText={companyRequired ? "현재 정책상 회사명은 필수입니다" : undefined} label="회사명" value={visitor.company} onChange={(e) => updateVisitor(index, { company: e.target.value })} /></Grid>
       <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth label="이메일" value={visitor.email} onChange={(e) => updateVisitor(index, { email: e.target.value })} /></Grid><Grid size={{ xs: 12, md: 4 }}><TextField fullWidth label="직책" value={visitor.title} onChange={(e) => updateVisitor(index, { title: e.target.value })} /></Grid><Grid size={{ xs: 12, md: 4 }}><TextField fullWidth required={selectedType?.requiresVehicle} label="차량번호" value={visitor.vehicle} onChange={(e) => updateVisitor(index, { vehicle: e.target.value })} /></Grid>
       <Grid size={{ xs: 12, md: 8 }}><TextField fullWidth required={selectedType?.requiresEquipment} label="반입 장비" value={visitor.equipment} onChange={(e) => updateVisitor(index, { equipment: e.target.value })} helperText="노트북, 카메라, 저장장치처럼 쉼표로 구분" /></Grid><Grid size={{ xs: 12, md: 4 }}><TextField select fullWidth label="안내 언어" value={visitor.locale} onChange={(e) => updateVisitor(index, { locale: e.target.value })} helperText="모바일 방문증과 안내 문자에 사용합니다.">{[["", "기본 언어"], ...(ref?.locales ?? []).map((code) => [code, localeNames[code as Locale] ?? code])].map(([value, label]) => <MenuItem key={String(value)} value={String(value)}>{String(label)}</MenuItem>)}</TextField></Grid><Grid size={{ xs: 12 }}><FormControlLabel control={<Checkbox checked={visitor.consent} onChange={(e) => updateVisitor(index, { consent: e.target.checked })} />} label="방문자 개인정보 수집·이용 동의를 확인했습니다." /></Grid>
-    </Grid></Paper>; })}</Stack><Divider sx={{ my: 3 }} /><Stack direction={{ xs: "column-reverse", sm: "row" }} justifyContent="flex-end" spacing={1}><Button onClick={() => navigate(-1)}>취소</Button><Button variant="contained" endIcon={<SendRounded />} disabled={busy || templateLoading || !siteId || !purpose || !checklistSatisfied || !declarationsSatisfied || !companiesSatisfied || scheduleMessage !== "" || visitorMessage !== "" || visitorCountMessage !== "" || recurrenceMessage !== "" || visitors.some((x) => !x.name || !x.phone || !x.consent) || (walkIn && !hostUserId)} onClick={() => void submit()}>{busy ? "등록 중…" : walkIn ? "현장 방문 등록" : "방문 신청 제출"}</Button></Stack></CardContent></Card>
+    </Grid></Paper>; })}</Stack><Divider sx={{ my: 3 }} />{blockReason && <Alert severity="info" sx={{ mb: 2 }}>{blockReason}</Alert>}<Stack direction={{ xs: "column-reverse", sm: "row" }} justifyContent="flex-end" spacing={1}><Button onClick={() => navigate(-1)}>취소</Button><Button variant="contained" endIcon={<SendRounded />} disabled={busy || templateLoading || !siteId || !purpose || blockReason !== "" || !companiesSatisfied || scheduleMessage !== "" || visitorMessage !== "" || visitorCountMessage !== "" || recurrenceMessage !== "" || visitors.some((x) => !x.name || !x.phone)} onClick={() => void submit()}>{busy ? "등록 중…" : walkIn ? "현장 방문 등록" : "방문 신청 제출"}</Button></Stack></CardContent></Card>
   </Box>;
 }
