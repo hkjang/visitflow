@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { maxVisitors, recurrenceError, visitorCountError, visitorFieldErrors, visitorsError } from "./visitors";
+import { maxVisitors, recurrenceError, submitBlockReason, visitorCountError, visitorFieldErrors, visitorsError, type SubmitBlockInput } from "./visitors";
 
 const visitor = (name: string, phone: string) => ({ name, phone });
 
@@ -131,5 +131,103 @@ describe("recurrenceError", () => {
 
   it("never leaks English text into the Korean form", () => {
     expect(recurrenceError(10, 52)).not.toMatch(/[A-Za-z]/);
+  });
+});
+
+// 제출 버튼이 말없이 잠기던 네 가지 원인. 서버가 보는 것은 consent 뿐이고
+// (visits.go 의 invalid_visitor) 나머지 셋은 화면만의 게이트지만, 어느 쪽이든
+// 버튼이 잠긴 이유를 화면이 말해 주어야 한다.
+const block = (patch: Partial<SubmitBlockInput> = {}): SubmitBlockInput => ({
+  visitors: [{ consent: true, vehicle: "", equipment: "" }],
+  requiresNda: false,
+  requiresSafetyBriefing: false,
+  requiresVehicle: false,
+  requiresEquipment: false,
+  checklistNda: false,
+  checklistSafetyBriefing: false,
+  walkIn: false,
+  hostUserId: "",
+  ...patch,
+});
+
+describe("submitBlockReason", () => {
+  it("stays silent when nothing blocks submission", () => {
+    expect(submitBlockReason(block())).toBe("");
+  });
+
+  // 4) 아직 손대지 않은 빈 필수 칸(이름·전화·방문 목적)은 여기서 다루지 않는다 —
+  // 첫 화면을 빨갛게 칠하지 않는 visitors.ts 의 기존 방침.
+  it("stays silent for the untouched first screen", () => {
+    expect(submitBlockReason(block({ visitors: [{ consent: true, vehicle: "", equipment: "" }] }))).toBe("");
+  });
+
+  it("names the visitor whose consent checkbox is cleared", () => {
+    expect(submitBlockReason(block({ visitors: [{ consent: true, vehicle: "", equipment: "" }, { consent: false, vehicle: "", equipment: "" }] }))).toBe("방문자 2: 개인정보 수집·이용 동의를 확인해 주세요");
+  });
+
+  it("asks for the security pledge checkbox the visit type requires", () => {
+    expect(submitBlockReason(block({ requiresNda: true }))).toBe("선택한 방문 유형에는 보안서약 안내 확인이 필요합니다");
+    expect(submitBlockReason(block({ requiresNda: true, checklistNda: true }))).toBe("");
+  });
+
+  it("asks for the safety briefing checkbox the visit type requires", () => {
+    expect(submitBlockReason(block({ requiresSafetyBriefing: true }))).toBe("선택한 방문 유형에는 안전교육 이수 확인이 필요합니다");
+    expect(submitBlockReason(block({ requiresSafetyBriefing: true, checklistSafetyBriefing: true }))).toBe("");
+  });
+
+  it("names the visitor missing a vehicle number the visit type requires", () => {
+    expect(submitBlockReason(block({ requiresVehicle: true, visitors: [{ consent: true, vehicle: "12가3456", equipment: "" }, { consent: true, vehicle: "  ", equipment: "" }] }))).toBe("방문자 2: 선택한 방문 유형에는 차량번호가 필요합니다");
+  });
+
+  it("names the visitor missing the equipment the visit type requires", () => {
+    expect(submitBlockReason(block({ requiresEquipment: true, visitors: [{ consent: true, vehicle: "", equipment: " 노트북 " }, { consent: true, vehicle: "", equipment: "" }] }))).toBe("방문자 2: 선택한 방문 유형에는 반입 장비가 필요합니다");
+  });
+
+  it("asks a walk-in registration to pick a host", () => {
+    expect(submitBlockReason(block({ walkIn: true }))).toBe("현장 방문 등록에는 방문 담당자를 선택해야 합니다");
+    expect(submitBlockReason(block({ walkIn: true, hostUserId: "u1" }))).toBe("");
+  });
+
+  // 담당자 미선택은 현장 등록 화면에만 있는 게이트다.
+  it("ignores an empty host outside walk-in registration", () => {
+    expect(submitBlockReason(block({ walkIn: false, hostUserId: "" }))).toBe("");
+  });
+
+  // 한 줄만 보여 주므로 순서가 계약이다: 화면 위에서 아래로 —
+  // 담당자 → 체크리스트 → 방문자별(차량 → 장비 → 동의).
+  it("shows only the first cause when several apply", () => {
+    const all = block({ walkIn: true, requiresNda: true, requiresSafetyBriefing: true, requiresVehicle: true, requiresEquipment: true, visitors: [{ consent: false, vehicle: "", equipment: "" }] });
+    expect(submitBlockReason(all)).toBe("현장 방문 등록에는 방문 담당자를 선택해야 합니다");
+    expect(submitBlockReason({ ...all, hostUserId: "u1" })).toBe("선택한 방문 유형에는 보안서약 안내 확인이 필요합니다");
+    expect(submitBlockReason({ ...all, hostUserId: "u1", checklistNda: true })).toBe("선택한 방문 유형에는 안전교육 이수 확인이 필요합니다");
+    expect(submitBlockReason({ ...all, hostUserId: "u1", checklistNda: true, checklistSafetyBriefing: true })).toBe("방문자 1: 선택한 방문 유형에는 차량번호가 필요합니다");
+    expect(submitBlockReason({ ...all, hostUserId: "u1", checklistNda: true, checklistSafetyBriefing: true, visitors: [{ consent: false, vehicle: "12가3456", equipment: "" }] })).toBe("방문자 1: 선택한 방문 유형에는 반입 장비가 필요합니다");
+    expect(submitBlockReason({ ...all, hostUserId: "u1", checklistNda: true, checklistSafetyBriefing: true, visitors: [{ consent: false, vehicle: "12가3456", equipment: "노트북" }] })).toBe("방문자 1: 개인정보 수집·이용 동의를 확인해 주세요");
+  });
+
+  // 앞선 방문자의 원인이 뒤 방문자의 원인보다 먼저다.
+  it("reports the earlier visitor first", () => {
+    expect(submitBlockReason(block({ requiresVehicle: true, visitors: [{ consent: false, vehicle: "", equipment: "" }, { consent: false, vehicle: "", equipment: "" }] }))).toBe("방문자 1: 선택한 방문 유형에는 차량번호가 필요합니다");
+  });
+
+  // 2) 버튼 disabled 가 읽는 값이 하나가 되려면, 새 함수가 비어 있다는 것이
+  // 지금의 네 항을 모두 만족한다는 것과 정확히 같아야 한다.
+  it("matches the disabled expression it replaces", () => {
+    const flags = [false, true];
+    for (const requiresNda of flags) for (const requiresSafetyBriefing of flags) for (const requiresVehicle of flags) for (const requiresEquipment of flags) for (const checklistNda of flags) for (const checklistSafetyBriefing of flags) for (const walkIn of flags) for (const hostUserId of ["", "u1"]) for (const consent of flags) for (const vehicle of ["", "12가3456"]) for (const equipment of ["", "노트북"]) {
+      const input = block({ requiresNda, requiresSafetyBriefing, requiresVehicle, requiresEquipment, checklistNda, checklistSafetyBriefing, walkIn, hostUserId, visitors: [{ consent: true, vehicle: "12가3456", equipment: "노트북" }, { consent, vehicle, equipment }] });
+      const checklistSatisfied = (!requiresNda || checklistNda) && (!requiresSafetyBriefing || checklistSafetyBriefing);
+      const declarationsSatisfied = input.visitors.every((v) => (!requiresVehicle || v.vehicle.trim() !== "") && (!requiresEquipment || v.equipment.trim() !== ""));
+      const old = !checklistSatisfied || !declarationsSatisfied || input.visitors.some((x) => !x.consent) || (walkIn && hostUserId === "");
+      expect(submitBlockReason(input) !== "").toBe(old);
+    }
+  });
+
+  it("never leaks English text into the Korean form", () => {
+    for (const patch of [{ walkIn: true }, { requiresNda: true }, { requiresSafetyBriefing: true }, { requiresVehicle: true }, { requiresEquipment: true }, { visitors: [{ consent: false, vehicle: "", equipment: "" }] }]) {
+      const message = submitBlockReason(block(patch));
+      expect(message).not.toBe("");
+      expect(message).not.toMatch(/[A-Za-z]/);
+    }
   });
 });

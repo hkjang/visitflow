@@ -38,6 +38,40 @@ export function recurrenceError(visitorCount: number, occurrences: number): stri
   return `방문자 ${visitorCount}명이면 반복 예약은 최대 ${allowed}회까지 가능합니다 (전체 방문 일정 ${maxRecurringSchedules}건 상한)`;
 }
 
+// 제출 버튼이 말없이 잠기던 네 가지 원인. 서버가 보는 것은 개인정보 동의뿐이고
+// (createVisitRecord 가 이름·휴대전화와 같은 줄에서 invalid_visitor 로 거절한다)
+// 체크리스트·차량·장비·현장 담당자는 화면만의 게이트지만, 어느 쪽이든 버튼이
+// 잠긴 이유를 화면이 말해 주어야 고칠 수 있다. 여기서는 그 게이트를 설명만 하고
+// 느슨하게 하지 않는다.
+export type SubmitBlockVisitor = { consent: boolean; vehicle: string; equipment: string };
+export type SubmitBlockInput = {
+  visitors: SubmitBlockVisitor[];
+  requiresNda: boolean;
+  requiresSafetyBriefing: boolean;
+  requiresVehicle: boolean;
+  requiresEquipment: boolean;
+  checklistNda: boolean;
+  checklistSafetyBriefing: boolean;
+  walkIn: boolean;
+  hostUserId: string;
+};
+
+// 한 줄만 보여 주므로 순서가 계약이다 — 화면을 위에서 아래로 읽는 순서로
+// 담당자 → 체크리스트 → 방문자별(차량 → 장비 → 동의)를 본다. 이름·휴대전화·
+// 방문 목적처럼 아직 손대지 않은 빈 필수 칸은 여기서 다루지 않는다.
+export function submitBlockReason(input: SubmitBlockInput): string {
+  if (input.walkIn && input.hostUserId === "") return "현장 방문 등록에는 방문 담당자를 선택해야 합니다";
+  if (input.requiresNda && !input.checklistNda) return "선택한 방문 유형에는 보안서약 안내 확인이 필요합니다";
+  if (input.requiresSafetyBriefing && !input.checklistSafetyBriefing) return "선택한 방문 유형에는 안전교육 이수 확인이 필요합니다";
+  for (const [index, visitor] of input.visitors.entries()) {
+    const message = input.requiresVehicle && visitor.vehicle.trim() === "" ? "선택한 방문 유형에는 차량번호가 필요합니다"
+      : input.requiresEquipment && visitor.equipment.trim() === "" ? "선택한 방문 유형에는 반입 장비가 필요합니다"
+        : !visitor.consent ? "개인정보 수집·이용 동의를 확인해 주세요" : "";
+    if (message) return `방문자 ${index + 1}: ${message}`;
+  }
+  return "";
+}
+
 // 제출 버튼과 submit() 가드가 읽는 값. 칸에 붙는 안내와 어긋나지 않도록
 // 같은 visitorFieldErrors 결과에서만 만든다.
 export function visitorsError(visitors: VisitorCheck[]): string {
