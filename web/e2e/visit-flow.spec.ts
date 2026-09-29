@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { LobbyVisitor, ReferenceData } from "../src/types";
 
 const ADMIN = process.env.VISITFLOW_E2E_ADMIN ?? "admin";
 const PASSWORD = process.env.VISITFLOW_E2E_PASSWORD ?? "e2e-bootstrap-password";
@@ -13,8 +14,12 @@ async function login(page: Page) {
 
 // Creates one visit through the UI and returns the visitor pass URL the success
 // screen shows, which the lobby tests then scan.
-async function createVisit(page: Page, visitorName: string): Promise<string> {
+async function createVisit(page: Page, visitorName: string, siteName?: string): Promise<string> {
   await page.goto("/visits/new");
+  if (siteName) {
+    await page.getByRole("combobox", { name: "사업장" }).click();
+    await page.getByRole("option", { name: `${siteName} ·`, exact: true }).click();
+  }
   await page.getByLabel(/^방문 목적/).fill("E2E 자동화 방문");
   await page.getByLabel(/^이름/).first().fill(visitorName);
   await page.getByLabel(/^휴대전화/).first().fill("010-5555-6666");
@@ -274,5 +279,209 @@ for (const path of ["/visits/new", "/lobby/walk-in"]) {
     } finally {
       await setPolicy(original);
     }
+  });
+}
+
+// Only reference-data failures are injected. Fixtures and successful recovery use
+// the real server so authorization, QR verification and SSE remain in the path.
+async function recoveryPost(page: Page, path: string, data: unknown) {
+  const me = await (await page.request.get("/api/v1/auth/me")).json();
+  const response = await page.request.post(path, { data, headers: { "X-CSRF-Token": me.csrfToken } });
+  expect(response.ok(), `${path}: ${response.status()}`).toBe(true);
+  return response.status() === 204 ? undefined : response.json();
+}
+
+async function recoveryFixture(page: Page, lobbyCount = 2) {
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const site = { code: `R${suffix}`, name: `힣복구사업장${suffix}` };
+  const { id: siteId } = await recoveryPost(page, "/api/v1/admin/sites", site);
+  for (let index = 0; index < lobbyCount; index++) {
+    await recoveryPost(page, "/api/v1/admin/lobbies", {
+      siteId, code: `R${index}`, name: `힣복구로비${suffix}-${index}`,
+    });
+  }
+  const username = `recovery-${suffix}`;
+  await recoveryPost(page, "/api/v1/admin/users", {
+    username, displayName: "복구 로비 담당자", role: "lobby", siteScope: [siteId], password: PASSWORD,
+  });
+  return { siteId, siteName: site.name, username };
+}
+
+async function loginRecoveryUser(page: Page, username: string) {
+  await page.context().clearCookies();
+  await page.goto("/login");
+  await page.getByLabel("아이디").fill(username);
+  await page.getByLabel("비밀번호", { exact: true }).fill(PASSWORD);
+  await page.getByRole("button", { name: "로그인", exact: true }).click();
+  await page.getByLabel("임시 비밀번호", { exact: true }).fill(PASSWORD);
+  await page.getByLabel("새 비밀번호 (12자 이상)", { exact: true }).fill(`${PASSWORD}-changed`);
+  await page.getByLabel("새 비밀번호 확인", { exact: true }).fill(`${PASSWORD}-changed`);
+  await page.getByRole("button", { name: "비밀번호 변경", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "새 비밀번호를 설정하세요" })).toHaveCount(0);
+}
+
+async function interceptReferenceRecovery(page: Page) {
+  let requests = 0;
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/api/v1/reference-data", async (route) => {
+    requests++;
+    if (requests <= 2) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { message: "기준 정보를 불러오지 못했습니다" } }) });
+    } else {
+      await gate;
+      await route.continue();
+    }
+  });
+  return { count: () => requests, release };
+}
+
+async function retryReferenceRecovery(page: Page, recovery: Awaited<ReturnType<typeof interceptReferenceRecovery>>) {
+  const retry = page.getByRole("button", { name: "다시 불러오기", exact: true });
+  const alert = page.getByRole("alert").filter({ has: retry });
+  await expect(alert).toContainText("기준 정보를 불러오지 못했습니다");
+  await expect(alert.getByRole("button")).toHaveCount(1); // no dismiss button
+  expect(recovery.count()).toBe(1);
+  await retry.click();
+  await expect.poll(recovery.count).toBe(2);
+  await expect(retry).toBeEnabled();
+  await expect(alert).toContainText("기준 정보를 불러오지 못했습니다");
+  await retry.click();
+  await expect.poll(recovery.count).toBe(3);
+  await expect(retry).toBeDisabled();
+  await expect(alert).toContainText("다시 불러오는 중입니다");
+  // Real pointer events on a disabled button must not enqueue another request.
+  const bounds = (await retry.boundingBox())!;
+  await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2, { clickCount: 3 });
+  expect(recovery.count()).toBe(3);
+  const response = page.waitForResponse((r) => r.url().endsWith("/api/v1/reference-data") && r.status() === 200);
+  recovery.release();
+  const reference = await (await response).json() as ReferenceData;
+  await expect(alert).toHaveCount(0);
+  expect(recovery.count()).toBe(3);
+  return reference;
+}
+
+test("scanner reference-data recovery preserves a verified QR and selects the first scoped lobby", async ({ page }) => {
+  await login(page);
+  const fixture = await recoveryFixture(page);
+  const visitor = `복구스캔${Date.now()}`;
+  const passUrl = await createVisit(page, visitor, fixture.siteName);
+  await loginRecoveryUser(page, fixture.username);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const recovery = await interceptReferenceRecovery(page);
+  await page.goto("/lobby/scan");
+  const retry = page.getByRole("button", { name: "다시 불러오기" });
+  await expect(retry).toBeVisible();
+  const field = page.getByLabel(/^QR URL 또는 Token/);
+  await field.fill("invalid-qr");
+  await field.press("Enter");
+  const workError = page.getByRole("alert").filter({ has: page.getByRole("button", { name: "Close" }) });
+  await expect(workError).toBeVisible();
+  await workError.getByRole("button").click();
+  await expect(retry).toBeVisible();
+  await field.fill(passUrl);
+  await expect(page.getByRole("button", { name: "QR 확인", exact: true })).toBeEnabled();
+  await field.press("Enter");
+  await expect(page.getByRole("heading", { name: "유효한 방문증" })).toBeVisible();
+  const lobby = page.getByRole("combobox", { name: "처리 로비" });
+  await expect(lobby.locator("..").locator("input")).toHaveValue("");
+  await expect(page.getByRole("button", { name: "체크인 완료" })).toBeEnabled();
+  await page.getByLabel("임시 출입증 번호 (선택)").fill("RECOVERY-42");
+  const reference = await retryReferenceRecovery(page, recovery);
+  expect(reference.sites[0].id).not.toBe(fixture.siteId);
+  expect(reference.lobbies[0].siteId).not.toBe(fixture.siteId);
+  const allowed = reference.lobbies.filter((item) => item.siteId === fixture.siteId);
+  expect(allowed).toHaveLength(2);
+  await expect(lobby).toHaveText(allowed[0].name);
+  await lobby.click();
+  await expect(page.getByRole("option")).toHaveText(allowed.map((item) => item.name));
+  await page.keyboard.press("Escape");
+  await expect(field).toHaveValue(passUrl);
+  await expect(page.getByLabel("임시 출입증 번호 (선택)")).toHaveValue("RECOVERY-42");
+  await expect(page.getByRole("heading", { name: "유효한 방문증" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: visitor })).toBeVisible();
+  const checkin = page.waitForRequest("**/api/v1/checkins");
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.getByRole("button", { name: "체크인 완료" }).click();
+  expect((await checkin).postDataJSON()).toMatchObject({ lobbyId: allowed[0].id, badgeNo: "RECOVERY-42", token: passUrl });
+  await expect(page.getByRole("heading", { name: "유효한 방문증" })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("lobby reference-data recovery preserves search, tab, rows and the SSE connection", async ({ page }) => {
+  await login(page);
+  const fixture = await recoveryFixture(page);
+  const visitor = `복구현황${Date.now()}`;
+  const passUrl = await createVisit(page, visitor, fixture.siteName);
+  await loginRecoveryUser(page, fixture.username);
+  const errors: string[] = [];
+  let streams = 0;
+  const queries: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("request", (request) => {
+    if (request.url().endsWith("/api/v1/lobby/stream")) streams++;
+    if (/\/api\/v1\/lobby\/(today|current)\?/.test(request.url())) queries.push(request.url());
+  });
+  const recovery = await interceptReferenceRecovery(page);
+  await page.goto("/lobby");
+  await expect(page.getByRole("button", { name: "다시 불러오기" })).toBeVisible();
+  await expect(page.getByText("실시간 연결됨", { exact: true })).toBeVisible();
+  const row = page.locator(".MuiPaper-root").filter({ has: page.getByText(`${visitor} · E2E QA`, { exact: true }) }).filter({ has: page.getByRole("button", { name: "직접 체크인", exact: true }) }).last();
+  await row.getByRole("button", { name: "직접 체크인", exact: true }).click();
+  await page.getByLabel("신분 확인 방법 / 사유").fill("신분증 확인");
+  // Another real check-in makes this open dialog stale and produces a work
+  // error without replacing the reference-data error or mocking another API.
+  await recoveryPost(page, "/api/v1/checkins", { token: passUrl });
+  await page.getByRole("dialog").getByRole("button", { name: "체크인", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "취소" }).click();
+  const workError = page.getByRole("alert").filter({ hasText: "예정 상태의 방문자만 직접 체크인할 수 있습니다" });
+  await expect(workError).toBeVisible();
+  await workError.getByRole("button").click();
+  await expect(page.getByRole("button", { name: "다시 불러오기" })).toBeVisible();
+  await page.getByRole("tab", { name: /현재 방문자/ }).click();
+  const search = page.getByPlaceholder("이름 / 회사 / 담당자 / 부서 / 전화번호 검색");
+  await search.fill(visitor);
+  await expect(page.getByText(`${visitor} · E2E QA`, { exact: true })).toBeVisible();
+  await expect.poll(() => queries.at(-1)).toContain(encodeURIComponent(visitor));
+  const before = queries.length;
+  const reference = await retryReferenceRecovery(page, recovery);
+  await expect(search).toHaveValue(visitor);
+  await expect(page.getByRole("tab", { name: /현재 방문자/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText(`${visitor} · E2E QA`, { exact: true })).toBeVisible();
+  expect(queries).toHaveLength(before);
+  expect(streams).toBe(1);
+  await expect(page.getByText("실시간 연결됨", { exact: true })).toBeVisible();
+  const lobby = page.getByRole("combobox", { name: /^로비/ });
+  await expect(lobby).toBeVisible();
+  await expect(lobby.locator("..").locator("input")).toHaveValue("");
+  const allowed = reference.lobbies.filter((item) => item.siteId === fixture.siteId);
+  await lobby.click();
+  await expect(page.getByRole("option")).toHaveText(["전체 로비", ...allowed.map((item) => item.name)]);
+  await page.getByRole("option", { name: allowed[1].name, exact: true }).click();
+  await expect.poll(() => queries.at(-1)).toContain(`lobby=${allowed[1].id}`);
+  await expect(lobby).toHaveText(allowed[1].name);
+  const current = await (await page.request.get(`/api/v1/lobby/current?q=${encodeURIComponent(visitor)}`)).json() as { items: LobbyVisitor[] };
+  expect(current.items).toHaveLength(1);
+  const refreshed = page.waitForRequest((request) => request.url().includes("/api/v1/lobby/current?") && request.url().includes(`lobby=${allowed[1].id}`));
+  await recoveryPost(page, "/api/v1/checkouts", { visitorVisitId: current.items[0].visitorVisitId, method: "lobby" });
+  expect((await refreshed).url()).toContain(encodeURIComponent(visitor));
+  await expect(lobby).toHaveText(allowed[1].name);
+  expect(streams).toBe(1);
+  expect(errors).toEqual([]);
+});
+
+for (const count of [0, 1]) {
+  test(`lobby reference-data recovery accepts a real response with ${count} scoped lobbies`, async ({ page }) => {
+    await login(page);
+    const fixture = await recoveryFixture(page, count);
+    await loginRecoveryUser(page, fixture.username);
+    const recovery = await interceptReferenceRecovery(page);
+    await page.goto("/lobby");
+    const reference = await retryReferenceRecovery(page, recovery);
+    expect(reference.lobbies.filter((item) => item.siteId === fixture.siteId)).toHaveLength(count);
+    await expect(page.getByRole("combobox", { name: /^로비/ })).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
   });
 }
