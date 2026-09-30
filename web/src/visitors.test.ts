@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { maxVisitors, recurrenceError, submitBlockReason, visitorCountError, visitorFieldErrors, visitorsError, type SubmitBlockInput } from "./visitors";
+import { maxRecurringOccurrences, maxVisitors, minRecurringOccurrences, recurrenceError, repeatCountError, submitBlockReason, visitorCountError, visitorFieldErrors, visitorsError, type SubmitBlockInput } from "./visitors";
 
 const visitor = (name: string, phone: string) => ({ name, phone });
 
@@ -131,6 +131,70 @@ describe("recurrenceError", () => {
 
   it("never leaks English text into the Korean form", () => {
     expect(recurrenceError(10, 52)).not.toMatch(/[A-Za-z]/);
+  });
+});
+
+// 반복 예약 「총 예약 횟수」 칸이 입력한 문자열 그대로를 보고 판정한다. 이전에는
+// onChange 가 키 입력마다 Math.max(2, Math.min(52, Number(...))) 로 숫자 state 를
+// 덮어써서 칸을 비울 수도 없고 10~19 를 입력할 수도 없었으며, 반대로 소수는
+// 그대로 통과해 서버 visits.go 의 int(float64) 절단이 말없이 횟수를 바꿨다.
+describe("repeatCountError", () => {
+  it("accepts the default the form starts with", () => {
+    expect(repeatCountError("2")).toBe("");
+  });
+
+  // 칸을 비우면 빈 칸으로 남는다 — 되돌려진 "2" 가 아니라 안내가 떠야 한다.
+  it("asks for a value when the field is emptied", () => {
+    expect(repeatCountError("")).toBe("총 예약 횟수를 입력하세요");
+    expect(repeatCountError("  ")).toBe("총 예약 횟수를 입력하세요");
+  });
+
+  // 서버는 occurrences 를 int(float64) 로 잘라 2.5 를 조용히 2회로 만든다.
+  it("rejects a fraction the server would silently truncate", () => {
+    expect(repeatCountError("2.5")).toBe("총 예약 횟수는 정수로 입력하세요");
+    expect(repeatCountError("10.0")).toBe("");
+  });
+
+  it("rejects text that is not a number at all", () => {
+    expect(repeatCountError("abc")).toBe("총 예약 횟수는 정수로 입력하세요");
+  });
+
+  // 서버 경계: occurrences < 2 || occurrences > 52 는 invalid_recurrence 다.
+  it("rejects counts outside the range the server accepts", () => {
+    expect(repeatCountError("1")).toBe("총 예약 횟수는 2~52회 사이로 입력하세요");
+    expect(repeatCountError("53")).toBe("총 예약 횟수는 2~52회 사이로 입력하세요");
+    expect(repeatCountError("0")).toBe("총 예약 횟수는 2~52회 사이로 입력하세요");
+    expect(repeatCountError("-3")).toBe("총 예약 횟수는 2~52회 사이로 입력하세요");
+  });
+
+  it("accepts both ends of the range and the counts the old clamp swallowed", () => {
+    expect(minRecurringOccurrences).toBe(2);
+    expect(maxRecurringOccurrences).toBe(52);
+    for (const raw of ["2", "10", "19", "52"]) expect(repeatCountError(raw)).toBe("");
+  });
+
+  it("ignores surrounding whitespace the way Number does", () => {
+    expect(repeatCountError(" 10 ")).toBe("");
+  });
+
+  it("never leaks English text into the Korean form", () => {
+    for (const raw of ["", "2.5", "abc", "1", "53"]) {
+      const message = repeatCountError(raw);
+      expect(message).not.toBe("");
+      expect(message).not.toMatch(/[A-Za-z]/);
+    }
+  });
+
+  // 칸의 안내와 제출 가드가 한 파싱 결과만 보게 하려면, repeatCountError 가
+  // "" 인 입력은 반드시 recurrenceError 에 넣을 수 있는 정수여야 한다.
+  it("leaves only integers recurrenceError can use", () => {
+    for (const raw of ["", " ", "2", "2.5", "abc", "1", "53", "10", "52", "1e2"]) {
+      if (repeatCountError(raw) !== "") continue;
+      const parsed = Number(raw.trim());
+      expect(Number.isInteger(parsed)).toBe(true);
+      expect(parsed).toBeGreaterThanOrEqual(minRecurringOccurrences);
+      expect(parsed).toBeLessThanOrEqual(maxRecurringOccurrences);
+    }
   });
 });
 

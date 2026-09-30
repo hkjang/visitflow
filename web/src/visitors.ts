@@ -29,7 +29,27 @@ export function visitorCountError(count: number): string {
   return count > maxVisitors ? `방문자는 최대 ${maxVisitors}명까지 등록할 수 있습니다` : "";
 }
 
-// 반복 횟수 자체의 2~52회 범위는 입력칸이 이미 좁혀 두므로, 여기서는 방문자 수에
+// 반복 횟수 자체의 범위. 서버는 occurrences < 2 또는 > 52 를 invalid_recurrence
+// 로 거절한다.
+export const minRecurringOccurrences = 2;
+export const maxRecurringOccurrences = 52;
+
+// 「총 예약 횟수」 칸에 사용자가 실제로 입력한 문자열을 그대로 보고 판정한다.
+// 예전에는 onChange 가 키 입력마다 Math.max(2, Math.min(52, Number(...))) 로 값을
+// 덮어써서 칸을 비울 수도 없고("" 가 0 을 거쳐 2 로 되돌아갔다) 10~19 를 입력할
+// 수도 없었으며(첫 글자 1 이 그 자리에서 2 가 됐다), 반대로 소수는 클램프를 그냥
+// 통과해 서버 visits.go 의 int(float64) 절단이 2.5 를 말없이 2회로 만들었다.
+// 그래서 보정하지 않고 잘못된 값은 화면에서 설명한 뒤 제출을 잠근다.
+export function repeatCountError(raw: string): string {
+  const text = raw.trim();
+  if (text === "") return "총 예약 횟수를 입력하세요";
+  const value = Number(text);
+  if (!Number.isInteger(value)) return "총 예약 횟수는 정수로 입력하세요";
+  if (value < minRecurringOccurrences || value > maxRecurringOccurrences) return `총 예약 횟수는 ${minRecurringOccurrences}~${maxRecurringOccurrences}회 사이로 입력하세요`;
+  return "";
+}
+
+// 반복 횟수 자체의 2~52회 범위는 repeatCountError 가 보므로, 여기서는 방문자 수에
 // 따라 달라지는 전체 일정 상한만 본다. 화면의 "최대 52회" 안내는 방문자가 한
 // 명일 때만 맞고, 10명이면 실제 상한은 50회다.
 export function recurrenceError(visitorCount: number, occurrences: number): string {

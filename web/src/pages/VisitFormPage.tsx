@@ -10,7 +10,7 @@ import { api, postJSON } from "../api";
 import type { FrequentVisitor, ReferenceData, VisitTemplate } from "../types";
 import { localeNames, type Locale } from "../i18n";
 import { scheduleError } from "../schedule";
-import { maxVisitors, recurrenceError, submitBlockReason, visitorCountError, visitorFieldErrors, visitorsError } from "../visitors";
+import { maxVisitors, recurrenceError, repeatCountError, submitBlockReason, visitorCountError, visitorFieldErrors, visitorsError } from "../visitors";
 import { PageHeader } from "../components/AdminUI";
 import { useAuth } from "../auth";
 
@@ -37,7 +37,9 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
   const [startAt, setStartAt] = useState(localInput(new Date(now.getTime() + (walkIn ? 0 : 60) * 60000))); const [endAt, setEndAt] = useState(localInput(new Date(now.getTime() + (walkIn ? 120 : 180) * 60000)));
   const [visitTypeId, setVisitTypeId] = useState(""); const [checklist, setChecklist] = useState<Record<string, boolean>>({});
   const [purpose, setPurpose] = useState(""); const [placeDetail, setPlaceDetail] = useState(""); const [notes, setNotes] = useState(""); const [visitors, setVisitors] = useState<VisitorDraft[]>([blankVisitor()]);
-  const [repeatWeekly, setRepeatWeekly] = useState(false); const [repeatCount, setRepeatCount] = useState(2); const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  // 입력한 문자열 그대로 둔다 — 키 입력마다 숫자로 보정하면 칸을 비울 수도 없고
+  // 10~19 처럼 첫 글자가 하한보다 작은 값을 입력할 수도 없다.
+  const [repeatWeekly, setRepeatWeekly] = useState(false); const [repeatCount, setRepeatCount] = useState("2"); const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const [busy, setBusy] = useState(false); const [templateLoading, setTemplateLoading] = useState(false); const [error, setError] = useState(""); const [created, setCreated] = useState<{ requestNo: string; status: string; passUrls?: string[] } | null>(null);
   // 기준 정보 실패는 닫을 수 있는 error Alert 과 따로 둔다: 사업장·로비·부서·방문 유형이
   // 전부 비고 siteId 가 "" 라 제출이 영구히 잠기는데, 하나뿐인 Alert 을 닫으면 이유도
@@ -96,7 +98,11 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
   // 한 명을 더 넣으면 상한을 넘는지 같은 함수에 물어, 추가 버튼과 아래 안내가
   // 서로 다른 기준을 보지 않게 한다.
   const addVisitorBlocked = visitorCountError(visitors.length + 1) !== "";
-  const recurrenceMessage = !walkIn && repeatWeekly ? recurrenceError(visitors.length, repeatCount) : "";
+  // 칸의 안내·제출 버튼 disabled·submit() 가드·전송 본문이 모두 이 한 파싱
+  // 결과만 본다. repeatCountError 가 "" 일 때만 recurrenceError 에 넘기므로
+  // 전체 일정 상한 계산에는 2~52 범위의 정수만 들어간다.
+  const repeatOccurrences = Number(repeatCount.trim());
+  const recurrenceMessage = !walkIn && repeatWeekly ? (repeatCountError(repeatCount) || recurrenceError(visitors.length, repeatOccurrences)) : "";
   const siteLobbies = ref?.lobbies.filter((x) => x.siteId === siteId) ?? [];
   useEffect(() => { if (siteLobbies.length && !siteLobbies.some((x) => x.id === lobbyId)) setLobbyId(siteLobbies[0].id); }, [siteLobbies, lobbyId]);
   const updateVisitor = (index: number, patch: Partial<VisitorDraft>) => setVisitors((list) => list.map((x, i) => i === index ? { ...x, ...patch } : x));
@@ -109,7 +115,7 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
     if (blockReason) { setError(blockReason); return; }
     setBusy(true); setError("");
     try {
-      const body = { siteId, lobbyId, departmentId, hostUserId: walkIn ? hostUserId : undefined, visitTypeId: visitTypeId || undefined, checklist: selectedType ? checklist : undefined, startAt: new Date(startAt).toISOString(), endAt: new Date(endAt).toISOString(), purpose, placeDetail, notes, recurrence: !walkIn && repeatWeekly ? { frequency: "weekly", occurrences: repeatCount } : undefined, visitors: visitors.map((v) => ({ ...v, equipment: v.equipment.split(",").map((x) => x.trim()).filter(Boolean) })) };
+      const body = { siteId, lobbyId, departmentId, hostUserId: walkIn ? hostUserId : undefined, visitTypeId: visitTypeId || undefined, checklist: selectedType ? checklist : undefined, startAt: new Date(startAt).toISOString(), endAt: new Date(endAt).toISOString(), purpose, placeDetail, notes, recurrence: !walkIn && repeatWeekly ? { frequency: "weekly", occurrences: repeatOccurrences } : undefined, visitors: visitors.map((v) => ({ ...v, equipment: v.equipment.split(",").map((x) => x.trim()).filter(Boolean) })) };
       const result = await postJSON<{ requestNo: string; status: string; passUrls?: string[] }>(walkIn ? "/api/v1/lobby/walk-ins" : "/api/v1/visits", body); sessionStorage.removeItem("visitflow_template_id"); setCreated(result);
     } catch (e) { setError(e instanceof Error ? e.message : "방문을 등록하지 못했습니다"); } finally { setBusy(false); }
   };
@@ -134,7 +140,7 @@ export function VisitFormPage({ walkIn = false }: { walkIn?: boolean }) {
       <Grid size={{ xs: 12, md: 6 }}><TextField select fullWidth label="방문 유형" value={visitTypeId} onChange={(e) => { setVisitTypeId(e.target.value); setChecklist({}); }} helperText={selectedType?.description || "유형별로 보안서약·안전교육·차량·장비 신고가 요구될 수 있습니다."}><MenuItem value="">유형 미지정</MenuItem>{visitTypes.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}{x.requiresApproval ? " · 승인 필요" : ""}</MenuItem>)}</TextField></Grid>
       <Grid size={{ xs: 12, md: 6 }}><TextField fullWidth required label="방문 목적" value={purpose} onChange={(e) => setPurpose(e.target.value)} /></Grid>
       {selectedType && (selectedType.requiresNda || selectedType.requiresSafetyBriefing) && <Grid size={{ xs: 12 }}><Alert severity="warning" sx={{ mb: 1 }}>{selectedType.name} 방문에는 다음 확인이 필요합니다.</Alert><Stack>{selectedType.requiresNda && <FormControlLabel control={<Checkbox checked={checklist.nda === true} onChange={(e) => setChecklist((x) => ({ ...x, nda: e.target.checked }))} />} label="방문자에게 보안서약 내용을 안내하고 확인받았습니다." />}{selectedType.requiresSafetyBriefing && <FormControlLabel control={<Checkbox checked={checklist.safetyBriefing === true} onChange={(e) => setChecklist((x) => ({ ...x, safetyBriefing: e.target.checked }))} />} label="방문자의 안전교육 이수를 확인했습니다." />}</Stack></Grid>}<Grid size={{ xs: 12 }}><TextField fullWidth multiline minRows={2} label="담당자 메모" value={notes} onChange={(e) => setNotes(e.target.value)} /></Grid>
-      {!walkIn && <Grid size={{ xs: 12 }}><Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }}><FormControlLabel control={<Checkbox checked={repeatWeekly} onChange={(e) => setRepeatWeekly(e.target.checked)} />} label="매주 같은 시간으로 반복 예약" />{repeatWeekly && <TextField type="number" label="총 예약 횟수" value={repeatCount} onChange={(e) => setRepeatCount(Math.max(2, Math.min(52, Number(e.target.value))))} slotProps={{ htmlInput: { min: 2, max: 52 } }} error={recurrenceMessage !== ""} helperText={recurrenceMessage || "현재 일정을 포함해 최대 52회"} />}</Stack></Grid>}
+      {!walkIn && <Grid size={{ xs: 12 }}><Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }}><FormControlLabel control={<Checkbox checked={repeatWeekly} onChange={(e) => setRepeatWeekly(e.target.checked)} />} label="매주 같은 시간으로 반복 예약" />{repeatWeekly && <TextField type="number" label="총 예약 횟수" value={repeatCount} onChange={(e) => setRepeatCount(e.target.value)} slotProps={{ htmlInput: { min: 2, max: 52 } }} error={recurrenceMessage !== ""} helperText={recurrenceMessage || "현재 일정을 포함해 최대 52회"} />}</Stack></Grid>}
     </Grid><Divider sx={{ my: 4 }} /><Stack direction="row" alignItems="center" justifyContent="space-between" mb={2}><Box><Typography variant="h6">방문자</Typography><Typography variant="body2" color={visitorCountMessage ? "error" : "text.secondary"}>{visitorCountMessage || `최대 ${maxVisitors}명까지 한 신청에 등록할 수 있습니다. (현재 ${visitors.length}명)`}</Typography></Box><Button startIcon={<AddRounded />} disabled={addVisitorBlocked} onClick={() => setVisitors((x) => [...x, blankVisitor()])}>방문자 추가</Button></Stack>
     <Stack direction={{ xs: "column", sm: "row" }} spacing={1} mb={2}><Button component="label" variant="outlined" startIcon={<UploadFileRounded />}>CSV / XLSX 가져오기<input hidden type="file" accept=".csv,.xlsx" onChange={(e) => { void importVisitors(e.target.files?.[0]); e.currentTarget.value = ""; }} /></Button><Typography variant="body2" color="text.secondary" alignSelf={{ sm: "center" }}>첫 행 열 이름: 이름, 휴대전화, 회사명, 이메일, 직책, 차량번호, 반입장비, 개인정보동의</Typography></Stack>
     {importWarnings.length > 0 && <Alert severity="warning" sx={{ mb: 2 }}>{importWarnings.slice(0, 5).join(" · ")}{importWarnings.length > 5 ? ` 외 ${importWarnings.length - 5}건` : ""}</Alert>}
