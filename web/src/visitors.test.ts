@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { maxRecurringOccurrences, maxVisitors, minRecurringOccurrences, recurrenceError, repeatCountError, submitBlockReason, visitorCountError, visitorFieldErrors, visitorsError, type SubmitBlockInput } from "./visitors";
+import { duplicatePhoneError, duplicatePhoneErrors, maxRecurringOccurrences, maxVisitors, minRecurringOccurrences, recurrenceError, repeatCountError, submitBlockReason, visitorCountError, visitorFieldErrors, visitorsError, type SubmitBlockInput } from "./visitors";
 
 const visitor = (name: string, phone: string) => ({ name, phone });
 
@@ -293,5 +293,77 @@ describe("submitBlockReason", () => {
       expect(message).not.toBe("");
       expect(message).not.toMatch(/[A-Za-z]/);
     }
+  });
+});
+
+// 서버 upsertVisitor 는 휴대전화 해시 하나로만 방문자를 찾으므로 한 신청에 같은
+// 번호가 두 번 들어오면 두 방문자가 같은 visitor_id 를 받고 visitor_visits 의
+// UNIQUE(visit_id,visitor_id) 가 이유를 알 수 없는 500 으로 터진다. 화면이 같은
+// 정규화(phoneDigits)로 먼저 잡아 어느 칸을 고쳐야 하는지 알려준다.
+describe("duplicatePhoneErrors", () => {
+  it("stays quiet when every phone differs", () => {
+    expect(duplicatePhoneErrors([visitor("홍길동", "010-1234-5678"), visitor("김철수", "010-1234-5679")])).toEqual(["", ""]);
+  });
+
+  // 서버 normalizePhone 과 같은 규칙이라 하이픈·공백이 달라도 같은 번호다.
+  it("treats differently formatted digits as the same phone", () => {
+    expect(duplicatePhoneErrors([visitor("홍길동", "010-1234-5678"), visitor("김철수", "01012345678")])).toEqual(["", "방문자 1 과 휴대전화가 같습니다. 방문자마다 다른 번호를 입력하세요"]);
+    expect(duplicatePhoneErrors([visitor("홍길동", "010 1234 5678"), visitor("김철수", "010-1234-5678")])[1]).not.toBe("");
+  });
+
+  // 먼저 입력한 칸은 그대로 두고 뒤에 겹친 칸만 표시한다 — 고칠 곳이 하나여야 한다.
+  it("marks only the later duplicate and points at the first one", () => {
+    const errors = duplicatePhoneErrors([visitor("일", "010-1111-2222"), visitor("이", "010-3333-4444"), visitor("삼", "010-1111-2222")]);
+    expect(errors[0]).toBe("");
+    expect(errors[1]).toBe("");
+    expect(errors[2]).toBe("방문자 1 과 휴대전화가 같습니다. 방문자마다 다른 번호를 입력하세요");
+  });
+
+  // 7자리 미만은 이미 visitorFieldErrors.phone 이 잡는다. 같은 칸에 두 안내를
+  // 겹쳐 내보내지 않는다.
+  it("does not double up on a phone visitorFieldErrors already rejects", () => {
+    expect(visitorFieldErrors(visitor("김철수", "010")).phone).not.toBe("");
+    expect(duplicatePhoneErrors([visitor("홍길동", "010"), visitor("김철수", "010")])).toEqual(["", ""]);
+  });
+
+  // 아직 아무것도 입력하지 않은 빈 칸은 조용하다 — 첫 화면을 빨갛게 칠하지 않는다.
+  it("stays quiet for untouched empty fields", () => {
+    expect(duplicatePhoneErrors([visitor("", ""), visitor("", "")])).toEqual(["", ""]);
+    expect(duplicatePhoneErrors([visitor("홍길동", "010-1234-5678"), visitor("", "")])).toEqual(["", ""]);
+  });
+
+  it("stays quiet for a single visitor", () => {
+    expect(duplicatePhoneErrors([visitor("홍길동", "010-1234-5678")])).toEqual([""]);
+  });
+});
+
+describe("duplicatePhoneError", () => {
+  // 버튼·가드가 읽는 한 줄은 칸에 붙는 문구와 같은 계산에서 나온다.
+  it("prefixes the first field message with its visitor number", () => {
+    expect(duplicatePhoneError([visitor("홍길동", "010-1234-5678"), visitor("김철수", "01012345678")])).toBe("방문자 2: 방문자 1 과 휴대전화가 같습니다. 방문자마다 다른 번호를 입력하세요");
+  });
+
+  it("is empty exactly when no field is marked", () => {
+    const cases = [
+      [visitor("홍길동", "010-1234-5678")],
+      [visitor("홍길동", "010-1234-5678"), visitor("김철수", "010-1234-5679")],
+      [visitor("홍길동", "010-1234-5678"), visitor("김철수", "010-1234-5678")],
+      [visitor("홍길동", ""), visitor("김철수", "")],
+      [visitor("홍길동", "010"), visitor("김철수", "010")],
+      [visitor("일", "010-1111-2222"), visitor("이", "010-1111-2222"), visitor("삼", "010-1111-2222")],
+    ];
+    for (const visitors of cases) {
+      expect(duplicatePhoneError(visitors) !== "").toBe(duplicatePhoneErrors(visitors).some((x) => x !== ""));
+    }
+  });
+
+  it("reports the earliest marked field when several collide", () => {
+    expect(duplicatePhoneError([visitor("일", "010-1111-2222"), visitor("이", "010-1111-2222"), visitor("삼", "010-1111-2222")])).toBe("방문자 2: 방문자 1 과 휴대전화가 같습니다. 방문자마다 다른 번호를 입력하세요");
+  });
+
+  it("never leaks English text into the Korean form", () => {
+    const message = duplicatePhoneError([visitor("홍길동", "010-1234-5678"), visitor("김철수", "010-1234-5678")]);
+    expect(message).not.toBe("");
+    expect(message).not.toMatch(/[A-Za-z]/);
   });
 });

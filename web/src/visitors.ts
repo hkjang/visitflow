@@ -92,6 +92,39 @@ export function submitBlockReason(input: SubmitBlockInput): string {
   return "";
 }
 
+// 서버 upsertVisitor 는 `SELECT id FROM visitors WHERE phone_hash=$1` 로 휴대전화
+// 해시 하나만 보고 방문자를 찾는다. 그래서 한 신청에 같은 번호를 두 번 넣으면 두
+// 방문자가 같은 visitor_id 를 받고 visitor_visits 의 UNIQUE(visit_id,visitor_id)
+// 가 터졌다. 서버도 이제 같은 경계를 duplicate_visitor 400 으로 막지만, 어느 칸을
+// 고쳐야 하는지는 화면이 먼저 말해 주어야 한다. 정규화는 서버 normalizePhone 과
+// 같은 phoneDigits 를 쓰므로 `010-1234-5678` 과 `01012345678` 은 같은 번호다.
+//
+// 인덱스가 방문자 칸과 1:1 로 맞는 배열을 돌려준다. 먼저 입력한 칸은 그대로 두고
+// 뒤에 겹친 칸만 표시해 고칠 곳을 하나로 좁힌다. 7자리 미만이라 이미
+// visitorFieldErrors.phone 이 잡는 값과 아직 손대지 않은 빈 칸은 조용하다 — 같은
+// 칸에 두 안내를 겹치지 않고, 첫 화면을 빨갛게 칠하지 않기 위해서다.
+export function duplicatePhoneErrors(visitors: VisitorCheck[]): string[] {
+  const firstByPhone = new Map<string, number>();
+  return visitors.map((visitor, index) => {
+    const digits = phoneDigits(visitor.phone);
+    if (digits.length < minPhoneDigits) return "";
+    const first = firstByPhone.get(digits);
+    if (first === undefined) {
+      firstByPhone.set(digits, index);
+      return "";
+    }
+    return `방문자 ${first + 1} 과 휴대전화가 같습니다. 방문자마다 다른 번호를 입력하세요`;
+  });
+}
+
+// 제출 버튼과 submit() 가드가 읽는 한 줄. 칸에 붙는 안내와 어긋나지 않도록
+// 반드시 duplicatePhoneErrors 를 한 번 호출해 그 첫 항목에서만 만든다.
+export function duplicatePhoneError(visitors: VisitorCheck[]): string {
+  const errors = duplicatePhoneErrors(visitors);
+  const index = errors.findIndex((message) => message !== "");
+  return index === -1 ? "" : `방문자 ${index + 1}: ${errors[index]}`;
+}
+
 // 제출 버튼과 submit() 가드가 읽는 값. 칸에 붙는 안내와 어긋나지 않도록
 // 같은 visitorFieldErrors 결과에서만 만든다.
 export function visitorsError(visitors: VisitorCheck[]): string {
