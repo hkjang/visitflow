@@ -875,6 +875,41 @@ func TestVisitorCountAndRecurrenceLimits(t *testing.T) {
 	}
 }
 
+// 한 신청 안에서 휴대전화가 겹치면 upsertVisitor 가 phone_hash 하나로만 조회해
+// 두 방문자에게 같은 visitor_id 를 주고, 그 뒤 visitor_visits 의
+// UNIQUE(visit_id,visitor_id) 가 pgx 오류로 터져 writeVisitError 의 fallback 이
+// 이유를 알 수 없는 500 visit_failed 를 내보냈다. 무엇을 고쳐야 하는지 알 수 있는
+// 400 으로 답하고, 번호가 다르면 그대로 통과하는 것을 함께 고정한다.
+func TestDuplicateVisitorPhoneRejected(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	visitor := func(name, phone string) map[string]any {
+		return map[string]any{"name": name, "phone": phone, "company": "테스트상사", "consent": true}
+	}
+	// 정규화 뒤 같은 숫자열이면 하이픈·공백이 달라도 같은 번호다 — 서버
+	// normalizePhone 과 화면 phoneDigits 가 같은 규칙을 쓴다.
+	duplicate := env.do(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{
+		"visitors": []map[string]any{visitor("김방문", "010-1234-5678"), visitor("이동행", " 01012345678 ")},
+	}))
+	if duplicate.Code != http.StatusBadRequest || !strings.Contains(duplicate.Body.String(), "duplicate_visitor") {
+		t.Fatalf("같은 번호 방문자 2명이 %d 로 응답했다: %s", duplicate.Code, duplicate.Body.String())
+	}
+	// 어느 방문자를 고쳐야 하는지 본문이 말해 준다.
+	if body := duplicate.Body.String(); !strings.Contains(body, "방문자 2") || !strings.Contains(body, "방문자 1") {
+		t.Fatalf("400 본문이 문제 방문자 번호를 알려주지 않는다: %s", body)
+	}
+	env.json(http.MethodPost, "/api/v1/visits", visitBody(siteID, map[string]any{
+		"visitors": []map[string]any{visitor("김방문", "010-1234-5678"), visitor("이동행", "010-1234-5679")},
+	}), http.StatusCreated)
+	// 화면을 거치지 않는 현장 등록도 같은 createVisitRecord 를 지나므로 같은 400 을 받는다.
+	walkIn := env.do(http.MethodPost, "/api/v1/lobby/walk-ins", visitBody(siteID, map[string]any{
+		"visitors": []map[string]any{visitor("김방문", "010-1234-5678"), visitor("이동행", "010-1234-5678")},
+	}))
+	if walkIn.Code != http.StatusBadRequest || !strings.Contains(walkIn.Body.String(), "duplicate_visitor") {
+		t.Fatalf("현장 등록의 같은 번호 방문자 2명이 %d 로 응답했다: %s", walkIn.Code, walkIn.Body.String())
+	}
+}
+
 func TestManualCheckInAndRejectionDetail(t *testing.T) {
 	env := newTestEnv(t)
 	siteID := env.siteID()

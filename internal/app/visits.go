@@ -451,10 +451,21 @@ func (s *Server) createVisitRecord(ctx context.Context, r *http.Request, actor U
 		return nil, err
 	}
 	companyRequired, _ := s.getSetting(ctx, "visit.company_required")
-	for _, visitor := range in.Visitors {
+	// upsertVisitor 는 휴대전화 해시 하나로 방문자를 찾으므로, 한 신청에 같은 번호가
+	// 두 번 들어오면 두 방문자가 같은 visitor_id 를 받고 그 뒤 visitor_visits 의
+	// UNIQUE(visit_id,visitor_id) 가 visitError 아닌 pgx 오류로 터져
+	// writeVisitError 의 fallback 이 이유를 알 수 없는 500 을 내보냈다. 어느 방문자를
+	// 고쳐야 하는지 알 수 있도록 트랜잭션을 시작하기 전에 400 으로 답한다.
+	firstByPhone := map[string]int{}
+	for index, visitor := range in.Visitors {
 		if strings.TrimSpace(visitor.Name) == "" || len(normalizePhone(visitor.Phone)) < 7 || !visitor.Consent {
 			return nil, visitError{400, "invalid_visitor", "방문자 이름, 휴대전화, 개인정보 동의는 필수입니다"}
 		}
+		phone := normalizePhone(visitor.Phone)
+		if first, duplicated := firstByPhone[phone]; duplicated {
+			return nil, visitError{400, "duplicate_visitor", fmt.Sprintf("방문자 %d 과 방문자 %d 의 휴대전화가 같습니다. 방문자마다 다른 번호를 입력하세요", first+1, index+1)}
+		}
+		firstByPhone[phone] = index
 		if companyRequired == "true" && strings.TrimSpace(visitor.Company) == "" {
 			return nil, visitError{400, "company_required", "회사명은 현재 정책상 필수입니다"}
 		}
