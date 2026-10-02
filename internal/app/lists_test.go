@@ -20,7 +20,10 @@ func TestEveryListReturnsItsRows(t *testing.T) {
 	reference := env.json(http.MethodGet, "/api/v1/reference-data", nil, http.StatusOK)
 	lobbyID := fmt.Sprint(reference["lobbies"].([]any)[0].(map[string]any)["id"])
 
-	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(site, map[string]any{"lobbyId": lobbyID}), http.StatusCreated)
+	// /api/v1/lobby/today only lists the site's own current calendar day, so the
+	// seeded visit has to be booked into it rather than 30 minutes past the wall
+	// clock — see startsTodayAtSite.
+	created := env.json(http.MethodPost, "/api/v1/visits", env.visitToday(t, site, map[string]any{"lobbyId": lobbyID}), http.StatusCreated)
 	env.json(http.MethodPost, "/api/v1/checkins", map[string]string{"token": passTokenFrom(t, created)}, http.StatusCreated)
 	env.json(http.MethodPost, "/api/v1/admin/notification-apis", map[string]any{
 		"name": "게이트웨이", "channel": "sms", "baseUrl": "https://sms.test.local", "path": "/send",
