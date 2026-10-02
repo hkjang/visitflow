@@ -121,12 +121,13 @@ Go 테스트에는 실제 PostgreSQL을 사용하는 통합 테스트가 포함�
 VISITFLOW_TEST_DSN='postgres://visitflow:visitflow@127.0.0.1:5432/visitflow?sslmode=disable' go test ./... -count=1
 ```
 
-브라우저 흐름은 Playwright로 검증한다. 서비스를 실행한 뒤 아래를 실행하면 로그인, 방문 신청, 모바일 방문증 언어 전환, USB 스캐너 방식 체크인, 비상 명단을 실제 브라우저로 확인한다.
+브라우저 흐름은 Playwright로 검증한다. 아래 한 줄이면 실제 `npm run build` 산출물을 임베드한 서버와 전용 PostgreSQL을 띄워 로그인, 방문 신청, 모바일 방문증 언어 전환, USB 스캐너 방식 체크인, 비상 명단을 실제 브라우저로 확인하고, 끝나면 컨테이너와 `cmd/visitflow/webdist` 스텁까지 되돌린다.
 
 ```bash
-cd web && npx playwright install --with-deps chromium
-VISITFLOW_BASE_URL=http://127.0.0.1:8080 npm run test:e2e
+bash scripts/local-e2e.sh
 ```
+
+스크립트는 web 의존성 설치 → UI 빌드 → `cmd/visitflow/webdist` 임베드 → 서버 빌드 → PostgreSQL·서버 기동 → `/readyz` 대기 → `npm run test:e2e` 순으로 진행하며 Playwright의 종료 코드를 그대로 전달한다. 호스트 포트는 비어 있는 것을 OS가 고르므로 8080이 이미 점유된 환경에서도 동작하고, 고정하려면 `VISITFLOW_LOCAL_E2E_PORT`를 지정한다. 브라우저는 Playwright 번들 chromium을 쓰며, 설치본이 없으면 시스템 Chrome으로 넘어간다(`VISITFLOW_E2E_BROWSER_CHANNEL`로 직접 지정할 수 있다). 이미 띄워 둔 인스턴스를 상대로 돌리려면 `cd web && npx playwright install --with-deps chromium` 뒤 `VISITFLOW_BASE_URL=http://127.0.0.1:8080 npm run test:e2e`를 쓴다.
 
 가이드의 화면 캡처(`docs/assets/guide/*.png`)는 버릴 수 있는 인스턴스에 데모 데이터를 넣고 `cd web && npm run screenshots`로 다시 찍는다. 대상 주소와 관리자 계정은 `VISITFLOW_SCREENSHOT_URL`, `VISITFLOW_SCREENSHOT_ADMIN`, `VISITFLOW_SCREENSHOT_PASSWORD`로만 받으며 루프백이 아닌 주소는 `VISITFLOW_SCREENSHOT_ALLOW_REMOTE=1` 없이는 거부한다. PDF는 `aidev/tools/guide/md2pdf.mjs`로 만든다.
 

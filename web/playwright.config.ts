@@ -18,5 +18,18 @@ export default defineConfig({
     locale: "ko-KR",
     timezoneId: "Asia/Seoul",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  // Unset means Playwright's own bundled browser, which is what CI installs.
+  // A machine that only has a system Chrome sets the channel instead; the key
+  // is omitted rather than set to undefined so the default path is untouched.
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        ...(process.env.VISITFLOW_E2E_BROWSER_CHANNEL
+          ? { channel: process.env.VISITFLOW_E2E_BROWSER_CHANNEL }
+          : {}),
+      },
+    },
+  ],
 });
