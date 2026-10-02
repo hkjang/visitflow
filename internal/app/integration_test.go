@@ -1103,7 +1103,7 @@ func TestNotificationAPITestSendAndSettingsExport(t *testing.T) {
 
 func TestStatisticsBreakdowns(t *testing.T) {
 	env := newTestEnv(t)
-	created := env.json(http.MethodPost, "/api/v1/visits", visitBody(env.siteID(), nil), http.StatusCreated)
+	created := env.json(http.MethodPost, "/api/v1/visits", env.visitToday(t, env.siteID(), nil), http.StatusCreated)
 	env.json(http.MethodPost, "/api/v1/checkins", map[string]string{"token": passTokenFrom(t, created)}, http.StatusCreated)
 	stats := env.json(http.MethodGet, "/api/v1/admin/statistics?days=7", nil, http.StatusOK)
 	summary := stats["summary"].(map[string]any)
@@ -1620,6 +1620,48 @@ func TestReadyzReportsSchemaAndBacklog(t *testing.T) {
 	if fmt.Sprint(body["schemaVersion"]) != fmt.Sprint(database.ExpectedSchemaVersion()) {
 		t.Fatalf("readyz schema version %v does not match %d", body["schemaVersion"], database.ExpectedSchemaVersion())
 	}
+}
+
+// startsTodayAtSite returns a start and end for a visit that the site's own
+// calendar calls today: still ahead of now, so its pass sits inside the QR
+// validity window, but never past the site's local midnight.
+//
+// visitBody books 30 minutes ahead of the wall clock without asking which
+// calendar day that lands on. The lobby's 오늘 list and the statistics span both
+// select on the site-local date, so for the last half hour of every site-local
+// day the fixture visit is already tomorrow and correctly drops out of both —
+// the product is right and the fixture is wrong. CI hit exactly that window on
+// main at 14:32 and 14:37 UTC, 23:32 and 23:37 in the default site's
+// Asia/Seoul, while the same tree had passed at 14:28 UTC.
+//
+// The lead shrinks rather than crossing midnight, so a run started with seconds
+// left in the site's day still books a visit that is both future and today.
+func (e *testEnv) startsTodayAtSite(t *testing.T, siteID string) (time.Time, time.Time) {
+	t.Helper()
+	var now, midnight time.Time
+	if err := e.server.db.QueryRow(context.Background(),
+		`SELECT now(),(date_trunc('day',now() AT TIME ZONE s.timezone)+interval '1 day') AT TIME ZONE s.timezone FROM sites s WHERE s.id=$1`,
+		siteID).Scan(&now, &midnight); err != nil {
+		t.Fatalf("read the site's own day: %v", err)
+	}
+	lead := 30 * time.Minute
+	if remaining := midnight.Sub(now); remaining < 2*lead {
+		lead = remaining / 2
+	}
+	start := now.Add(lead)
+	return start, start.Add(time.Hour)
+}
+
+// visitToday is visitBody with its schedule pinned to the site's current local
+// day by startsTodayAtSite. Any test that asserts the seeded visit appears in a
+// site-local "today" view has to book it this way.
+func (e *testEnv) visitToday(t *testing.T, siteID string, extra map[string]any) map[string]any {
+	t.Helper()
+	start, end := e.startsTodayAtSite(t, siteID)
+	body := visitBody(siteID, extra)
+	body["startAt"] = start.UTC().Format(time.RFC3339)
+	body["endAt"] = end.UTC().Format(time.RFC3339)
+	return body
 }
 
 // moveSitesOffSessionDate puts every site in whichever of the two twelve-hour
