@@ -11,9 +11,10 @@ async function login(page: Page) {
   await expect(page.getByRole("heading", { name: /방문 일정/ })).toBeVisible();
 }
 
-// Creates one visit through the UI and returns the visitor pass URL the success
-// screen shows, which the lobby tests then scan.
-async function createVisit(page: Page, visitorName: string): Promise<string> {
+// Creates one visit through the UI and returns both the visitor pass URL the
+// lobby tests scan and the visit number, which is the only thing that picks
+// this one visit out of the list again.
+async function createVisit(page: Page, visitorName: string): Promise<{ passUrl: string; requestNo: string }> {
   await page.goto("/visits/new");
   await page.getByLabel(/^방문 목적/).fill("E2E 자동화 방문");
   await page.getByLabel(/^이름/).first().fill(visitorName);
@@ -24,7 +25,24 @@ async function createVisit(page: Page, visitorName: string): Promise<string> {
   const body = await page.locator("body").innerText();
   const match = body.match(/https?:\/\/\S*\/q\/vfq_[A-Za-z0-9_-]+/);
   expect(match, "the success screen must show the visitor pass URL").not.toBeNull();
-  return match![0];
+  const number = body.match(/VF-[A-Za-z0-9-]+/);
+  expect(number, "the success screen must show the visit number").not.toBeNull();
+  return { passUrl: match![0], requestNo: number![0] };
+}
+
+// Opens the detail dialog of exactly one visit. The list's search box matches
+// the visit number, the company and the host — never the visitor's name — and
+// several visits share a company here, so the number is the only input that
+// narrows the table to a single row.
+async function openVisitDetail(page: Page, requestNo: string) {
+  await page.goto("/visits");
+  const listed = page.waitForResponse((r) => r.url().includes(`q=${requestNo}`));
+  await page.getByPlaceholder("방문번호 / 회사 / 담당자 검색").fill(requestNo);
+  await (await listed).finished();
+  const row = page.getByRole("row").filter({ hasText: requestNo });
+  await expect(row).toHaveCount(1);
+  await row.getByRole("button", { name: "상세" }).click();
+  await expect(page.getByRole("dialog").getByText(`${requestNo} · 방문 상세`)).toBeVisible();
 }
 
 test.describe("visitor lifecycle", () => {
@@ -44,9 +62,56 @@ test.describe("visitor lifecycle", () => {
     await expect(page.getByText(visitor).first()).toBeVisible();
   });
 
+  // The resend button is the one detail action that used to discard the whole
+  // response: a refusal left the screen completely unchanged, and a success was
+  // announced without reading how many messages were actually registered. The
+  // dialog stays open while the visit is cancelled from outside, which is how a
+  // second operator or the automatic checkout really takes the visit out of the
+  // notifiable statuses while this button is still on screen.
+  test("reports what the server said about a notification resend", async ({ page }) => {
+    await login(page);
+    // The open dialog is on top of the list, so the page-level alerts are inside
+    // the modal's aria-hidden subtree; they are located by their text.
+    const resendButton = page.getByRole("dialog").getByRole("button", { name: "알림 재발송" });
+
+    const succeeding = await createVisit(page, `재발송${Date.now() % 100000}`);
+    await openVisitDetail(page, succeeding.requestNo);
+    const queued = page.waitForResponse((r) => r.url().includes("/notifications/resend"));
+    await resendButton.click();
+    expect((await queued).status()).toBe(200);
+    const count = (await (await queued).json()) as { queued: number };
+    expect(count.queued).toBeGreaterThan(0);
+    await expect(page.getByText(`알림 ${count.queued}건을 다시 등록했습니다`)).toBeVisible();
+
+    // A second visit, so the failure is judged on a freshly mounted list with no
+    // alert left over from the success above.
+    const refusing = await createVisit(page, `재발송실패${Date.now() % 100000}`);
+    await openVisitDetail(page, refusing.requestNo);
+    await expect(resendButton).toBeVisible();
+    const cancelled = await page.evaluate(async (no) => {
+      const me = await fetch("/api/v1/auth/me").then((r) => r.json());
+      const list = await fetch(`/api/v1/visits?limit=100&q=${encodeURIComponent(no)}`).then((r) => r.json());
+      const visit = list.items.find((item: { requestNo: string }) => item.requestNo === no);
+      if (!visit) throw new Error(`visit ${no} is not in its own search result`);
+      const response = await fetch(`/api/v1/visits/${visit.id}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": me.csrfToken },
+        body: "{}",
+      });
+      return response.status;
+    }, refusing.requestNo);
+    expect(cancelled).toBe(204);
+
+    const refused = page.waitForResponse((r) => r.url().includes("/notifications/resend"));
+    await resendButton.click();
+    expect((await refused).status()).toBe(409);
+    await expect(page.getByText("진행 중인 방문만 방문 안내를 재발송할 수 있습니다")).toBeVisible();
+    await expect(page.getByText("다시 등록했습니다")).toHaveCount(0);
+  });
+
   test("shows the mobile pass and switches language", async ({ page }) => {
     await login(page);
-    const passUrl = await createVisit(page, `패스${Date.now() % 100000}`);
+    const { passUrl } = await createVisit(page, `패스${Date.now() % 100000}`);
     const token = passUrl.slice(passUrl.lastIndexOf("/q/") + 3);
     await page.goto(`/q/${token}`);
     await expect(page.getByRole("img", { name: /방문증|pass/i })).toBeVisible();
@@ -61,7 +126,7 @@ test.describe("visitor lifecycle", () => {
   test("checks a visitor in from a keyboard-wedge scan", async ({ page }) => {
     await login(page);
     const visitor = `스캔${Date.now() % 100000}`;
-    const passUrl = await createVisit(page, visitor);
+    const { passUrl } = await createVisit(page, visitor);
     await page.goto("/lobby/scan");
     const field = page.getByLabel(/^QR URL 또는 Token/);
     await field.click();
@@ -79,7 +144,7 @@ test.describe("visitor lifecycle", () => {
   test("enrols a kiosk tablet and checks a visitor in without a login", async ({ page, context }) => {
     await login(page);
     const visitor = `키오스크${Date.now() % 100000}`;
-    const passUrl = await createVisit(page, visitor);
+    const { passUrl } = await createVisit(page, visitor);
     const enrolled = await page.evaluate(async () => {
       const me = await fetch("/api/v1/auth/me").then((r) => r.json());
       const reference = await fetch("/api/v1/reference-data").then((r) => r.json());

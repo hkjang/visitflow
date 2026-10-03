@@ -1996,3 +1996,74 @@ func TestExportsSayWhenTheRowLimitCutThemShort(t *testing.T) {
 		}
 	}
 }
+
+// The visit detail screen reports the resend outcome from this response alone,
+// so both halves of the contract are pinned here: the queued count a success
+// carries, and the coded conflict a visit that has left the notifiable statuses
+// answers with. The visit is booked inside the site's own day by visitToday so
+// the fixture cannot slide past midnight.
+func TestResendVisitNotificationQueuesAndRefusesACancelledVisit(t *testing.T) {
+	env := newTestEnv(t)
+	siteID := env.siteID()
+	created := env.json(http.MethodPost, "/api/v1/visits", env.visitToday(t, siteID, nil), http.StatusCreated)
+	visitID := fmt.Sprint(created["id"])
+	if created["status"] != "SCHEDULED" {
+		t.Fatalf("the default visit type did not schedule the visit: %v", created)
+	}
+
+	resent := env.json(http.MethodPost, "/api/v1/visits/"+visitID+"/notifications/resend", map[string]any{}, http.StatusOK)
+	queued, ok := resent["queued"].(float64)
+	if !ok || queued < 1 {
+		t.Fatalf("resend reported no queued notification: %v", resent)
+	}
+
+	// queued only counts the rows the delivery rules produced, so an installation
+	// whose visit_confirmed rules are all switched off gets a 200 that registered
+	// nothing. The screen must not read that as a success, which is only testable
+	// because this really happens.
+	rules := env.json(http.MethodGet, "/api/v1/admin/notification-rules", nil, http.StatusOK)
+	disabled := 0
+	for _, item := range rules["items"].([]any) {
+		rule := item.(map[string]any)
+		if fmt.Sprint(rule["event"]) != "visit_confirmed" {
+			continue
+		}
+		env.json(http.MethodPut, "/api/v1/admin/notification-rules/"+fmt.Sprint(rule["id"]), map[string]any{
+			"name": rule["name"], "event": rule["event"], "audience": rule["audience"], "channel": rule["channel"],
+			"apiConfigId": "", "offsetMinutes": rule["offsetMinutes"], "templateKey": rule["templateKey"],
+			"bodyTemplate": rule["bodyTemplate"], "subjectTemplate": rule["subjectTemplate"],
+			"locale": rule["locale"], "enabled": false,
+		}, http.StatusNoContent)
+		disabled++
+	}
+	if disabled == 0 {
+		t.Fatal("no seeded visit_confirmed rule to switch off")
+	}
+	silent := env.json(http.MethodPost, "/api/v1/visits/"+visitID+"/notifications/resend", map[string]any{}, http.StatusOK)
+	if fmt.Sprint(silent["queued"]) != "0" {
+		t.Fatalf("resend with every visit_confirmed rule off still queued: %v", silent)
+	}
+
+	env.json(http.MethodPost, "/api/v1/visits/"+visitID+"/cancel", map[string]any{}, http.StatusNoContent)
+	conflict := env.do(http.MethodPost, "/api/v1/visits/"+visitID+"/notifications/resend", map[string]any{})
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("resending for a cancelled visit returned %d: %s", conflict.Code, conflict.Body.String())
+	}
+	var refusal struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(conflict.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("refusal is not the shared error envelope: %v (%s)", err, conflict.Body.String())
+	}
+	if refusal.Error.Code != "visit_not_notifiable" {
+		t.Fatalf("refusal carried code %q: %s", refusal.Error.Code, conflict.Body.String())
+	}
+	// The screen shows this message verbatim, so an empty one would leave the
+	// operator with a silent button.
+	if refusal.Error.Message == "" {
+		t.Fatalf("refusal carried no message for the screen to show: %s", conflict.Body.String())
+	}
+}
