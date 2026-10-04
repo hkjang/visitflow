@@ -24,7 +24,8 @@ export function ApprovalsPage() {
   }, []);
   useEffect(() => { void load(); }, [load]);
   const decide = async (visit: Visit, approve: boolean) => {
-    const reason = window.prompt(approve ? "승인 메모 (선택)" : "반려 사유를 입력하세요") ?? "";
+    const reason = window.prompt(approve ? "승인 메모 (선택)" : "반려 사유를 입력하세요");
+    if (reason === null) return;
     if (!approve && !reason.trim()) return;
     setBusy(visit.id); setError("");
     try {

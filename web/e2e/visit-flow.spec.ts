@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Request } from "@playwright/test";
 
 const ADMIN = process.env.VISITFLOW_E2E_ADMIN ?? "admin";
 const PASSWORD = process.env.VISITFLOW_E2E_PASSWORD ?? "e2e-bootstrap-password";
@@ -9,6 +9,47 @@ async function login(page: Page) {
   await page.getByLabel("비밀번호").fill(PASSWORD);
   await page.getByRole("button", { name: "로그인", exact: true }).click();
   await expect(page.getByRole("heading", { name: /방문 일정/ })).toBeVisible();
+}
+
+// CONTRACTOR requires approval without changing the site's approval policy.
+// Pending visits have no pass URL, so they cannot use createVisit below.
+async function createPendingVisit(page: Page) {
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const purpose = `E2E 승인 ${suffix}`;
+  const created = await page.evaluate(async ({ purpose, phone }) => {
+    const me = await fetch("/api/v1/auth/me").then((r) => r.json());
+    const reference = await fetch("/api/v1/reference-data").then((r) => r.json());
+    const types = await fetch("/api/v1/admin/visit-types").then((r) => r.json());
+    const contractor = types.items.find((item: { code: string }) => item.code === "CONTRACTOR");
+    if (!contractor) throw new Error("CONTRACTOR visit type is missing");
+    const response = await fetch("/api/v1/visits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": me.csrfToken },
+      body: JSON.stringify({
+        siteId: reference.sites[0].id,
+        visitTypeId: contractor.id,
+        checklist: { nda: true, safetyBriefing: true },
+        startAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+        endAt: new Date(Date.now() + 120 * 60_000).toISOString(),
+        purpose,
+        visitors: [{ name: "승인 테스트 방문자", phone, company: "E2E QA", consent: true }],
+      }),
+    });
+    return { status: response.status, body: await response.json() };
+  }, { purpose, phone: `010${String(Date.now()).slice(-8)}` });
+  expect(created.status).toBe(201);
+  expect(created.body.status).toBe("PENDING_APPROVAL");
+  expect(created.body.id).toEqual(expect.any(String));
+  return { id: created.body.id as string, purpose };
+}
+
+async function readVisit(page: Page, id: string) {
+  const detail = await page.evaluate(async (visitId) => {
+    const response = await fetch(`/api/v1/visits/${visitId}`);
+    return { status: response.status, body: await response.json() };
+  }, id);
+  expect(detail.status).toBe(200);
+  return detail.body.visit;
 }
 
 // Creates one visit through the UI and returns both the visitor pass URL the
@@ -119,6 +160,87 @@ test.describe("visitor lifecycle", () => {
     await page.getByRole("combobox").click();
     await page.getByRole("option", { name: "English" }).click();
     await expect(page.getByText("Show this QR code at the lobby", { exact: false })).toBeVisible();
+  });
+
+  test("keeps a cancelled approval pending and allows an empty approval memo", async ({ page }) => {
+    await login(page);
+    const visit = await createPendingVisit(page);
+    const path = `/api/v1/visits/${visit.id}/approve`;
+    const requests: Request[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === path) requests.push(request);
+    });
+    await page.goto("/approvals");
+    const row = page.getByRole("row").filter({ hasText: visit.purpose });
+    await expect(row).toHaveCount(1);
+    page.once("dialog", (dialog) => void dialog.dismiss());
+    await row.getByRole("button", { name: "승인", exact: true }).click();
+    const detail = await readVisit(page, visit.id);
+    expect.soft(requests, "cancelling the memo must not POST an approval").toHaveLength(0);
+    expect.soft(detail.status).toBe("PENDING_APPROVAL");
+
+    // Re-enter to prove the server still offers this visit for approval.
+    await page.goto("/visits");
+    await page.goto("/approvals");
+    await expect(row).toHaveCount(1);
+    expect((await readVisit(page, visit.id)).status).toBe("PENDING_APPROVAL");
+    expect(requests).toHaveLength(0);
+    await expect(row.getByRole("button", { name: "승인", exact: true })).toBeEnabled();
+    const approved = page.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === path);
+    page.once("dialog", (dialog) => void dialog.accept(""));
+    await row.getByRole("button", { name: "승인", exact: true }).click();
+    expect((await approved).status()).toBe(204);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].postDataJSON()).toEqual({ reason: "" });
+    expect((await readVisit(page, visit.id)).status).toBe("SCHEDULED");
+    await expect(row).toHaveCount(0);
+  });
+
+  test("preserves a confirmed approval memo in the request and visit detail", async ({ page }) => {
+    await login(page);
+    const visit = await createPendingVisit(page);
+    const memo = "  작업 일정 확인 완료  ";
+    const path = `/api/v1/visits/${visit.id}/approve`;
+    await page.goto("/approvals");
+    const row = page.getByRole("row").filter({ hasText: visit.purpose });
+    await expect(row).toHaveCount(1);
+    const approved = page.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === path);
+    page.once("dialog", (dialog) => void dialog.accept(memo));
+    await row.getByRole("button", { name: "승인", exact: true }).click();
+    const response = await approved;
+    expect(response.status()).toBe(204);
+    expect(response.request().postDataJSON()).toEqual({ reason: memo });
+    expect(await readVisit(page, visit.id)).toMatchObject({ status: "SCHEDULED", approvalReason: memo });
+    await expect(row).toHaveCount(0);
+  });
+
+  test("requires a confirmed nonblank reason to reject a pending visit", async ({ page }) => {
+    await login(page);
+    const visit = await createPendingVisit(page);
+    const path = `/api/v1/visits/${visit.id}/reject`;
+    const requests: Request[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === path) requests.push(request);
+    });
+    await page.goto("/approvals");
+    const row = page.getByRole("row").filter({ hasText: visit.purpose });
+    await expect(row).toHaveCount(1);
+    for (const reason of [null, "", "   "]) {
+      page.once("dialog", (dialog) => void (reason === null ? dialog.dismiss() : dialog.accept(reason)));
+      await row.getByRole("button", { name: "반려", exact: true }).click();
+      expect((await readVisit(page, visit.id)).status).toBe("PENDING_APPROVAL");
+      expect(requests).toHaveLength(0);
+      await expect(row.getByRole("button", { name: "반려", exact: true })).toBeEnabled();
+    }
+    const reason = "작업 일정 재협의 필요";
+    const rejected = page.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === path);
+    page.once("dialog", (dialog) => void dialog.accept(reason));
+    await row.getByRole("button", { name: "반려", exact: true }).click();
+    expect((await rejected).status()).toBe(204);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].postDataJSON()).toEqual({ reason });
+    expect(await readVisit(page, visit.id)).toMatchObject({ status: "REJECTED", approvalReason: reason });
+    await expect(row).toHaveCount(0);
   });
 
   // A USB QR scanner behaves like a keyboard: it types the payload and presses
