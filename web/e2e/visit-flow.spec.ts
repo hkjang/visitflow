@@ -463,3 +463,95 @@ for (const path of ["/visits/new", "/lobby/walk-in"]) {
     }
   });
 }
+
+// The evacuation roster is printed and carried out of the building, so the paper
+// has to say how much it can be trusted. These specs block the service worker:
+// it answers /api/v1/lobby/roster from Cache Storage and would hide the very
+// failure under test (web/public/sw.js), and blocking it only inside this
+// describe leaves every other spec on the default registration.
+test.describe("emergency roster trust", () => {
+  test.use({ serviceWorkers: "block" });
+
+  test("refuses to report an unreachable roster as an empty building", async ({ page }) => {
+    await login(page);
+    await page.evaluate(() => window.localStorage.removeItem("visitflow_last_roster"));
+    await page.route("**/api/v1/lobby/roster", (route) => route.abort());
+    await page.goto("/lobby/roster");
+
+    await expect(page.getByRole("heading", { name: "비상 대피 명단 · 현재 체류 방문자" })).toBeVisible();
+    // Never a headcount, and never the sentence that means "nobody is inside".
+    await expect(page.getByText("명단 확인 불가")).toBeVisible();
+    await expect(page.getByText(/총 \d+명/)).toHaveCount(0);
+    await expect(page.getByText("현재 사내에 체류 중인 방문자가 없습니다.")).toHaveCount(0);
+    // It must not claim to be showing a roster it never received.
+    await expect(page.getByText(/마지막으로 받은 명단을 표시합니다/)).toHaveCount(0);
+
+    const warning = page.getByText(/명단을 불러오지 못해 지금 건물 안에 몇 명이 있는지 확인할 수 없습니다/);
+    await expect(warning).toBeVisible();
+    await expect(page.getByText(/체류 중인 방문자가 없다는 뜻이 아니므로/)).toBeVisible();
+    await page.emulateMedia({ media: "print" });
+    await expect(warning).toBeVisible();
+    // The paper still must not carry the on-screen controls.
+    await expect(page.getByRole("button", { name: "새로고침" })).toBeHidden();
+    await expect(page.getByRole("button", { name: "인쇄" })).toBeHidden();
+    await expect(page.getByRole("heading", { name: "비상 대피 명단", exact: true })).toBeHidden();
+  });
+
+  // The other half of the contract: with a roster in local storage a failed
+  // refresh must still print the last list, its own 기준 시각 and a warning that
+  // says exactly that — distinguishable from having no roster at all.
+  test("keeps the last roster it received when a refresh fails", async ({ page }) => {
+    await login(page);
+    await page.goto("/lobby/roster");
+    await expect(page.getByText(/총 \d+명/)).toBeVisible();
+    const chip = page.locator(".MuiChip-label").first();
+    const count = await chip.innerText();
+    const asOf = await page.getByText(/^기준 시각/).innerText();
+
+    await page.route("**/api/v1/lobby/roster", (route) => route.abort());
+    await page.reload();
+
+    await expect(page.getByText(/마지막으로 받은 명단을 표시합니다/)).toBeVisible();
+    await expect(chip).toHaveText(count);
+    await expect(page.getByText(/^기준 시각/)).toHaveText(asOf);
+    await expect(page.getByText("명단 확인 불가")).toHaveCount(0);
+  });
+
+  test("prints a live roster without any trust warning", async ({ page }) => {
+    await login(page);
+    await page.goto("/lobby/roster");
+    await expect(page.getByText(/총 \d+명/)).toBeVisible();
+    await expect(page.locator(".MuiAlert-root")).toHaveCount(0);
+    await page.emulateMedia({ media: "print" });
+    await expect(page.locator(".MuiAlert-root")).toHaveCount(0);
+  });
+});
+
+// The third source: the service worker answers from Cache Storage and marks the
+// body `offline: true` (web/public/sw.js). This spec leaves the worker on and
+// drops the real network, so the page reads the worker's own response.
+test.describe("emergency roster offline fallback", () => {
+  test("shows the service worker's cached roster as offline, not as a failure", async ({ page, context }) => {
+    await login(page);
+    await page.goto("/lobby/roster");
+    await expect(page.getByText(/총 \d+명/)).toBeVisible();
+    // The worker only caches requests it handles, which means it has to be
+    // controlling the page before the roster request that gets cached.
+    await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+    await page.reload();
+    await expect(page.getByText(/총 \d+명/)).toBeVisible();
+
+    await context.setOffline(true);
+    try {
+      await page.getByRole("button", { name: "새로고침" }).click();
+      await expect(page.getByText(/오프라인 상태입니다/)).toBeVisible();
+      // An offline roster is still a roster: the headcount stays and the screen
+      // never falls back to the "no roster at all" wording.
+      await expect(page.getByText(/총 \d+명/)).toBeVisible();
+      await expect(page.getByText("명단 확인 불가")).toHaveCount(0);
+      await expect(page.getByText(/마지막으로 받은 명단을 표시합니다/)).toHaveCount(0);
+    } finally {
+      await context.setOffline(false);
+    }
+  });
+});
