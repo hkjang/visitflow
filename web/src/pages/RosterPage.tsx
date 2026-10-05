@@ -4,12 +4,9 @@ import PrintRounded from "@mui/icons-material/PrintRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import { api } from "../api";
 import { PageHeader } from "../components/AdminUI";
+import { rosterStatus, type Roster, type RosterEntry } from "../roster";
 
-export type RosterEntry = {
-  site: string; lobby?: string; visitor: string; company?: string; phone?: string;
-  host: string; department?: string; checkedInAt?: string; badgeNo?: string; placeDetail?: string;
-};
-type Roster = { generatedAt: string; count: number; items: RosterEntry[]; offline?: boolean };
+export type { RosterEntry };
 
 const ROSTER_STORAGE_KEY = "visitflow_last_roster";
 
@@ -27,23 +24,25 @@ function readCachedRoster(): Roster | null {
 
 export function RosterPage() {
   const [roster, setRoster] = useState<Roster | null>(() => readCachedRoster());
-  const [stale, setStale] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [error, setError] = useState("");
   const load = useCallback(async () => {
     try {
       const result = await api<Roster>("/api/v1/lobby/roster");
       setRoster(result);
-      setStale(Boolean(result.offline));
+      setFailed(false);
       setError("");
       try { window.localStorage.setItem(ROSTER_STORAGE_KEY, JSON.stringify(result)); } catch { /* private mode */ }
     } catch (e) {
-      setStale(true);
+      setFailed(true);
       setError(e instanceof Error ? e.message : "명단을 불러오지 못했습니다");
     }
   }, []);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { const timer = window.setInterval(() => void load(), 60000); return () => window.clearInterval(timer); }, [load]);
 
+  // 기준 시각·칩·빈 상태 문장·경고가 모두 이 한 값을 읽는다.
+  const status = rosterStatus({ roster, failed, errorMessage: error });
   const grouped = (roster?.items ?? []).reduce<Record<string, RosterEntry[]>>((acc, item) => {
     const key = `${item.site}${item.lobby ? ` · ${item.lobby}` : ""}`;
     (acc[key] ??= []).push(item);
@@ -54,18 +53,19 @@ export function RosterPage() {
     <Box sx={{ "@media print": { display: "none" } }}>
       <PageHeader eyebrow="EMERGENCY" title="비상 대피 명단" description="현재 사내에 체류 중인 방문자를 사업장·로비별로 인쇄할 수 있습니다."
         actions={<><Button startIcon={<RefreshRounded />} onClick={() => void load()}>새로고침</Button><Button variant="contained" startIcon={<PrintRounded />} onClick={() => window.print()}>인쇄</Button></>} />
-      {error && <Alert severity="warning" sx={{ mb: 2 }}>{error} · 마지막으로 받은 명단을 표시합니다.</Alert>}
-      {stale && !error && <Alert severity="warning" sx={{ mb: 2 }}>오프라인 상태입니다. 마지막으로 동기화된 명단입니다.</Alert>}
     </Box>
+    {/* 종이가 자기 신뢰도를 말해야 하므로 이 경고는 인쇄 미디어에서도 남는다.
+        인쇄에서는 배경색이 빠질 수 있어 테두리와 검은 글자로 읽히게 한다. */}
+    {status.warning !== "" && <Alert severity={status.severity} sx={{ mb: 2, "@media print": { border: "1px solid #000", color: "#000", bgcolor: "transparent", fontWeight: 700 } }}>{status.warning}</Alert>}
     <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 } }}>
       <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "baseline" }} spacing={1} mb={2}>
         <Box>
           <Typography variant="h5">비상 대피 명단 · 현재 체류 방문자</Typography>
           <Typography variant="body2" color="text.secondary">
-            기준 시각 {roster ? new Date(roster.generatedAt).toLocaleString("ko-KR") : "-"}
+            기준 시각 {status.asOf ? new Date(status.asOf).toLocaleString("ko-KR") : status.asOfFallback}
           </Typography>
         </Box>
-        <Chip color="primary" label={`총 ${roster?.count ?? 0}명`} sx={{ fontWeight: 800 }} />
+        <Chip color={status.severity === "error" && status.warning !== "" ? "error" : "primary"} label={status.countLabel} sx={{ fontWeight: 800 }} />
       </Stack>
       {Object.entries(grouped).map(([group, entries]) => <Box key={group} sx={{ mb: 3, breakInside: "avoid" }}>
         <Typography variant="subtitle1" fontWeight={800} sx={{ mb: 1 }}>{group} · {entries.length}명</Typography>
@@ -83,7 +83,7 @@ export function RosterPage() {
           </TableRow>)}
         </TableBody></Table></TableContainer>
       </Box>)}
-      {(roster?.items.length ?? 0) === 0 && <Typography color="text.secondary" sx={{ py: 6, textAlign: "center" }}>현재 사내에 체류 중인 방문자가 없습니다.</Typography>}
+      {(roster?.items.length ?? 0) === 0 && <Typography color="text.secondary" sx={{ py: 6, textAlign: "center" }}>{status.emptyText}</Typography>}
     </Paper>
   </Box>;
 }
