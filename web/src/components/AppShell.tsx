@@ -68,6 +68,10 @@ export function AppShell() {
     setCurrentPassword(""); setNewPassword(""); setPasswordNotice("비밀번호를 변경했습니다. 다른 기기의 세션은 종료되었습니다.");
   };
   const [reference, setReference] = useState<ReferenceData | null>(null);
+  // Only a failed lookup may warn: ReferenceData.hosts is optional, so a tenant
+  // of one person legitimately has no delegate to pick.
+  const [referenceFailed, setReferenceFailed] = useState(false);
+  const choicesMessage = referenceFailed ? "선택지를 불러오지 못했습니다." : "";
   const lobby = user && ["lobby", "security", "admin", "super_admin"].includes(user.role);
   const admin = user && ["admin", "super_admin"].includes(user.role);
   const security = user?.role === "security";
@@ -106,13 +110,28 @@ export function AppShell() {
     setClearPhone(false);
     setDelegateUserId(user?.delegateUserId ?? "");
     setDelegateUntil(user?.delegateUntil ? toLocalInput(new Date(user.delegateUntil)) : "");
-    setProfileError(""); setProfileOpen(true);
-    if (!reference) setReference(await api<ReferenceData>("/api/v1/reference-data"));
+    setProfileError(""); setReferenceFailed(false); setProfileOpen(true);
+    // The mail lookup is independent of the reference data: it has to run even
+    // when the reference lookup below fails, or the whole section disappears.
     api<MailPrefs>("/api/v1/profile/notifications").then(setMailPrefs).catch(() => setMailPrefs(null));
+    // The dialog is already open, so a silent failure here would read as
+    // "there are no departments and no delegates". Say so instead; the Korean
+    // sentence leads because a network failure's own message is the browser's.
+    if (!reference) {
+      try {
+        setReference(await api<ReferenceData>("/api/v1/reference-data"));
+      } catch (e) {
+        setReferenceFailed(true);
+        setProfileError(`기준정보를 불러오지 못했습니다${e instanceof Error && e.message ? ` (${e.message})` : ""}`);
+      }
+    }
   };
   const saveMailPrefs = async (next: MailPrefs) => {
+    // Shown before the server answers, so a refused save has to put the stored
+    // value back rather than leave an unsaved switch looking saved.
+    const previous = mailPrefs;
     setMailPrefs(next);
-    try { await putJSON("/api/v1/profile/notifications", { emailEnabled: next.emailEnabled, events: next.events }); } catch (e) { setProfileError(e instanceof Error ? e.message : "메일 알림 설정을 저장하지 못했습니다"); }
+    try { await putJSON("/api/v1/profile/notifications", { emailEnabled: next.emailEnabled, events: next.events }); } catch (e) { setMailPrefs(previous); setProfileError(e instanceof Error ? e.message : "메일 알림 설정을 저장하지 못했습니다"); }
   };
   const saveProfile = async () => {
     setProfileError("");
@@ -154,9 +173,9 @@ export function AppShell() {
         <MenuItem disabled><InfoOutlined fontSize="small" sx={{ mr: 1.5 }} /><Box><Typography variant="body2">{config?.serviceName ?? "VisitFlow"} v{version?.version ?? "dev"}</Typography><Typography variant="caption" color="text.secondary">commit {version?.commit?.slice(0, 12) ?? "unknown"}</Typography></Box></MenuItem>
         <Divider /><MenuItem onClick={() => void logout()}><LogoutRounded fontSize="small" sx={{ mr: 1.5 }} />로그아웃</MenuItem>
       </Menu>
-      <Dialog open={profileOpen} onClose={() => setProfileOpen(false)} fullWidth maxWidth="sm"><DialogTitle>프로필 · 도착 알림 연락처</DialogTitle><DialogContent><Stack spacing={2} mt={1}><TextField label="표시 이름" value={profileName} onChange={(e) => setProfileName(e.target.value)} /><TextField label="휴대전화" value={profilePhone} onChange={(e) => { setProfilePhone(e.target.value); setClearPhone(false); }} placeholder={phoneMasked ? `현재 ${phoneMasked} · 변경 시 입력` : "010-0000-0000"} helperText="방문자 체크인 시 담당자 SMS 알림에 사용하며 암호화 저장됩니다. 비워 두면 기존 연락처가 유지됩니다." /><FormControlLabel control={<Checkbox checked={clearPhone} disabled={!phoneMasked} onChange={(e) => { setClearPhone(e.target.checked); if (e.target.checked) setProfilePhone(""); }} />} label="등록된 연락처 삭제" /><TextField select label="소속 부서" value={profileDepartment} onChange={(e) => setProfileDepartment(e.target.value)}><MenuItem value="">미지정</MenuItem>{reference?.departments.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
+      <Dialog open={profileOpen} onClose={() => setProfileOpen(false)} fullWidth maxWidth="sm"><DialogTitle>프로필 · 도착 알림 연락처</DialogTitle><DialogContent><Stack spacing={2} mt={1}><TextField label="표시 이름" value={profileName} onChange={(e) => setProfileName(e.target.value)} /><TextField label="휴대전화" value={profilePhone} onChange={(e) => { setProfilePhone(e.target.value); setClearPhone(false); }} placeholder={phoneMasked ? `현재 ${phoneMasked} · 변경 시 입력` : "010-0000-0000"} helperText="방문자 체크인 시 담당자 SMS 알림에 사용하며 암호화 저장됩니다. 비워 두면 기존 연락처가 유지됩니다." /><FormControlLabel control={<Checkbox checked={clearPhone} disabled={!phoneMasked} onChange={(e) => { setClearPhone(e.target.checked); if (e.target.checked) setProfilePhone(""); }} />} label="등록된 연락처 삭제" /><TextField select label="소속 부서" value={profileDepartment} onChange={(e) => setProfileDepartment(e.target.value)} error={referenceFailed} helperText={choicesMessage || undefined}><MenuItem value="">미지정</MenuItem>{reference?.departments.map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
       <Divider textAlign="left"><Typography variant="caption" color="text.secondary">부재 시 대리 담당자</Typography></Divider>
-      <TextField select label="대리 담당자" value={delegateUserId} onChange={(e) => setDelegateUserId(e.target.value)} helperText="지정 기간 동안 방문 승인과 도착 알림이 대리 담당자에게 전달됩니다."><MenuItem value="">지정 안 함</MenuItem>{(reference?.hosts ?? []).filter((x) => x.id !== user?.id).map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
+      <TextField select label="대리 담당자" value={delegateUserId} onChange={(e) => setDelegateUserId(e.target.value)} error={referenceFailed} helperText={`${choicesMessage ? `${choicesMessage} ` : ""}지정 기간 동안 방문 승인과 도착 알림이 대리 담당자에게 전달됩니다.`}><MenuItem value="">지정 안 함</MenuItem>{(reference?.hosts ?? []).filter((x) => x.id !== user?.id).map((x) => <MenuItem key={x.id} value={x.id}>{x.name}</MenuItem>)}</TextField>
       {delegateUserId && <TextField type="datetime-local" label="대리 종료 시각" value={delegateUntil} onChange={(e) => setDelegateUntil(e.target.value)} slotProps={{ inputLabel: { shrink: true } }} />}
       {mailPrefs && <><Divider textAlign="left"><Typography variant="caption" color="text.secondary">메일 알림</Typography></Divider>{!mailPrefs.smtpEnabled && <Alert severity="info" icon={false}>관리자가 SMTP를 켜면 아래 선택에 따라 메일이 발송됩니다.</Alert>}{!mailPrefs.hasEmail && <Alert severity="warning" icon={false}>계정에 이메일이 없어 메일 알림을 받을 수 없습니다. 관리자에게 이메일 등록을 요청하세요.</Alert>}<FormControlLabel control={<Switch checked={mailPrefs.emailEnabled} onChange={(e) => void saveMailPrefs({ ...mailPrefs, emailEnabled: e.target.checked })} />} label={`메일 알림 받기${mailPrefs.email && mailPrefs.email !== "***" ? ` (${mailPrefs.email})` : ""}`} /><Box sx={{ pl: 1, display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" } }}>{mailPrefs.availableEvents.filter((event) => mailPrefs.canApprove || !event.startsWith("approval_")).map((event) => <FormControlLabel key={event} disabled={!mailPrefs.emailEnabled} control={<Checkbox size="small" checked={Boolean(mailPrefs.events[event])} onChange={(e) => void saveMailPrefs({ ...mailPrefs, events: { ...mailPrefs.events, [event]: e.target.checked } })} />} label={<Typography variant="body2">{mailEventLabels[event] ?? event}</Typography>} />)}</Box></>}
       {user?.source === "local" && <><Divider textAlign="left"><Typography variant="caption" color="text.secondary">비밀번호 변경</Typography></Divider><Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}><TextField fullWidth type="password" label="현재 비밀번호" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} /><TextField fullWidth type="password" label="새 비밀번호 (12자 이상)" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} /><Button variant="outlined" disabled={!currentPassword || newPassword.length < 12} onClick={() => void changePassword()} sx={{ whiteSpace: "nowrap" }}>변경</Button></Stack>{passwordNotice && <Alert severity="success">{passwordNotice}</Alert>}</>}
