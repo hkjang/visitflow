@@ -555,3 +555,79 @@ test.describe("emergency roster offline fallback", () => {
     }
   });
 });
+
+// The profile dialog opens before its lookups answer, so a failed lookup used to
+// leave a screen that looked finished: one "미지정" department, one "지정 안 함"
+// delegate and no mail section at all. These specs pin the dialog to what the
+// server actually said.
+test.describe("profile dialog trust", () => {
+  async function openProfileDialog(page: Page) {
+    await page.getByRole("button", { name: "프로필 메뉴" }).click();
+    await page.getByRole("menuitem", { name: "프로필 · 연락처" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "프로필 · 도착 알림 연락처" })).toBeVisible();
+    return dialog;
+  }
+
+  test("says the choices failed to load instead of showing an empty department list", async ({ page }) => {
+    await login(page);
+    const crashes: string[] = [];
+    page.on("pageerror", (error) => crashes.push(error.message));
+    await page.route("**/api/v1/reference-data", (route) => route.abort());
+    const dialog = await openProfileDialog(page);
+
+    await expect(dialog.getByText(/기준정보를 불러오지 못했습니다/)).toBeVisible();
+    // Both selects have to say it: neither an empty department list nor an empty
+    // delegate list may read as "there are none".
+    await expect(dialog.getByText("선택지를 불러오지 못했습니다.")).toHaveCount(2);
+    // The mail lookup is independent and must still have run.
+    await expect(dialog.getByText("메일 알림", { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel(/^메일 알림 받기/)).toBeVisible();
+    expect(crashes, "the failed lookup must be handled, not left as an unhandled rejection").toEqual([]);
+  });
+
+  // A tenant of one person has no delegate to pick, and that is not a failure:
+  // the warning must come from the lookup failing, never from an empty array.
+  test("keeps a healthy dialog free of load warnings and saves a mail toggle", async ({ page }) => {
+    await login(page);
+    const dialog = await openProfileDialog(page);
+
+    await expect(dialog.getByText("지정 기간 동안 방문 승인과 도착 알림이 대리 담당자에게 전달됩니다.")).toBeVisible();
+    await expect(dialog.getByText("선택지를 불러오지 못했습니다.")).toHaveCount(0);
+    await expect(dialog.getByText(/기준정보를 불러오지 못했습니다/)).toHaveCount(0);
+
+    const toggle = dialog.getByLabel(/^메일 알림 받기/);
+    const before = await toggle.isChecked();
+    const saved = page.waitForResponse((r) => r.url().includes("/api/v1/profile/notifications") && r.request().method() === "PUT");
+    await toggle.click();
+    expect((await saved).status()).toBe(200);
+    await expect(toggle).toBeChecked({ checked: !before });
+    await expect(dialog.getByText("메일 알림 설정을 저장하지 못했습니다")).toHaveCount(0);
+    // Leave the account as it was found; the other specs share this admin.
+    const restored = page.waitForResponse((r) => r.url().includes("/api/v1/profile/notifications") && r.request().method() === "PUT");
+    await toggle.click();
+    expect((await restored).status()).toBe(200);
+    await expect(toggle).toBeChecked({ checked: before });
+  });
+
+  test("rolls a mail toggle back to its stored value when the save fails", async ({ page }) => {
+    await login(page);
+    // Only the save is broken: the GET has to succeed or the section never renders.
+    await page.route("**/api/v1/profile/notifications", (route) => {
+      if (route.request().method() !== "PUT") return route.continue();
+      return route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "mail_prefs_unavailable", message: "메일 알림 설정을 저장하지 못했습니다 (E2E 모의 서버 오류)" } }),
+      });
+    });
+    const dialog = await openProfileDialog(page);
+
+    const toggle = dialog.getByLabel(/^메일 알림 받기/);
+    const before = await toggle.isChecked();
+    await toggle.click();
+
+    await expect(dialog.getByText("메일 알림 설정을 저장하지 못했습니다 (E2E 모의 서버 오류)")).toBeVisible();
+    await expect(toggle).toBeChecked({ checked: before });
+  });
+});
