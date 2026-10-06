@@ -42,19 +42,27 @@ type KeyItem = {
   revokedAt?: string;
   graceUntil?: string;
 };
+// Held as null until the server answers. A guessed default would be stated as
+// fact by the info alert and would build the scope checkboxes out of ranges the
+// server may reject, so "not loaded yet" has to be unrepresentable as a policy.
+type ApiKeyPolicy = {
+  allowedScopes: string[];
+  defaultExpiryDays: number;
+  maxActiveKeys: number;
+};
 export function KeysPage() {
   const [items, setItems] = useState<KeyItem[]>([]),
     [createOpen, setCreateOpen] = useState(false),
     [editing, setEditing] = useState<string | null>(null),
     [name, setName] = useState("내 연동 키"),
     [scopes, setScopes] = useState(["read", "mcp"]),
-    [policy, setPolicy] = useState<{ allowedScopes: string[]; defaultExpiryDays: number; maxActiveKeys: number }>({ allowedScopes: ["read", "write", "mcp"], defaultExpiryDays: 90, maxActiveKeys: 10 }),
+    [policy, setPolicy] = useState<ApiKeyPolicy | null>(null),
     [revealed, setRevealed] = useState<{ key: string; message: string } | null>(
       null,
     ),
     [error, setError] = useState("");
   const load = () =>
-    Promise.all([api<{ items: KeyItem[] }>("/api/v1/api-keys"), api<typeof policy>("/api/v1/api-key-policy")])
+    Promise.all([api<{ items: KeyItem[] }>("/api/v1/api-keys"), api<ApiKeyPolicy>("/api/v1/api-key-policy")])
       .then(([keys, keyPolicy]) => { setItems(keys.items); setPolicy(keyPolicy); })
       .catch((e) => setError(e.message));
   useEffect(() => {
@@ -77,8 +85,8 @@ export function KeysPage() {
       setError(e instanceof Error ? e.message : "키를 만들지 못했습니다");
     }
   };
-  const openCreate = () => { setEditing(null); setName("내 연동 키"); setScopes(policy.allowedScopes.filter((scope) => scope === "read" || scope === "mcp")); setCreateOpen(true); };
-  const openEdit = (key: KeyItem) => { setEditing(key.id); setName(key.name); setScopes(key.scopes.filter((scope) => policy.allowedScopes.includes(scope))); setCreateOpen(true); };
+  const openCreate = () => { setEditing(null); setName("내 연동 키"); setScopes(policy ? policy.allowedScopes.filter((scope) => scope === "read" || scope === "mcp") : []); setCreateOpen(true); };
+  const openEdit = (key: KeyItem) => { setEditing(key.id); setName(key.name); setScopes(policy ? key.scopes.filter((scope) => policy.allowedScopes.includes(scope)) : []); setCreateOpen(true); };
   const rotate = async (id: string) => {
     try {
       const x = await postJSON<{ key: string; message: string }>(
@@ -93,8 +101,12 @@ export function KeysPage() {
   };
   const revoke = async (id: string) => {
     if (!confirm("이 키를 즉시 폐기할까요? 되돌릴 수 없습니다.")) return;
-    await api(`/api/v1/api-keys/${id}`, { method: "DELETE" });
-    await load();
+    try {
+      await api(`/api/v1/api-keys/${id}`, { method: "DELETE" });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "키를 폐기하지 못했습니다");
+    }
   };
   return (
     <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1100, mx: "auto" }}>
@@ -121,7 +133,10 @@ export function KeysPage() {
       )}
       <Alert severity="info" sx={{ mb: 2 }}>
         키 원문은 생성·회전 직후 한 번만 표시됩니다. 서버에는 복원할 수 없는
-        HMAC 해시만 저장됩니다. 현재 허용 Scope는 {policy.allowedScopes.join(", ")}이며 기본 만료는 {policy.defaultExpiryDays}일, 활성 키 한도는 {policy.maxActiveKeys}개입니다.
+        HMAC 해시만 저장됩니다.{" "}
+        {policy
+          ? `현재 허용 Scope는 ${policy.allowedScopes.join(", ")}이며 기본 만료는 ${policy.defaultExpiryDays}일, 활성 키 한도는 ${policy.maxActiveKeys}개입니다.`
+          : "허용 Scope와 기본 만료, 활성 키 한도는 키 정책을 불러오지 못해 표시할 수 없습니다."}
       </Alert>
       <TableContainer component={Paper}>
         <Table>
@@ -219,32 +234,39 @@ export function KeysPage() {
           <Typography variant="subtitle2" mt={2}>
             허용 범위
           </Typography>
-          <FormGroup row>
-            {policy.allowedScopes.map((scope) => (
-              <FormControlLabel
-                key={scope}
-                control={
-                  <Checkbox
-                    checked={scopes.includes(scope)}
-                    onChange={(e) =>
-                      setScopes((v) =>
-                        e.target.checked
-                          ? [...v, scope]
-                          : v.filter((x) => x !== scope),
-                      )
-                    }
-                  />
-                }
-                label={scope}
-              />
-            ))}
-          </FormGroup>
+          {policy ? (
+            <FormGroup row>
+              {policy.allowedScopes.map((scope) => (
+                <FormControlLabel
+                  key={scope}
+                  control={
+                    <Checkbox
+                      checked={scopes.includes(scope)}
+                      onChange={(e) =>
+                        setScopes((v) =>
+                          e.target.checked
+                            ? [...v, scope]
+                            : v.filter((x) => x !== scope),
+                        )
+                      }
+                    />
+                  }
+                  label={scope}
+                />
+              ))}
+            </FormGroup>
+          ) : (
+            <Typography variant="body2" color="error" mt={1}>
+              관리자가 허용한 Scope를 불러오지 못해 범위를 선택할 수 없습니다.
+              목록을 새로 불러온 뒤 다시 시도해 주세요.
+            </Typography>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCreateOpen(false)}>취소</Button>
           <Button
             variant="contained"
-            disabled={!name || !scopes.length}
+            disabled={!policy || !name || !scopes.length}
             onClick={() => void save()}
           >
             {editing ? "변경 저장" : "생성"}

@@ -631,3 +631,119 @@ test.describe("profile dialog trust", () => {
     await expect(toggle).toBeChecked({ checked: before });
   });
 });
+
+// The key screen used to answer out of a hardcoded guess. A failed policy lookup
+// left the info alert asserting "read, write, mcp / 90일 / 10개" as fact even
+// where an administrator had narrowed it, and built the create dialog's scope
+// checkboxes from the same guess so 생성 went to the server only to collect a
+// 400 invalid_scopes. A failed revoke was not caught at all. These specs pin the
+// screen to what the server actually said. The route goes in before goto because
+// KeysPage is lazy (web/src/App.tsx).
+test.describe("API key policy trust", () => {
+  const INFO = "키 원문은";
+  const POLICY_UNKNOWN = /관리자가 허용한 Scope를 불러오지 못해/;
+
+  async function createKey(page: Page, keyName: string) {
+    const created = await page.evaluate(async (name) => {
+      const me = await fetch("/api/v1/auth/me").then((r) => r.json());
+      const response = await fetch("/api/v1/api-keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": me.csrfToken },
+        body: JSON.stringify({ name, scopes: ["read"] }),
+      });
+      return { status: response.status, body: await response.json() };
+    }, keyName);
+    expect(created.status, "the spec needs one real key to revoke").toBe(201);
+  }
+
+  test("refuses to state an API key policy it never received", async ({ page }) => {
+    await login(page);
+    const crashes: string[] = [];
+    page.on("pageerror", (error) => crashes.push(error.message));
+    const creates: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/api-keys") creates.push(request.url());
+    });
+    await page.route("**/api/v1/api-key-policy", (route) => route.abort());
+    await page.goto("/profile/keys");
+    await expect(page.getByRole("heading", { name: "내 API 키" })).toBeVisible();
+
+    const info = page.getByRole("alert").filter({ hasText: INFO });
+    await expect(info).toContainText("정책을 불러오지 못해");
+    // None of the guessed numbers may be stated as fact.
+    await expect(info).not.toContainText("read, write, mcp");
+    await expect(info).not.toContainText("90일");
+    await expect(info).not.toContainText("10개");
+    // The existing error alert still carries what the network said.
+    const failure = page.getByRole("alert").filter({ hasNotText: INFO });
+    await expect(failure).toHaveCount(1);
+    await expect(failure).not.toHaveText("");
+
+    await page.getByRole("button", { name: "키 만들기" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "개인 API 키 만들기" })).toBeVisible();
+    await expect(dialog.getByText(POLICY_UNKNOWN)).toBeVisible();
+    await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "생성" })).toBeDisabled();
+    expect(creates, "생성 must not go to the server for a 400 without a policy").toEqual([]);
+    expect(crashes, "the failed lookup must be handled, not left as an unhandled rejection").toEqual([]);
+  });
+
+  // The other half of the contract: a policy that did arrive is reported exactly
+  // as the server sent it, down to the scopes offered as checkboxes.
+  test("states the API key policy the server actually sent", async ({ page }) => {
+    await login(page);
+    await page.goto("/profile/keys");
+    await expect(page.getByRole("heading", { name: "내 API 키" })).toBeVisible();
+    const policy = await page.evaluate(() =>
+      fetch("/api/v1/api-key-policy").then((r) => r.json() as Promise<{ allowedScopes: string[]; defaultExpiryDays: number; maxActiveKeys: number }>),
+    );
+    expect(policy.allowedScopes.length, "the seeded policy must allow at least one scope").toBeGreaterThan(0);
+
+    const info = page.getByRole("alert").filter({ hasText: INFO });
+    await expect(info).toContainText(`현재 허용 Scope는 ${policy.allowedScopes.join(", ")}이며`);
+    await expect(info).toContainText(`기본 만료는 ${policy.defaultExpiryDays}일`);
+    await expect(info).toContainText(`활성 키 한도는 ${policy.maxActiveKeys}개`);
+    await expect(page.getByRole("alert")).toHaveCount(1);
+
+    await page.getByRole("button", { name: "키 만들기" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText(POLICY_UNKNOWN)).toHaveCount(0);
+    await expect(dialog.getByRole("checkbox")).toHaveCount(policy.allowedScopes.length);
+    for (const scope of policy.allowedScopes) {
+      await expect(dialog.getByLabel(scope, { exact: true })).toBeVisible();
+    }
+    await expect(dialog.getByRole("button", { name: "생성" })).toBeEnabled();
+  });
+
+  test("shows what the server said when a revoke fails", async ({ page }) => {
+    await login(page);
+    const keyName = `E2E 폐기 ${Date.now()}`;
+    await createKey(page, keyName);
+    const crashes: string[] = [];
+    page.on("pageerror", (error) => crashes.push(error.message));
+    // revoke() asks for confirmation first, and Playwright dismisses dialogs by default.
+    page.on("dialog", (dialog) => void dialog.accept());
+    await page.route("**/api/v1/api-keys/*", (route) => {
+      if (route.request().method() !== "DELETE") return route.continue();
+      return route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "not_found", message: "활성 API 키가 없습니다" } }),
+      });
+    });
+    await page.goto("/profile/keys");
+    const row = page.getByRole("row").filter({ hasText: keyName });
+    await expect(row).toHaveCount(1);
+    await row.getByRole("button", { name: "폐기" }).click();
+
+    await expect(page.getByRole("alert").filter({ hasText: "활성 API 키가 없습니다" })).toBeVisible();
+    expect(crashes, "a failed revoke must be handled, not left as an unhandled rejection").toEqual([]);
+
+    // A revoke that does succeed still has to refresh the list, which is what
+    // leaves the row's own buttons disabled.
+    await page.unroute("**/api/v1/api-keys/*");
+    await row.getByRole("button", { name: "폐기" }).click();
+    await expect(row.getByRole("button", { name: "폐기" })).toBeDisabled();
+  });
+});
