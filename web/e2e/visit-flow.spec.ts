@@ -261,6 +261,100 @@ test.describe("visitor lifecycle", () => {
     await expect(page.getByText(visitor).first()).toBeVisible();
   });
 
+  test("keeps the scanner lobby load failure visible after QR verification and recovers on reload", async ({ page }) => {
+    await login(page);
+    const { passUrl } = await createVisit(page, `로비오류${Date.now() % 100000}`);
+    // Give the recovery path two real choices so a broken onChange cannot pass.
+    const suffix = String(Date.now());
+    await page.goto("/admin/resources");
+    await page.getByRole("button", { name: "추가" }).nth(1).click();
+    await expect(page.getByRole("heading", { name: "로비 추가" })).toBeVisible();
+    await page.getByLabel(/^코드/).fill(`SCAN${suffix}`);
+    await page.getByLabel(/^이름/).fill(`스캐너 복구 로비 ${suffix}`);
+    await page.getByRole("button", { name: "저장" }).click();
+    await expect(page.getByText(`스캐너 복구 로비 ${suffix}`).first()).toBeVisible();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    const referencePath = "**/api/v1/reference-data";
+    const message = "로비 목록을 불러오지 못했습니다. 페이지를 새로고침해 주세요.";
+    await page.route(referencePath, (route) => route.abort());
+    await page.goto("/lobby/scan");
+    const warning = page.getByRole("alert").filter({ hasText: message });
+    await expect(warning).toBeVisible();
+    expect(pageErrors).toEqual([]);
+
+    const field = page.getByLabel(/^QR URL 또는 Token/);
+    await field.fill(passUrl);
+    await field.press("Enter");
+    await expect(page.getByRole("heading", { name: "유효한 방문증" })).toBeVisible();
+    await expect(warning).toBeVisible();
+    const lobby = page.getByRole("combobox", { name: "처리 로비" });
+    await expect(lobby).toHaveAttribute("aria-invalid", "true");
+    await expect(lobby).toHaveAccessibleDescription(message);
+    await expect(page.getByRole("button", { name: "체크인 완료" })).toBeEnabled();
+    expect(pageErrors).toEqual([]);
+
+    await page.unroute(referencePath);
+    const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/reference-data");
+    await page.reload();
+    const response = await loaded;
+    expect(response.status()).toBe(200);
+    const reference = await response.json();
+    expect(reference.lobbies.length).toBeGreaterThan(1);
+    await field.fill(passUrl);
+    await field.press("Enter");
+    await expect(page.getByRole("heading", { name: "유효한 방문증" })).toBeVisible();
+    await expect(warning).toHaveCount(0);
+    await expect(lobby).not.toHaveAttribute("aria-invalid", "true");
+    // The admin has no site scope; the first server lobby is its first allowed lobby.
+    await expect(lobby).toHaveText(reference.lobbies[0].name);
+    const selected = reference.lobbies[reference.lobbies.length - 1];
+    await lobby.click();
+    await page.getByRole("option", { name: selected.name, exact: true }).click();
+    await expect(lobby).toHaveText(selected.name);
+    expect(pageErrors).toEqual([]);
+  });
+
+  test("does not report a scanner lobby failure while loading or for a successful empty list", async ({ page }) => {
+    await login(page);
+    const { passUrl } = await createVisit(page, `빈로비${Date.now() % 100000}`);
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    let releaseReference!: () => void;
+    const held = new Promise<void>((resolve) => { releaseReference = resolve; });
+    await page.route("**/api/v1/reference-data", async (route) => {
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      const reference = await response.json();
+      await held;
+      // Only the HTTP boundary list is empty; this is not a server tenant fixture.
+      await route.fulfill({ response, json: { ...reference, lobbies: [] } });
+    });
+    await page.goto("/lobby/scan");
+    const field = page.getByLabel(/^QR URL 또는 Token/);
+    await field.fill(passUrl);
+    await field.press("Enter");
+    await expect(page.getByRole("heading", { name: "유효한 방문증" })).toBeVisible();
+    const warning = page.getByRole("alert").filter({ hasText: "로비 목록을 불러오지 못했습니다" });
+    const lobby = page.getByRole("combobox", { name: "처리 로비" });
+    await expect(warning).toHaveCount(0);
+    await expect(lobby).not.toHaveAttribute("aria-invalid", "true");
+    const loaded = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/reference-data");
+    releaseReference();
+    const response = await loaded;
+    expect(response.status()).toBe(200);
+    expect((await response.json()).lobbies).toEqual([]);
+    await lobby.click();
+    await expect(page.getByRole("listbox")).toBeVisible();
+    await expect(page.getByRole("option")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(warning).toHaveCount(0);
+    await expect(lobby).not.toHaveAttribute("aria-invalid", "true");
+    await expect(lobby).toHaveAccessibleDescription("");
+    await expect(page.getByRole("button", { name: "체크인 완료" })).toBeEnabled();
+    expect(pageErrors).toEqual([]);
+  });
+
   // The kiosk never signs a person in, so its CSRF token must survive the app's
   // failed /auth/me probe; this drives the full enrol → scan → check-in path.
   test("enrols a kiosk tablet and checks a visitor in without a login", async ({ page, context }) => {
