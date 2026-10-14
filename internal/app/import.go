@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"mime/multipart"
@@ -123,17 +124,19 @@ var importHeaderAliases = map[string]string{
 const importHeaderScanLimit = 10
 
 // importHeaders reads one row as the header line and returns the column index
-// of every recognised field.
-func importHeaders(row []string) map[string]int {
+// of every recognised field, plus all matching columns in left-to-right order.
+func importHeaders(row []string) (map[string]int, map[string][]int) {
 	headers := map[string]int{}
+	columns := map[string][]int{}
 	for index, raw := range row {
 		key := strings.TrimPrefix(strings.TrimSpace(raw), "\ufeff")
 		key = strings.ToLower(strings.NewReplacer(" ", "", "_", "", "-", "").Replace(key))
 		if canonical := importHeaderAliases[key]; canonical != "" {
 			headers[canonical] = index
+			columns[canonical] = append(columns[canonical], index)
 		}
 	}
-	return headers
+	return headers, columns
 }
 
 // importHeaderRow finds the row that carries both required columns. Sheets
@@ -141,21 +144,22 @@ func importHeaders(row []string) map[string]int {
 // the first row is not always the header. When no row within the scan limit
 // qualifies the first row is returned so the caller reports which column is
 // missing from it.
-func importHeaderRow(rows [][]string) (int, map[string]int) {
+func importHeaderRow(rows [][]string) (int, map[string]int, map[string][]int) {
 	for index, row := range rows {
 		if index >= importHeaderScanLimit {
 			break
 		}
-		headers := importHeaders(row)
+		headers, columns := importHeaders(row)
 		if _, hasName := headers["name"]; !hasName {
 			continue
 		}
 		if _, hasPhone := headers["phone"]; !hasPhone {
 			continue
 		}
-		return index, headers
+		return index, headers, columns
 	}
-	return 0, importHeaders(rows[0])
+	headers, columns := importHeaders(rows[0])
+	return 0, headers, columns
 }
 
 // importConsent reads the consent column the way people fill it in: an English
@@ -214,7 +218,7 @@ func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 	if len(rows) < 2 {
 		return nil, nil, errors.New("헤더와 방문자 데이터가 필요합니다")
 	}
-	headerRow, headers := importHeaderRow(rows)
+	headerRow, headers, columns := importHeaderRow(rows)
 	if _, ok := headers["name"]; !ok {
 		return nil, nil, errors.New("이름(name) 열이 필요합니다")
 	}
@@ -236,6 +240,26 @@ func visitorInputsFromRows(rows [][]string) ([]VisitorInput, []string, error) {
 	}
 	visitors := make([]VisitorInput, 0, len(rows)-headerRow-1)
 	warnings := []string{}
+	// Walk the selected header from left to right, emitting each duplicate
+	// field once at its first column. Selection and warnings share the same
+	// canonical mapping; discarded title rows never contribute warnings.
+	fieldsAtFirstColumn := make(map[int]string)
+	for field, indices := range columns {
+		if len(indices) > 1 {
+			fieldsAtFirstColumn[indices[0]] = field
+		}
+	}
+	for index := range rows[headerRow] {
+		field, duplicate := fieldsAtFirstColumn[index]
+		if !duplicate {
+			continue
+		}
+		labels := []string{}
+		for _, column := range columns[field] {
+			labels = append(labels, fmt.Sprintf("%d열 %q", column+1, rows[headerRow][column]))
+		}
+		warnings = append(warnings, fmt.Sprintf("헤더 행 %d: %s 필드의 중복 열 %s 중 마지막 %s을 사용합니다", headerRow+1, field, strings.Join(labels, ", "), labels[len(labels)-1]))
+	}
 	for rowIndex, row := range rows[headerRow+1:] {
 		name, phone := cell(row, "name"), importPhone(cell(row, "phone"))
 		if name == "" && phone == "" {

@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -490,5 +491,129 @@ func TestImportScientificPhonesKeepVisitorLimit(t *testing.T) {
 	rows = append(rows, []string{"추가 방문자", "1.0123E+09", "동의"})
 	if _, _, err := visitorInputsFromRows(rows); err == nil || err.Error() != "한 번에 최대 100명의 방문자를 가져올 수 있습니다" {
 		t.Fatalf("101 visitors: %v", err)
+	}
+}
+
+// Both file decoders and the HTTP preview use the same independently specified
+// expectations, including different values on either side of a duplicate.
+type duplicateHeaderCase struct {
+	name           string
+	rows           [][]string
+	phone, company string
+	consent        bool
+	warnings       []string
+}
+
+func duplicateHeaderCases() []duplicateHeaderCase {
+	return []duplicateHeaderCase{
+		{"aliases", [][]string{{"이름", "휴대전화", "연락처", "개인정보동의"}, {"방문자", "01011112222", "01033334444", "true"}, {"방문자2", "01011112222", "01033334444", "true"}}, "01033334444", "", true,
+			[]string{"헤더 행 1: phone 필드의 중복 열 2열 \"휴대전화\", 3열 \"연락처\" 중 마지막 3열 \"연락처\"을 사용합니다"}},
+		{"optional_order", [][]string{{"이름", "회사", "동의", "휴대전화", "회사명", "개인정보동의"}, {"방문자", "왼쪽회사", "false", "01033334444", "오른쪽회사", "true"}}, "01033334444", "오른쪽회사", true,
+			[]string{"헤더 행 1: company 필드의 중복 열 2열 \"회사\", 5열 \"회사명\" 중 마지막 5열 \"회사명\"을 사용합니다", "헤더 행 1: consent 필드의 중복 열 3열 \"동의\", 6열 \"개인정보동의\" 중 마지막 6열 \"개인정보동의\"을 사용합니다"}},
+		{"triple_normalized", [][]string{{"이름", "PHONE", " phone ", "PHONE", "동의"}, {"방문자", "01011112222", "01055556666", "01033334444", "true"}}, "01033334444", "", true,
+			[]string{"헤더 행 1: phone 필드의 중복 열 2열 \"PHONE\", 3열 \" phone \", 4열 \"PHONE\" 중 마지막 4열 \"PHONE\"을 사용합니다"}},
+		{"selected_header_only", [][]string{{"회사", "회사명"}, {"명단"}, {"이름", "휴대전화", "연락처", "동의"}, {"방문자", "01011112222", "01033334444", "true"}}, "01033334444", "", true,
+			[]string{"헤더 행 3: phone 필드의 중복 열 2열 \"휴대전화\", 3열 \"연락처\" 중 마지막 3열 \"연락처\"을 사용합니다"}},
+		{"right_blank", [][]string{{"이름", "휴대전화", "연락처", "회사", "회사명", "동의", "개인정보동의"}, {"방문자", "01011112222", " ", "왼쪽회사", "", "true", ""}}, "", "", false,
+			[]string{"헤더 행 1: phone 필드의 중복 열 2열 \"휴대전화\", 3열 \"연락처\" 중 마지막 3열 \"연락처\"을 사용합니다", "헤더 행 1: company 필드의 중복 열 4열 \"회사\", 5열 \"회사명\" 중 마지막 5열 \"회사명\"을 사용합니다", "헤더 행 1: consent 필드의 중복 열 6열 \"동의\", 7열 \"개인정보동의\" 중 마지막 7열 \"개인정보동의\"을 사용합니다", "행 2: 이름 또는 휴대전화를 확인하세요", "행 2: 개인정보 동의 확인이 필요합니다"}},
+		{"control_unknown_duplicates", [][]string{{"이름", "휴대전화", "회사명", "동의", "미인식", "미인식"}, {"방문자", "01033334444", "오른쪽회사", "true", "a", "b"}}, "01033334444", "오른쪽회사", true, []string{}},
+	}
+}
+
+func duplicateHeaderFiles(t *testing.T, rows [][]string) map[string][]byte {
+	t.Helper()
+	var csvData, xlsx bytes.Buffer
+	if err := csv.NewWriter(&csvData).WriteAll(rows); err != nil {
+		t.Fatal(err)
+	}
+	book := excelize.NewFile()
+	defer book.Close()
+	for i, row := range rows {
+		for j, value := range row {
+			cell, err := excelize.CoordinatesToCellName(j+1, i+1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := book.SetCellValue(book.GetSheetName(0), cell, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := book.Write(&xlsx); err != nil {
+		t.Fatal(err)
+	}
+	return map[string][]byte{"duplicates.csv": csvData.Bytes(), "duplicates.xlsx": xlsx.Bytes()}
+}
+
+func checkDuplicateHeaderPreview(t *testing.T, tc duplicateHeaderCase, visitors []VisitorInput, warnings []string) {
+	t.Helper()
+	count := 1
+	if tc.name == "aliases" {
+		count = 2
+	}
+	if len(visitors) != count {
+		t.Fatalf("visitors = %v", visitors)
+	}
+	for _, v := range visitors {
+		if v.Phone != tc.phone || v.Company != tc.company || v.Consent != tc.consent {
+			t.Errorf("selected values = %+v; want phone=%q company=%q consent=%v", v, tc.phone, tc.company, tc.consent)
+		}
+	}
+	if !reflect.DeepEqual(warnings, tc.warnings) {
+		t.Errorf("warnings = %q; want %q", warnings, tc.warnings)
+	}
+}
+
+func TestImportDuplicateHeadersFiles(t *testing.T) {
+	for _, tc := range duplicateHeaderCases() {
+		for filename, content := range duplicateHeaderFiles(t, tc.rows) {
+			t.Run(tc.name+"/"+filename, func(t *testing.T) {
+				// A real file implements multipart.File without replacing the decoder.
+				file, err := os.CreateTemp(t.TempDir(), "import-*")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer file.Close()
+				if _, err := file.Write(content); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := file.Seek(0, 0); err != nil {
+					t.Fatal(err)
+				}
+				rows, err := readVisitorImportRows(file, &multipart.FileHeader{Filename: filename})
+				if err != nil {
+					t.Fatal(err)
+				}
+				visitors, warnings, err := visitorInputsFromRows(rows)
+				if err != nil {
+					t.Fatal(err)
+				}
+				checkDuplicateHeaderPreview(t, tc, visitors, warnings)
+			})
+		}
+	}
+}
+
+func TestVisitorImportDuplicateHeadersHTTP(t *testing.T) {
+	env := newTestEnv(t)
+	for _, tc := range duplicateHeaderCases() {
+		for filename, content := range duplicateHeaderFiles(t, tc.rows) {
+			t.Run(tc.name+"/"+filename, func(t *testing.T) {
+				visitors, warnings := importedVisitors(t, uploadImport(t, env, filename, content))
+				data, err := json.Marshal(visitors)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var inputs []VisitorInput
+				if err := json.Unmarshal(data, &inputs); err != nil {
+					t.Fatal(err)
+				}
+				texts := make([]string, len(warnings))
+				for i, warning := range warnings {
+					texts[i] = warning.(string)
+				}
+				checkDuplicateHeaderPreview(t, tc, inputs, texts)
+			})
+		}
 	}
 }
