@@ -841,3 +841,59 @@ test.describe("API key policy trust", () => {
     await expect(row.getByRole("button", { name: "폐기" })).toBeDisabled();
   });
 });
+
+// 관리 Dashboard 「운영 지표」는 조회 실패를 `setMetrics(null)` 로 삼키고 여섯 값을
+// `?? 0` 으로 렌더링했다 — 지표가 끊긴 장애가 「대기열 0건 · 잠긴 계정 0건 · 활성
+// 세션 0개」라는 건강한 시스템으로 보였다(이 화면을 보는 관리자 세션이 있으므로
+// 「활성 세션 0개」는 성립조차 않는다). 신규 설치에서는 그 값들이 정상적으로 0 이라
+// 실패는 전용 상태에서만 말해야 한다. /api/v1/admin/dashboard 는 차단하지 않는다 —
+// 그 경로는 상단 error Alert 로 따로 보고하므로 섞으면 단정이 흐려진다.
+test.describe("admin dashboard metrics trust", () => {
+  const FAILED = /운영 지표를 불러오지 못했습니다/;
+  const card = (page: Page) => page.locator(".MuiCard-root").filter({ hasText: "운영 지표" });
+
+  test("refuses to report operational metrics it never received", async ({ page }) => {
+    await login(page);
+    const crashes: string[] = [];
+    page.on("pageerror", (error) => crashes.push(error.message));
+    await page.route("**/api/v1/admin/metrics", (route) => route.abort());
+    await page.goto("/admin/dashboard");
+    await expect(page.getByRole("heading", { name: "관리 Dashboard" })).toBeVisible();
+
+    const metrics = card(page);
+    await expect(metrics.getByRole("alert").filter({ hasText: FAILED })).toBeVisible();
+    // Not one number may be stated: 0건/0개/v- all read as a healthy system.
+    for (const label of ["알림 대기열", "대기열 최장 지연", "잠긴 계정·주소", "활성 세션", "활성 API 키", "스키마 버전"]) {
+      await expect(metrics.getByText(label, { exact: true })).toHaveCount(0);
+    }
+    await expect(metrics).not.toContainText("0건");
+    await expect(metrics).not.toContainText("0개");
+    await expect(metrics).not.toContainText("v-");
+    // The dashboard counts path is untouched, so no other alert appears.
+    await expect(page.getByRole("alert")).toHaveCount(1);
+    expect(crashes, "the failed lookup must stay handled, not become an unhandled rejection").toEqual([]);
+  });
+
+  // The other half of the contract, and the reason the fix cannot key off the
+  // values themselves: a healthy response of real zeros must never read as a
+  // failure. 스키마 버전 proves the rows came from the server, not from `?? 0`.
+  test("reports the operational metrics the server actually sent, zeros included", async ({ page }) => {
+    await login(page);
+    await page.goto("/admin/dashboard");
+    await expect(page.getByRole("heading", { name: "관리 Dashboard" })).toBeVisible();
+    const served = await page.evaluate(() =>
+      fetch("/api/v1/admin/metrics").then((r) => r.json() as Promise<{ queueBacklog: number; lockedAccounts: number; activeSessions: number; activeApiKeys: number; schemaVersion: number }>),
+    );
+    expect(served.activeSessions, "the admin viewing this screen is a session").toBeGreaterThan(0);
+
+    const metrics = card(page);
+    await expect(metrics).toContainText(`${served.queueBacklog}건`);
+    await expect(metrics).toContainText(`${served.lockedAccounts}건`);
+    await expect(metrics).toContainText(`${served.activeSessions}개`);
+    await expect(metrics).toContainText(`${served.activeApiKeys}개`);
+    await expect(metrics).toContainText(`v${served.schemaVersion}`);
+    await expect(metrics.getByText("활성 세션", { exact: true })).toBeVisible();
+    await expect(metrics.getByText(FAILED)).toHaveCount(0);
+    await expect(metrics.getByText("운영 지표를 불러오는 중입니다.")).toHaveCount(0);
+  });
+});
