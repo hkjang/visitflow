@@ -897,3 +897,78 @@ test.describe("admin dashboard metrics trust", () => {
     await expect(metrics.getByText("운영 지표를 불러오는 중입니다.")).toHaveCount(0);
   });
 });
+
+// Lobby Dashboard 는 `data` 를 `{ counts: {}, items: [] }` 로 시작하고 조회 실패의
+// catch 가 닫을 수 있는 error Alert 하나만 띄웠다 — 한 번도 성공하지 못한 채
+// /api/v1/lobby/today 가 실패하면 네 카드가 「방문 예정 0 · 현재 방문중 0 · 퇴실 완료
+// 0 · 미방문 0」, 탭이 「현재 방문자 0」, 목록이 「표시할 방문자가 없습니다.」였다
+// (수정 전 번들의 실제 스냅샷). 그중 「현재 방문중」은 화면이 스스로 `재난 시 체류
+// 기준 인원` 이라고 적어 둔 값이다. 신규·한가한 사업장에서는 네 값이 정상적으로
+// 0 이므로 실패는 전용 상태에서만 말해야 한다. lobbyCounts.ts 참고.
+test.describe("lobby dashboard count trust", () => {
+  const FAILED = /로비 현황을 불러오지 못했습니다/;
+  const STALE = /최신이 아닐 수 있습니다/;
+  const COUNTS = [["방문 예정", "scheduled"], ["현재 방문중", "current"], ["퇴실 완료", "completed"], ["미방문", "noShow"]] as const;
+  // 네 카드는 MetricCard 하나씩이다. 목록 행은 Paper 이고 탭 Card 에는 이 라벨이
+  // 없으므로 라벨로 좁힌 Card 가 그 카드 하나를 정확히 가리킨다.
+  const metric = (page: Page, label: string) => page.locator(".MuiCard-root").filter({ hasText: label });
+
+  test("refuses to report lobby counts it never received", async ({ page }) => {
+    await login(page);
+    const crashes: string[] = [];
+    page.on("pageerror", (error) => crashes.push(error.message));
+    // 쿼리스트링이 붙으므로 글롭의 * 를 빠뜨리면 아무것도 가로채지 못한다.
+    await page.route("**/api/v1/lobby/today*", (route) => route.abort());
+    await page.goto("/lobby");
+    await expect(page.getByRole("heading", { name: "Lobby Dashboard" })).toBeVisible();
+
+    await expect(page.getByRole("alert").filter({ hasText: FAILED })).toBeVisible();
+    // 네 카드 자리에 숫자가 단 하나도 없어야 한다: 0 도 - 도 라벨도 남기지 않는다.
+    for (const [label] of COUNTS) await expect(metric(page, label)).toHaveCount(0);
+    await expect(page.getByText("재난 시 체류 기준 인원")).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "현재 방문자", exact: true })).toBeVisible();
+    // 빈 로비와 조회 실패가 같은 말을 하지 않는다.
+    await expect(page.getByText("표시할 방문자가 없습니다.")).toHaveCount(0);
+    // 경고는 하나다 — 행동 실패용 error Alert 과 중복 표시하지 않는다.
+    await expect(page.getByRole("alert")).toHaveCount(1);
+    expect(crashes, "the failed lookup must stay handled, not become an unhandled rejection").toEqual([]);
+
+    // 한 번 성공한 뒤의 재조회 실패는 다른 화면이다: 받아 둔 숫자는 남기되 그것이
+    // 마지막 성공 조회의 값이라는 사실을 **닫을 수 없는** 표시로 밝힌다.
+    await page.unroute("**/api/v1/lobby/today*");
+    await page.reload();
+    await expect(metric(page, "현재 방문중")).toHaveCount(1);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+
+    await page.route("**/api/v1/lobby/current*", (route) => route.abort());
+    await page.getByRole("tab", { name: /현재 방문자/ }).click();
+    const stale = page.getByRole("alert").filter({ hasText: STALE });
+    await expect(stale).toBeVisible();
+    await expect(stale.getByRole("button")).toHaveCount(0);
+    for (const [label] of COUNTS) await expect(metric(page, label)).toHaveCount(1);
+    await expect(page.getByText(FAILED)).toHaveCount(0);
+    await expect(page.getByText("표시할 방문자가 없습니다.")).toHaveCount(0);
+    expect(crashes).toEqual([]);
+  });
+
+  // 거짓 양성 가드이자, 수정이 값 자체를 근거로 삼을 수 없는 이유: 정상 200 이
+  // 담은 진짜 0 은 결코 실패로 보이면 안 된다. 이 스펙은 수정 전에도 통과해야
+  // 한다 — 선택자가 제품이 아니라 스펙 탓으로 깨지지 않았다는 확인이다.
+  test("reports the lobby counts the server actually sent, zeros included", async ({ page }) => {
+    await login(page);
+    await page.goto("/lobby");
+    await expect(page.getByRole("heading", { name: "Lobby Dashboard" })).toBeVisible();
+    const served = await page.evaluate(() =>
+      fetch("/api/v1/lobby/today?q=").then((r) => r.json() as Promise<{ counts: Record<string, number> }>),
+    );
+
+    for (const [label, key] of COUNTS) {
+      expect(served.counts[key], `the server must report ${key}`).toEqual(expect.any(Number));
+      await expect(metric(page, label).getByRole("heading", { level: 4 })).toHaveText(String(served.counts[key]));
+    }
+    await expect(page.getByRole("tab", { name: `현재 방문자 ${served.counts.current}`, exact: true })).toBeVisible();
+    await expect(page.getByText(FAILED)).toHaveCount(0);
+    await expect(page.getByText(STALE)).toHaveCount(0);
+    await expect(page.getByText("로비 현황을 불러오는 중입니다.")).toHaveCount(0);
+  });
+});
